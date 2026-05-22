@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "bt_studio"
+version = "0.1.0"
+description = ""
+authors = ["hengxin.liu <hengxin.liu@inceptio.ai>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+ray = "2.54.1"
+dtaidistance = "^2.4.0"
+optuna = "^4.8.0"
+mlops = "^0.1.0"
+stumpy = "^1.14.1"
+statsmodels = "^0.14.6"
+dotenv = "^0.9.9"
+bt-core = "^0.2.3"
+streamlit = "^1.57.0"
+bokeh = "^3.9.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+# optional: make this your default source for all installs
+priority = "primary"
+
+[[tool.poetry.source]]
+name = "devpi"
+# url = "http://192.168.2.100:3141/bt_sdk/dev/+simple/"
+url = "http://localhost:3141/bt_sdk/dev/+simple/"
+# optional: make this your default source for all installs
+priority = "supplemental"
