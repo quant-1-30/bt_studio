@@ -221,3 +221,4 @@ __marimo__/
 *.csv
 *.jsonl
 
+.DS_Store

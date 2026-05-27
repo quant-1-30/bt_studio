@@ -6,7 +6,7 @@ authors = ["hengxin.liu <hengxin.liu@inceptio.ai>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.11,<3.15"
 ray = "2.54.1"
 dtaidistance = "^2.4.0"
 optuna = "^4.8.0"
@@ -14,9 +14,13 @@ mlops = "^0.1.0"
 stumpy = "^1.14.1"
 statsmodels = "^0.14.6"
 dotenv = "^0.9.9"
-bt-core = "^0.2.3"
+bt-core = "^0.2.7"
 streamlit = "^1.57.0"
 bokeh = "^3.9.0"
+coremltools = "^9.0"
+asitop = "^0.0.24"
+prometheus-client = "^0.25.0"
+apache-airflow = "3.2.1"
 
 [build-system]
 requires = ["poetry-core"]
