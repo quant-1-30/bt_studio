@@ -222,3 +222,4 @@ __marimo__/
 *.jsonl
 
 .DS_Store
+*.pkl

@@ -1,7 +1,6 @@
 #! /usr/bin/env python3
 # -*- encondig: utf-8 -*-
 
-import ray
 import stumpy
 import numpy as np
 import polars as pl
@@ -102,91 +101,77 @@ def extract_asset_feature(hf_df: pl.DataFrame, downsample: int, m: int, amplify:
     return records
 
 
-def build_stumpy_from_chunk(chunks_ref: List[ray.ObjectRef], samples: list, config: dict, signal_type: str):
-    m = config["m"]
+def build_stumpy_from_chunk(hf_dfs: dict, config: dict, signal_type: str):
     padded =[]
-    samples_str = [s.decode("utf-8") for s in samples]
+    m = config["m"]
     nan_buffer = np.full(m, np.nan)
-    
-    for df_ref in chunks_ref:
-        df = ray.get(df_ref)
-        df_samples = df.filter(pl.col("sid").is_in(samples_str))
+
+    # samples_str = [s.decode("utf-8") for s in samples]
+    # df_samples = chunks_df.filter(pl.col("sid").is_in(samples_str))
         
-        if df_samples.height == 0:
-            continue
-            
-        hf_dfs_dict = process_to_residuals(df_samples, signal_type)
+    # if df_samples.height == 0:
+    #     continue
         
-        for sid, hf_df in hf_dfs_dict.items():
-            df_sampled = hf_df.filter(
-                pl.col("datetime").dt.hour() * 60 + pl.col("datetime").dt.minute() <= 14 * 60 + 55
-            ).with_columns(
-                intraday_cum_bps = pl.col("intraday_cum") * 1000.0
-            ).group_by_dynamic(
-                "datetime", every=f"{config['downsample']}m", closed="right", label="right"
-            ).agg(
-                cum_val = pl.col("intraday_cum_bps").last()
-            ).drop_nulls(subset=["cum_val"])
+    # hf_dfs = process_to_residuals(df_samples, signal_type)
+        
+    for sid, hf_df in hf_dfs.items():
+        df_sampled = hf_df.filter(
+            pl.col("datetime").dt.hour() * 60 + pl.col("datetime").dt.minute() <= 14 * 60 + 55
+        ).with_columns(
+            intraday_cum_bps = pl.col("intraday_cum") * 1000.0
+        ).group_by_dynamic(
+            "datetime", every=f"{config['downsample']}m", closed="right", label="right"
+        ).agg(
+            cum_val = pl.col("intraday_cum_bps").last()
+        ).drop_nulls(subset=["cum_val"])
+        
+        valid_series = df_sampled["cum_val"].to_numpy()
+        if len(valid_series) > m:
+            padded.append(valid_series)
+            padded.append(nan_buffer)
             
-            valid_series = df_sampled["cum_val"].to_numpy()
-            if len(valid_series) > m:
-                padded.append(valid_series)
-                padded.append(nan_buffer)
-                
     return np.concatenate(padded) if padded else np.array([])
 
 
-def build_panel_from_chunk(chunks_meta: list, chunks_ref: list, daily_ret_df: pl.DataFrame, config: dict, signal_type: str):
-    m = config["m"]
-    df_list =[] 
+def build_panel_from_chunk(hf_dfs: dict, daily_ret_df: pl.DataFrame, config: dict, signal_type: str):
+    # df_list =[] 
     
-    for meta, chunk_data in zip(chunks_meta, chunks_ref):
-        # ========================================================
-        # Ray auto decrf ObjectRef
-        # ========================================================
-        if isinstance(chunk_data, ray.ObjectRef):
-            chunk_df = ray.get(chunk_data)
-        else:
-            chunk_df = chunk_data
-            
-        if chunk_df.height == 0:
-            continue
+    # if chunk_df.height == 0:
+    #     return
 
-        # ========================================================
-        # 🛡️ reuse median logic
-        # ========================================================
-        hf_dfs_dict = process_to_residuals(chunk_df, signal_type)
-        # hf_dfs_dict = chunk_df.partition_by("sid", as_dict=True)
+    # ========================================================
+    # 🛡️ reuse median logic
+    # ========================================================
+    # hf_dfs = process_to_residuals(chunk_df, signal_type)
+    # hf_dfs = chunk_df.partition_by("sid", as_dict=True)
         
-        chunk_records =[]
+    # ========================================================
+    # 🛡️ extract feature
+    # ========================================================
+    chunk_records =[]
+    for sid, hf_df in hf_dfs.items():
+        records = extract_asset_feature(hf_df, config["downsample"], config["m"], amplify=1000)
         
-        # ========================================================
-        # 🛡️ extract feature
-        # ========================================================
-        for sid, hf_df in hf_dfs_dict.items():
-            records = extract_asset_feature(hf_df, config["downsample"], m, amplify=1000)
-            
-            for r in records:
-                # ========================================================
-                # 🌟 Burn-in Cut-off
-                # ========================================================
-                if meta["valid_start"] <= r["day"] <= meta["end_date"]:
-                    r["sid"] = sid
-                    chunk_records.append(r)
+        for r in records:
+            # ========================================================
+            # 🌟 Burn-in Cut-off
+            # ========================================================
+            if meta["valid_start"] <= r["day"] <= meta["end_date"]:
+                r["sid"] = sid
+                chunk_records.append(r)
         
-        del chunk_df
-        del hf_dfs_dict
+    # if chunk_records:
+    #     df_list.append(pl.DataFrame(chunk_records)) 
         
-        if chunk_records:
-            df_list.append(pl.DataFrame(chunk_records)) 
-            
-    if not df_list:
-        return pl.DataFrame()
+    # if not df_list:
+    #     return pl.DataFrame()
+    
         
     # ========================================================
     # 🛡️ Concat Chunk and Daily ret
     # ========================================================
-    snapshot_panel = pl.concat(df_list).sort(["sid", "day"])
+    # snapshot_panel = pl.concat(df_list).sort(["sid", "day"])
+    snapshot_panel = pl.DataFrame(chunk_records).sort(["sid", "day"])
     
     # panel_df = snapshot_panel.join(
     #     daily_ret_df, 

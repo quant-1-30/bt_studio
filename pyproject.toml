@@ -21,6 +21,7 @@ coremltools = "^9.0"
 asitop = "^0.0.24"
 prometheus-client = "^0.25.0"
 apache-airflow = "3.2.1"
+joblib = "^1.5.3"
 
 [build-system]
 requires = ["poetry-core"]

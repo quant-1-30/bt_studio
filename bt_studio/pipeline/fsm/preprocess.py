@@ -3,7 +3,6 @@
 # -*- encondig: utf-8 -*-
 
 import os
-import ray
 import math
 import gc
 import numpy as np
@@ -18,31 +17,11 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from scipy.stats import chi2_contingency, ks_2samp, skew, genpareto
 
-from workflow.common import *
+from bt_studio.utils.common import *
 from bt_sdk.core.protocol import QueryBody
 
 
-def generate_quarter(start_date: int, end_date: int, overlap_days: int = 15):
-    start_dt = datetime.strptime(str(start_date), "%Y%m%d")
-    end_dt = datetime.strptime(str(end_date), "%Y%m%d")
-    chunks =[]
-    curr_start = start_dt
-    
-    while curr_start <= end_dt:
-        curr_end = curr_start + relativedelta(months=3) - timedelta(days=1)
-        if curr_end > end_dt: curr_end = end_dt
-            
-        req_start = curr_start - timedelta(days=overlap_days)
-        chunks.append({
-            "req_start": int(req_start.strftime("%Y%m%d")),
-            "end_date": int(curr_end.strftime("%Y%m%d")),
-            "valid_start": int(curr_start.strftime("%Y%m%d"))
-        })
-        curr_start = curr_end + timedelta(days=1)
-    return chunks
-
-
-def prepare_universe(start_date: int, end_date: int, market: str, frac: float = 0.1):
+def prepare_universe(start_date: int, end_date: int, market: str):
     md_api = initialize_mdapi()
     
     table = md_api.get_instrument()
@@ -55,18 +34,14 @@ def prepare_universe(start_date: int, end_date: int, market: str, frac: float = 
     )
     
     filter_df = df.filter(mask)
-    num_rows = filter_df.height 
-    
-    num_samples = max(1, int(num_rows * frac))
-    random_idx = np.random.choice(num_rows, size=num_samples, replace=False)
-    sample_df = filter_df[random_idx]  
-    
-    samples = sample_df["sid"].cast(pl.Binary).to_list()
     universe = filter_df["sid"].cast(pl.Binary).to_list()
-    return md_api, universe, samples
+    return universe
 
 
-def prepare_daily(mdapi: object, universe: List[bytes], benchmark: bytes, start_date: int, end_date: int, stats_window: List[int], thres: float, loopback: int=252):
+def prepare_daily(universe: List[bytes], benchmark: bytes, start_date: int, end_date: int, stats_window: List[int], thres: float, loopback: int=252):
+    
+    md_api = initialize_mdapi()
+
     warmup_start = start_date - 20000 
     
     # 1. macro_state
@@ -131,61 +106,30 @@ def prepare_daily(mdapi: object, universe: List[bytes], benchmark: bytes, start_
     return panel_df, macro_dict
 
 
-def prepare_ray_chunks(mdapi: object, universe: list, start_date: int, end_date: int, signal_type: str, adj=1):
+def prepare_chunks(universe: list, start_date: int, end_date: int, adj:int=1):
     print(" loading minute data ...")
-    chunks = generate_quarter(start_date, end_date, overlap_days=15)
-    
-    chunk_metas =[]  
-    chunk_refs =[]   
-
-    for idx, chunk in enumerate(chunks):
-        print(f"📦 [Head Node 预加载] 正在拉取 {chunk['valid_start']}-{chunk['end_date']}...")
+    md_api = initialize_mdapi()
+    print(f"📦 [Head Node 预加载] 正在拉取 {start_date}-{end_date}...")
         
-        body = QueryBody(start_date=chunk["req_start"], end_date=chunk["end_date"], sid=universe)
-        tick_dict = mdapi.get_subscribe(body, adj)
-        if not tick_dict: 
-            continue
+    body = QueryBody(start_date=start_date, end_date=end_date, sid=universe)
+    tick_dict = mdapi.get_subscribe(body, adj)
+    if not tick_dict: 
+        return pl.DataFrame()
 
-        # ========================================================
-        # Memory Destructive Iteration)
-        # ========================================================
-        dfs =[]
-        while tick_dict:
-            sid_bytes, df = tick_dict.popitem() 
-            if df.height > 0:
-                dfs.append(df)
-                
-        del tick_dict 
-        gc.collect()
+    # ========================================================
+    # Memory Destructive Iteration)
+    # ========================================================
+    dfs =[]
+    while tick_dict:
+        sid_bytes, df = tick_dict.popitem() 
+        if df.height > 0:
+            dfs.append(df)
 
-        if not dfs:
-            continue
-
-        # ========================================================
-        # Rust rechunk=True continus memory
-        # ========================================================
-        tick_df = pl.concat(dfs, how="vertical", rechunk=True)
-        
-        del dfs
-        gc.collect()
-
-        # ========================================================
-        # put to Plasma (share memory)
-        # ========================================================
-        df_ref = ray.put(tick_df)
-        
-        del tick_df
-        gc.collect()
-
-        chunk_metas.append({
-            "req_start": chunk["req_start"],
-            "valid_start": chunk["valid_start"],
-            "end_date": chunk["end_date"],
-        })
-        chunk_refs.append(df_ref) # objectRef ptr
-        
-        print(f"✅ Chunk {idx} Memory Transfer to Plasma and Head Node gc")
-    return chunk_metas, chunk_refs
+    # ========================================================
+    # Rust rechunk=True continus memory
+    # ========================================================
+    tick_df = pl.concat(dfs, how="vertical", rechunk=True)
+    return tick_df
 
 
 def process_to_residuals(panel_df: pl.DataFrame, signal_type: str) -> dict:
