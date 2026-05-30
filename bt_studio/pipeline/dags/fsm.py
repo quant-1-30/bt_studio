@@ -5,10 +5,11 @@ import polars as pl
 from datetime import datetime
 from airflow.sdk import dag, task, task_group
 from airflow.task.trigger_rule import TriggerRule
+from airflow import DAG
 
 from bt_studio.pipeline.fsm.preprocess import *
 
-BASE_DIR = "/data/fsm"
+BASE_DIR = "/Users/hengxinliu/startup/bt_studio/result/fsm"
 MODEL_DIR = f"{BASE_DIR}/models"
 
 
@@ -49,7 +50,8 @@ def wfo_pipeline(start_year: int, end_year: int):
             "run_params": {
                 "start_date": 20050101, 
                 "end_date": 20260101, 
-                "benchmark": b"A00001", 
+                # "benchmark": b"A00001", 
+                "benchmark": "A00001", 
                 "market": "6", 
                 "num_samples": 200, 
                 "quantiles": [0.1, 0.3, 0.7, 0.9],
@@ -352,6 +354,6 @@ def wfo_pipeline(start_year: int, end_year: int):
 dag = wfo_pipeline(2006, 2026)
 
 
-if __name__ == "__main__":
-    
-    dag.test()
+# if __name__ == "__main__":
+
+#     dag.test()

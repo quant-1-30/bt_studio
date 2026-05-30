@@ -19,12 +19,13 @@ from scipy.stats import chi2_contingency, ks_2samp, skew, genpareto
 
 from bt_studio.utils.common import *
 from bt_sdk.core.protocol import QueryBody
+from bt_core import get_md_api 
 
 
 def prepare_universe(start_date: int, end_date: int, market: str):
-    md_api = initialize_mdapi()
+    mdapi = get_md_api()
     
-    table = md_api.get_instrument()
+    table = mdapi.get_instrument()
     df = pl.from_arrow(table)  # PyArrow Table → Polars DataFrame
     
     mask = (
@@ -39,13 +40,11 @@ def prepare_universe(start_date: int, end_date: int, market: str):
 
 
 def prepare_daily(universe: List[bytes], benchmark: bytes, start_date: int, end_date: int, stats_window: List[int], thres: float, loopback: int=252):
-    
-    md_api = initialize_mdapi()
-
-    warmup_start = start_date - 20000 
+    mdapi = get_md_api()
+    warmup_start = start_date - 10000 
     
     # 1. macro_state
-    bench_body = QueryBody(start_date=warmup_start, end_date=end_date, sid=[benchmark]) 
+    bench_body = QueryBody(start_date=warmup_start, end_date=end_date, sid=[benchmark.encode("utf-8")]) 
     bench_data = mdapi.get_benchmark(bench_body)
     macro_dict = compute_rolling_macro_states(bench_data[benchmark], loopback=loopback)
 
@@ -108,7 +107,7 @@ def prepare_daily(universe: List[bytes], benchmark: bytes, start_date: int, end_
 
 def prepare_chunks(universe: list, start_date: int, end_date: int, adj:int=1):
     print(" loading minute data ...")
-    md_api = initialize_mdapi()
+    mdapi = get_md_api()
     print(f"📦 [Head Node 预加载] 正在拉取 {start_date}-{end_date}...")
         
     body = QueryBody(start_date=start_date, end_date=end_date, sid=universe)
