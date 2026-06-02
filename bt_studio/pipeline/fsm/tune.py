@@ -1,5 +1,8 @@
+import math
 import numpy as np
 import polars as pl
+
+from bt_studio.pipeline.fsm.astc import *
 
 
 class BayesianOnlineFSM:
@@ -25,7 +28,7 @@ class BayesianOnlineFSM:
 
 class MotifFSMModel:
     def __init__(self, config: dict, macro_dict: dict, gpd_dict: dict, quantiles: list):
-        config["m"] = int(config["ndays"] * np.floor(240 / config["downsample"]))
+        config["m"] = int(config["ndays"] * (240 // config["downsample"]))
         config["threshold_d"] = math.sqrt(2 * config["m"] * (1 - config["threshold_r"]))
         self.config = config 
         self.dtw_window = max(1, int(config["m"] * config["dtw_window_frac"]))
@@ -127,7 +130,7 @@ class MotifFSMModel:
 
 def trainable(config: dict, hf_dfs: dict, daily_ret: pl.DataFrame, macro_dict: dict, gpd_dict: dict, run_params: dict): 
     
-    config["m"] = int(config["ndays"] * np.floor(4 * 60 / config["downsample"]))
+    config["m"] = int(config["ndays"] * (240 // config["downsample"]))
     config["threshold_d"] = math.sqrt(2 * config["m"] * (1 - config["threshold_r"]))
 
     # =========================================================
@@ -136,12 +139,12 @@ def trainable(config: dict, hf_dfs: dict, daily_ret: pl.DataFrame, macro_dict: d
     padded_arr = build_stumpy_from_chunk(hf_dfs, config, run_params["signal_type"])
     
     if len(padded_arr) < config["m"]:
-        return {"status": "failed", "reason": "降采样后数据不足", "metrics_score": -np.inf}
+        return {"status": "failed", "reason": "降采样后数据不足", "metrics_score": 0.0} # -np.inf
 
     tsc, tsc_v = get_atsc(padded_arr, config)
     
     if tsc_v is None or len(tsc_v) == 0:
-        return {"status": "failed", "reason": "未找到有效 Motif", "metrics_score": -np.inf}
+        return {"status": "failed", "reason": "未找到有效 Motif", "metrics_score": 0.0}
 
     # =========================================================
     # 🌟 stage 2 process universe panel 
@@ -150,13 +153,12 @@ def trainable(config: dict, hf_dfs: dict, daily_ret: pl.DataFrame, macro_dict: d
     panel_df = build_panel_from_chunk(hf_dfs, daily_ret, config, run_params["signal_type"])
     
     if len(panel_df) == 0:
-        return {"metrics_score": -np.inf}
+        # return {"metrics_score": -np.inf}
+        return {"metrics_score": 0.0}
     
     # =========================================================
     # 🌟 stage 3 calculate gpd
     # =========================================================
-
-    # train_panel = panel_df.filter(pl.col("day") <= train_end)
     
     model = MotifFSMModel(config, macro_dict, gpd_dict, run_params["quantiles"])
     res = model.fit(panel_df, tsc_v, run_params["stats_window"])
@@ -164,11 +166,11 @@ def trainable(config: dict, hf_dfs: dict, daily_ret: pl.DataFrame, macro_dict: d
     del padded_arr, panel_df
     gc.collect()
     
-    if res.get("status") == "success":
-        return {
-            "metrics_score": res["metrics_score"],
-            "learned_motif": res.get("learned_motif", []),
-            "fsm_prior_matrix": res.get("fsm_prior_matrix",[])
-        }
-    else:
-        return {"metrics_score": -np.inf}
+    # if res.get("status") == "success":
+    return {
+        "metrics_score": res["metrics_score"],
+        "learned_motif": res.get("learned_motif", []),
+        "fsm_prior_matrix": res.get("fsm_prior_matrix",[])
+    }
+    # else:
+    #     return {"metrics_score": -np.inf}

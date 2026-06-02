@@ -17,11 +17,12 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from scipy.stats import chi2_contingency, ks_2samp, skew, genpareto
 
-from bt_studio.utils.common import _collect_stream_sync
 from bt_sdk.core.protocol import QueryBody
 from bt_sdk.core.client.api import RpcTopic, FactorTopic
 from bt_sdk.core.factor import apply_factor
 from bt_core import external_mdapi_context
+
+from bt_studio.utils.common import _collect_stream_sync
 
 
 def downsample_universe(adj_close_dict: dict, n_layers=5) -> list:
@@ -478,3 +479,84 @@ def evaluate_objective(p_val: float, cond_mean: np.array, uncond_mean:np.array, 
         penalty_factor = math.exp(- (m - penalty_m) / 50.0) 
         raw_score = raw_score * penalty_factor
     return raw_score
+
+
+def extract_asset_feature(hf_df: pl.DataFrame, downsample: int, m: int, amplify: int = 1000) -> list:
+    """
+        14:55
+    """
+#     """
+#         1. strict with 14:55 to eliminate future
+#         2. revise daily_ret from T-1 14:55 to T 14:55
+#         3. filter suspend and price limit
+#     """
+    if hf_df.height == 0:
+        return []
+
+    # ==========================================
+    # 1. 14:55:00
+    # ==========================================
+    lf_1455 = hf_df.lazy().filter(
+        pl.col("datetime").dt.hour() * 60 + pl.col("datetime").dt.minute() <= 14 * 60 + 55
+    )
+    
+    # ==========================================
+    # 2. Downsample intrady_cum
+    # ==========================================
+    df_sampled = (
+        lf_1455.with_columns(
+            intraday_cum_bps = pl.col("intraday_cum") * amplify
+        ).group_by_dynamic(
+            "datetime", 
+            every=f"{downsample}m", 
+            closed="right",
+            label="right"
+        ).agg(
+            cum_val = pl.col("intraday_cum_bps").last(),
+            day = pl.col("day").last(),
+            last_tick_time = pl.col("datetime").last(),
+            last_price = pl.col("close").last() 
+        ).drop_nulls(subset=["cum_val"])
+        .collect()
+    )
+    
+    # ==========================================
+    # 3. Numpy Vectorize 
+    # ==========================================
+    cum_vals = df_sampled["cum_val"].to_numpy()
+    dates = df_sampled["day"].to_numpy()
+    prices = df_sampled["last_price"].to_numpy() 
+    tick_times = df_sampled["last_tick_time"].to_list()
+    
+    if len(cum_vals) < m:
+        return []
+        
+    # End of Day Indices
+    is_eod = np.concatenate([dates[:-1] != dates[1:], [True]])
+    eod_indices = np.where(is_eod)[0]
+    
+    records = []
+    for idx in eod_indices:
+        if idx - m + 1 < 0:
+            continue
+            
+        # a. 过滤停牌或下午缺量（最后一次撮合早于 14:45）
+        t_time = tick_times[idx]
+        if t_time.hour < 14 or (t_time.hour == 14 and t_time.minute < 45):
+            continue
+            
+        # b. filter suspend or limit by std 
+        tail_prices = prices[idx - 2 : idx + 1] if idx >= 2 else prices[:idx+1]
+        if np.std(tail_prices) < 1e-5: 
+            continue
+            
+        # c. m curve
+        curve_m = cum_vals[idx - m + 1 : idx + 1]
+        
+        records.append({
+            "day": dates[idx],
+            # list Polars ---> pl.List(pl.Float64)
+            "curve": curve_m.tolist() 
+        })
+        
+    return records

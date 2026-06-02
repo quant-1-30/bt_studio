@@ -1,4 +1,26 @@
 import os
+import multiprocessing
+
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass 
+
+# ==============================================================================
+# C++  OpenMP Ray CPU
+# ==============================================================================
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["POLARS_MAX_THREADS"] = "1"
+os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
+
+# gRPC spawn
+os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0' 
+# os.environ['GRPC_VERBOSITY'] = 'DEBUG'
+ 
 import joblib
 import shutil
 import polars as pl
@@ -61,12 +83,7 @@ def wfo_pipeline():
                 "loopback": 504,
                 "freq_month": 6, 
                 "stats_window": [5, 10, 20], 
-                "signal_type": "vwap",
-
-                # num_asset
-                "num_samples": 0.1,
-                # tune trials
-                "num_trials": 200 
+                "signal_type": "vwap"
             },
             "search_bounds": {
                 "downsample": [15, 20, 30, 60], 
@@ -79,6 +96,11 @@ def wfo_pipeline():
                 # metrics
                 "penalty_m": [20, 30, 40],
 
+                # tune trials
+                "num_trials": 200, 
+                # asha grace_period: 至少跑多久才开始判断 / reduction_factor: 每轮淘汰比例
+                "grace_period": 5,
+                "reduction_factor": 4
             },
         }
 
@@ -216,8 +238,17 @@ def wfo_pipeline():
                 # =================================================================
                 # Default Prior To Historical Prior 
                 # =================================================================
-                search_bounds = config["search_bounds"]
                 prev_model_path = get_latest_ckpt(year - 1)
+
+                # load Config and Ray Train
+                rp = config["run_params"]
+                search_bounds = config["search_bounds"]
+
+                macro_data = joblib.load(g_paths["macro_path"])
+                daily_ret = pl.read_parquet(g_paths["dret_path"])
+                gpd_dict = joblib.load(gpd_path)
+                # hf_dfs = joblib.load(hf_paths["train"])
+                hf_dfs = joblib.load(hf_train_path)
 
                 if prev_model_path:
                     with open(prev_model_path, "rb") as f: 
@@ -243,15 +274,12 @@ def wfo_pipeline():
                     "penalty_m": tune.choice(search_bounds["penalty_m"])
                 }
 
-                # load Ray Train
-                macro_data = joblib.load(g_paths["macro_path"])
-                daily_ret = pl.read_parquet(g_paths["dret_path"])
-                gpd_dict = joblib.load(gpd_path)
-                # hf_dfs = joblib.load(hf_paths["train"])
-                hf_dfs = joblib.load(hf_train_path)
-                
-                rp = config["run_params"]
-
+                # --- 配置 ASHA 算法 (早停) 避免score -np.inf ---
+                asha_scheduler = tune.schedulers.ASHAScheduler( 
+                    grace_period=search_bounds["grace_period"], 
+                    reduction_factor=search_bounds["reduction_factor"]  
+                )
+            
                 wrapped_trainable = tune.with_resources(
                     tune.with_parameters(
                         trainable, 
@@ -259,7 +287,7 @@ def wfo_pipeline():
                         daily_ret=daily_ret,
                         macro_dict=macro_data["macro_dict"],
                         gpd_dict=gpd_dict,
-                        config=rp
+                        run_params=rp
                     ),
                     resources={"cpu": 2, "gpu": 0} 
                 )
@@ -268,8 +296,11 @@ def wfo_pipeline():
                     wrapped_trainable,
                     param_space=search_space,   
                     tune_config=tune.TuneConfig(
+                        # metric: 优化目标, mode:最大化 
+                        metric="metrics_score",
+                        mode="max", 
                         search_alg=search_alg, 
-                        num_samples=rp["num_trials"],            
+                        num_samples=search_bounds["num_trials"],            
                         scheduler=asha_scheduler
                     ),
                     run_config=tune.RunConfig(
@@ -278,11 +309,29 @@ def wfo_pipeline():
                     ),
                 )
                 results = tuner.fit() 
-                best_trial = results.get_best_result("metrics_score", "max")
-            
-                if best_trial.metrics.get("metrics_score", -np.inf) == -np.inf:
-                    print(f"⚠️ {year-1} 年重搜失败")
-                    return "Failed"
+                # =========================================================
+                # 🌟 Ray Error -> Airflow Skip
+                # =========================================================
+                try:
+                    best_trial = results.get_best_result("metrics_score", "max")
+                    score = best_trial.metrics.get("metrics_score", -np.inf)
+                    
+                    if score <= 0.0:
+                        raise ValueError("No viable motif found (Score is 0.0)")
+                    
+                    is_strictly_significant = best_trial.metrics.get("passed_strict_alpha", False)
+                    
+                    if score <= 0.0:
+                        raise ValueError("Score is 0.0 (No viable pattern found).")
+                        
+                    # p_val <= 0.05 
+                    if not is_strictly_significant:
+                        raise ValueError("Best trial did not pass strict statistical significance (P >= 0.05).")
+
+                except Exception as e:
+                    print(f"⚠️ {year-1} 年无任何 Trial 收敛，停止当年模型生成: {e}")
+                    # SkipException! Task Skipped Not Failed
+                    raise AirflowSkipException(f"No valid params found for {year-1}")
 
                 model_checkpoint = {
                     "config": best_trial.config,
@@ -295,15 +344,14 @@ def wfo_pipeline():
                 with open(f"{MODEL_DIR}/model_{year}.pkl", "wb") as f: 
                     pickle.dump(model_checkpoint, f)
                 gc.collect()
-                return "Tuned"
 
             @task(task_id="reuse_model")
             def reuse_node():
                 """DAG PlaceHold"""
-                return "Reused"
+                print(f"✅ {year} 年模型复用，无需重新搜索")
 
             @task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
-            def oos_node(g_paths: dict, gpd_path: str, oos_path: str, config: dict, tune_node_res, reuse_node_res):
+            def oos_node(g_paths: dict, gpd_path: str, oos_path: str, config: dict):
                 # latest model
                 final_model_path = get_latest_model_path(year)
                 if not final_model_path:
@@ -335,15 +383,17 @@ def wfo_pipeline():
                     scored_df.write_parquet(f"{output_path}/scores_{year}.parquet")
                     print(f"✅ {year} 年 OOS 生成打分: {len(scored_df)} 条记录")
 
-            # --- DAG ---
+            # =========================================================
+            # DAG
+            # =========================================================
             paths = extract_hf_data(global_paths["macro_path"], exp_config)
             branch = check_decay_node(global_paths, gpd_global_path, paths["oos"])
             
             t_tune = tune_node(global_paths, gpd_global_path, paths["train"], exp_config)
             t_reuse = reuse_node()
+            t_oos = oos_node(global_paths, gpd_global_path, paths["oos"], exp_config)
             
-            branch >> [t_tune, t_reuse]
-            oos_node(global_paths, gpd_global_path, paths["oos"], exp_config, t_tune, t_reuse)
+            branch >> [t_tune, t_reuse] >> t_oos
 
         return wfo_year()
 

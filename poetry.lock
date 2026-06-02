@@ -1127,18 +1127,18 @@ reference = "tuna"
 
 [[package]]
 name = "bt-core"
-version = "0.3.2"
-description = "update bt_sdk"
+version = "0.3.3"
+description = "force bt_sdk to spawn"
 optional = false
 python-versions = ">=3.11,<3.15"
 files = [
-    {file = "bt_core-0.3.2-cp311-cp311-macosx_26_0_arm64.whl", hash = "sha256:2207edb8cfc663f1fb735ec9dc6923061385ee1b85fd1a2e14e922071131b222"},
+    {file = "bt_core-0.3.3-cp311-cp311-macosx_26_0_arm64.whl", hash = "sha256:fc3f0d4be265ac45a968349f098baba71a0f4196e6c4a2c0b069a0269b75b349"},
 ]
 
 [package.dependencies]
 asyncpg = ">=0.31.0,<0.32.0"
 bokeh = ">=3.8.1,<4.0.0"
-bt-sdk = "0.13.3"
+bt-sdk = "0.13.4"
 build = ">=1.5.0,<2.0.0"
 certifi = ">=2025.6.15,<2026.0.0"
 cloudpickle = ">=3.1.2,<4.0.0"
@@ -1185,12 +1185,12 @@ reference = "devpi"
 
 [[package]]
 name = "bt-sdk"
-version = "0.13.3"
-description = "reconfig rpc client config"
+version = "0.13.4"
+description = "force grpc use spawn"
 optional = false
 python-versions = ">=3.11,<3.15"
 files = [
-    {file = "bt_sdk-0.13.3-cp311-cp311-macosx_26_0_arm64.whl", hash = "sha256:c30c8d7111f5d7c7e850a2ebacef032bb0548897d6f2e3ea2b50126c2d6d01e1"},
+    {file = "bt_sdk-0.13.4-cp311-cp311-macosx_26_0_arm64.whl", hash = "sha256:ffb9ae18d5dc08ae7cd77023fb9697ae3e0250877f637eee694ddcb4e1803ec8"},
 ]
 
 [package.dependencies]
@@ -4946,8 +4946,8 @@ files = [
 [package.dependencies]
 numpy = [
     {version = ">=1.23.3", markers = "python_version >= \"3.11\" and python_version < \"3.12\""},
-    {version = ">=2.1.0", markers = "python_version >= \"3.13\""},
     {version = ">=1.26.0", markers = "python_version >= \"3.12\" and python_version < \"3.13\""},
+    {version = ">=2.1.0", markers = "python_version >= \"3.13\""},
 ]
 
 [package.extras]
@@ -10968,4 +10968,4 @@ reference = "tuna"
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.15"
-content-hash = "69479c1e969cf31677c391e53813def28d7668df80d97768a5992d5ba83cdaa2"
+content-hash = "72bd1b8857cf711debaa804d6d59ea4d2c67d87f38c4d6d7694763b3f2578270"
