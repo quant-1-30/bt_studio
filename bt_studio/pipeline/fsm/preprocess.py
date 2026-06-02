@@ -17,117 +17,270 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from scipy.stats import chi2_contingency, ks_2samp, skew, genpareto
 
-from bt_studio.utils.common import *
+from bt_studio.utils.common import initialize_mdapi, _collect_stream_sync
 from bt_sdk.core.protocol import QueryBody
-from bt_core import get_md_api 
+from bt_sdk.core.client.api import RpcTopic, FactorTopic
+from bt_sdk.core.factor import apply_factor
+from bt_core import external_mdapi_context
 
 
-def prepare_universe(start_date: int, end_date: int, market: str):
-    mdapi = get_md_api()
+def downsample_universe(adj_close_dict: dict, n_layers=5) -> list:
+    """
+    a. top 80% based on avg_amount
+    b. n_layer
+    c. 1/5 each layer
+    ---> 0.16
+    """
+    stats = []
+    for sid, df in adj_close_dict.items():
+        if df.height == 0:
+            continue
+
+        if "amount" in df.columns:
+            mean_to = df["amount"].mean()
+        elif "volume" in df.columns and "close" in df.columns:
+            mean_to = (df["volume"] * df["close"]).mean()
+        else:
+            mean_to = 0.0
+
+        stats.append({
+            "sid": sid, 
+            "mean_turnover": mean_to if mean_to is not None else 0.0
+        })
+
+    if not stats:
+        return []
+
+    sid_df = pl.DataFrame(stats).sort("mean_turnover", descending=True)
+
+    chunk_size = int(sid_df.height * 0.8)
+    if chunk_size == 0:
+        return []
+
+    chunk_df = sid_df.head(chunk_size)
+
+    # revise missing data 
+    segment_bounds = [int(i * chunk_size / n_layers) for i in range(n_layers+1)]
     
-    table = mdapi.get_instrument()
-    df = pl.from_arrow(table)  # PyArrow Table → Polars DataFrame
-    
-    mask = (
-        (pl.col("first_trading") < end_date * 10000) &
-        # (pl.col("delist") > start_date * 10000) &
-        pl.col("sid").str.starts_with(market)
+    samples = []
+    for i in range(5):
+        start_idx = segment_bounds[i]
+        end_idx = segment_bounds[i+1]
+        
+        segment = chunk_df[start_idx:end_idx]
+
+        if segment.height > 0:
+            sample_size = max(1, int(segment.height * 0.2))
+            
+            sampled_sids = segment["sid"].sample(n=sample_size, seed=42).to_list()
+            samples.extend(sampled_sids)
+    return samples
+
+
+def compress_snapshot(df: pl.DataFrame, hour=14, minute=55) -> pl.DataFrame:
+    """
+        Tick compress 14:55
+    """
+    if df.height == 0 or "tick" not in df.columns:
+        return df
+        
+    return (
+        df.lazy()
+        .with_columns(datetime = pl.from_epoch(pl.col("tick"), time_unit="s"))
+        .filter(pl.col("datetime").dt.hour() * 60 + pl.col("datetime").dt.minute() <= hour * 60 + minute)
+        .with_columns(day = pl.col("datetime").dt.strftime("%Y%m%d").cast(pl.Int32))
+        .group_by("day")
+        .agg(pl.all().sort_by("tick").last())
+        .drop("datetime")
+        .sort("day")
+        .collect()
     )
-    
-    filter_df = df.filter(mask)
-    universe = filter_df["sid"].cast(pl.Binary).to_list()
-    return universe
 
 
-def prepare_daily(universe: List[bytes], benchmark: bytes, start_date: int, end_date: int, stats_window: List[int], thres: float, loopback: int=252):
-    mdapi = get_md_api()
-    warmup_start = start_date - 10000 
+def compute_rolling_macro_states(bench_df: pl.DataFrame, loopback: int):
+    """
+        base on compress_snapshot
+    """
+    min_periods = int(loopback / 2)
     
-    # 1. macro_state
-    bench_body = QueryBody(start_date=warmup_start, end_date=end_date, sid=[benchmark.encode("utf-8")]) 
-    bench_data = mdapi.get_benchmark(bench_body)
-    macro_dict = compute_rolling_macro_states(bench_data[benchmark], loopback=loopback)
+    df = (
+        bench_df.lazy()
+        .sort("day")
+        .with_columns(daily_ret = pl.col("close").pct_change().fill_null(0.0))
+        .with_columns(
+            p20 = pl.col("daily_ret").rolling_quantile(quantile=0.2, window_size=loopback, min_samples=min_periods),
+            p80 = pl.col("daily_ret").rolling_quantile(quantile=0.8, window_size=loopback, min_samples=min_periods)
+        )
+        .drop_nulls(subset=["p20", "p80"])
+        .with_columns(
+            macro_state = pl.when(pl.col("daily_ret") < pl.col("p20")).then(0)  
+                          .when(pl.col("daily_ret") > pl.col("p80")).then(2)  
+                          .otherwise(1)                                            
+        )
+        .select(["day", "macro_state"])
+        .collect()
+    )
+    return dict(zip(df["day"].to_list(), df["macro_state"].to_list()))
 
-    # 2. universe close
-    close_body = QueryBody(start_date=warmup_start, end_date=end_date, sid=universe)
-    daily_dict = mdapi.get_close(close_body, 1)
+
+def prepare_macro(start_date: int, end_date: int, benchmark: str, stats_window: List[int], loopback: int, chunk_size=300):
     
-    # LazyFrame and Concat
-    lf = pl.concat([
-        v.lazy() if isinstance(v, pl.DataFrame) else pl.from_arrow(v).lazy() 
-        for _, v in daily_dict.items()
-    ])
+    with external_mdapi_context() as mdapi:
+        # =======================================================
+        # 1. Universe and PIT 
+        # =======================================================
+        inst_df = mdapi.get_instrument()
+        valid_meta = inst_df.filter(pl.col("delist") > start_date)
+        universe = valid_meta["sid"].cast(pl.Binary).to_list() 
+
+        first_trade_lazy = valid_meta.select([
+            pl.col("sid").cast(pl.Binary), 
+            pl.col("first_trading").cast(pl.Int32)
+        ]).lazy()
+
+        # =======================================================
+        # 2. Benchmark 14:55 
+        # =======================================================
+        warmup_start = start_date - 10000 
+        bench_bytes = benchmark.encode("utf-8") if isinstance(benchmark, str) else benchmark
+        bench_body = QueryBody(start_date=warmup_start, end_date=end_date, sid=[bench_bytes]) 
+        
+        # Tick 
+        bench_obs = mdapi.subscribe(bench_body, RpcTopic.Tick) 
+        bench_raw = _collect_stream_sync(bench_obs)
+        
+        # compress 14:55 
+        bench_df = compress_snapshot(bench_raw[bench_bytes])
+        macro_dict = compute_rolling_macro_states(bench_df, loopback=loopback)
+        
+        # =======================================================
+        # 3. DailyData Tick Stream Chunk and Compress
+        # =======================================================
+        adj_close_all = {}
+        
+        for i in range(0, len(universe), chunk_size):
+            sub_uni = universe[i:i + chunk_size]
+            body = QueryBody(start_date=warmup_start, end_date=end_date, sid=sub_uni)
+
+            tick_obs = mdapi.subscribe(body, RpcTopic.Tick)
+            raw_tick_dict = _collect_stream_sync(tick_obs)
+
+            # compress to 14:55 and reduce 99%  
+            snapshot_dict = {}
+            for sid_bytes, tick_df in raw_tick_dict.items():
+                snapshot_dict[sid_bytes] = compress_snapshot(tick_df)
+
+            adj_factors = mdapi.get_factor(body, FactorTopic.Qfq)
+            
+            adj_close_chunk = apply_factor(snapshot_dict, adj_factors, FactorTopic.Qfq)
+            
+            adj_close_all.update(adj_close_chunk)
+
+    if not adj_close_all:
+        return universe, macro_dict, pl.DataFrame()
+    
+    # =======================================================
+    # 4. Pre-Sampling
+    # =======================================================
+    samples = downsample_universe(adj_close_all) 
+    
+    lazy_frames = []
+    for sid in samples:
+        if sid in adj_close_all:
+            df_lazy = (
+                adj_close_all[sid]
+                .lazy()
+                .with_columns(pl.lit(sid).alias("sid"))
+            )
+            lazy_frames.append(df_lazy)
+            
+    if not lazy_frames:
+        return samples, macro_dict, pl.DataFrame()
+        
+    lf = pl.concat(lazy_frames)
+    # =======================================================
+    # 5. Polars 
+    # =======================================================
+    lf = lf.join(first_trade_lazy, on="sid", how="left")
 
     lf = (
         lf.sort(["sid", "day"])
+        .with_columns(day = pl.col("day").cast(pl.Int32))  
+        
+        # PIT --- Dynamic Filter 120天
+        .with_columns(  
+            date_day = pl.col("day").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d"),
+            date_list = pl.col("first_trading").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d")
+        )
+        .filter((pl.col("date_day") - pl.col("date_list")).dt.total_days() >= 120) 
+        .drop(["date_day", "date_list", "first_trading"]) 
+        
+        # 14:55 ret
         .with_columns(
-            day = pl.col("day").cast(pl.Int32), 
             daily_ret = pl.col("close").log().diff().fill_null(0.0).over("sid")
         )
         .with_columns(
-            daily_vol = pl.col("daily_ret").rolling_std(window_size=20) # min_samples
-                          .forward_fill() # .fill_null
-                          .over("sid")
-        ).drop_nulls(subset=["daily_vol"]) # avoid ipo between start_date and end_date
-        .with_columns(
-            daily_vol = pl.when(pl.col("daily_vol") < thres)
-                          .then(thres)
-                          .otherwise(pl.col("daily_vol"))
+            dret_std = pl.col("daily_ret").rolling_std(window_size=20).forward_fill().over("sid")
         )
+        .drop_nulls(subset=["dret_std"]) 
+        .filter(pl.col("dret_std") >= 1e-4) # std < 1e-4  stands reach limit or no liquity | noise in fsm 
         .with_columns(
-            daily_ret_z = pl.col("daily_ret") / pl.col("daily_vol")
+            daily_ret_z = pl.col("daily_ret") / pl.col("dret_std")
         )
     )
-    
-    # 4. Forward Returns
-    exprs =[
+
+    # =======================================================
+    # 6. Forward Returns 
+    # =======================================================
+    exprs = [
         pl.col("daily_ret").shift(-1).over("sid").alias("fwd_ret_1"),
         pl.col("daily_ret_z").shift(-1).over("sid").alias("fwd_ret_1_z")
     ]
     
     for fw in stats_window:
-        if fw == 1: 
-            continue 
-        expr = (
+        if fw == 1: continue 
+        exprs.append(
             pl.col("daily_ret")
             .rolling_sum(window_size=fw)
             .shift(-fw)                   
             .over("sid")
             .alias(f"fwd_ret_{fw}")
         )
-        exprs.append(expr)
         
-    lf = lf.with_columns(exprs)
-    
-    # 5. Polars C++ 
-    panel_df = lf.collect()
-    
-    return panel_df, macro_dict
+    panel_df = lf.with_columns(exprs).collect()
+    return samples, macro_dict, panel_df
 
 
 def prepare_chunks(universe: list, start_date: int, end_date: int, adj:int=1):
     print(" loading minute data ...")
-    mdapi = get_md_api()
-    print(f"📦 [Head Node 预加载] 正在拉取 {start_date}-{end_date}...")
-        
-    body = QueryBody(start_date=start_date, end_date=end_date, sid=universe)
-    tick_dict = mdapi.get_subscribe(body, adj)
-    if not tick_dict: 
-        return pl.DataFrame()
+    with external_mdapi_context() as mdapi: 
+        print(f"📦 [Head Node 预加载] 正在拉取 {start_date}-{end_date}...")
 
-    # ========================================================
-    # Memory Destructive Iteration)
-    # ========================================================
-    dfs =[]
-    while tick_dict:
-        sid_bytes, df = tick_dict.popitem() 
-        if df.height > 0:
-            dfs.append(df)
+        # tick 
+        body = QueryBody(start_date=start_date, end_date=end_date, sid=universe)
+        tick_obs = mdapi.subscribe(body, RpcTopic.Tick)
+        raw_tick = _collect_stream_sync(tick_obs)
+        # factor
+        adj_factors = mdapi.get_factor(body, FactorTopic.Qfq)
+        # apply
+        adj_tick = apply_factor(raw_tick, adj_factors, FactorTopic.Qfq)
 
-    # ========================================================
-    # Rust rechunk=True continus memory
-    # ========================================================
-    tick_df = pl.concat(dfs, how="vertical", rechunk=True)
+        if not adj_tick: 
+            return pl.DataFrame()
+
+        # ========================================================
+        # Memory Destructive Iteration)
+        # ========================================================
+        dfs =[]
+        while adj_tick:
+            sid_bytes, df = adj_tick.popitem() 
+            if df.height > 0:
+                dfs.append(df)
+
+        # ========================================================
+        # Rust rechunk=True continus memory
+        # ========================================================
+        tick_df = pl.concat(dfs, how="vertical", rechunk=True)
     return tick_df
 
 
@@ -140,7 +293,9 @@ def process_to_residuals(panel_df: pl.DataFrame, signal_type: str) -> dict:
     lf = lf.with_columns(
         datetime = pl.from_epoch(pl.col("tick"), time_unit="s")
     ).with_columns(
-        day = pl.col("datetime").dt.strftime("%Y%m%d").cast(pl.Int32)
+        day = pl.col("datetime").dt.strftime("%Y%m%d").cast(pl.Int32),
+        # ensure to downsample minute and used for aggregate
+        minute_bucket = pl.col("datetime").dt.truncate("1m")
     ).filter(
         pl.col("datetime").dt.hour() * 60 + pl.col("datetime").dt.minute() <= 14 * 60 + 55
     )
@@ -154,16 +309,16 @@ def process_to_residuals(panel_df: pl.DataFrame, signal_type: str) -> dict:
     else:
         lf = lf.with_columns(signal_price = pl.col("close"))
 
-    # median 
+    # median to extract markter beta 
     lf = lf.sort(["sid", "tick"]).with_columns(
         log_ret_raw = pl.col("signal_price").log().diff().fill_null(0.0).over("sid")
     ).with_columns(
-        median_ret = pl.col("log_ret_raw").median().over("tick")
+        # median_ret = pl.col("log_ret_raw").median().over("tick")
+        median_ret = pl.col("log_ret_raw").median().over("minute_bucket")
     ).with_columns(
         residual_ret = pl.col("log_ret_raw") - pl.col("median_ret")
     )
 
-    # 
     if signal_type == "vpt":
         lf = lf.with_columns(
             daily_mean_vol = pl.col("volume").mean().over(["sid", "day"])
@@ -178,7 +333,7 @@ def process_to_residuals(panel_df: pl.DataFrame, signal_type: str) -> dict:
     
     lf = lf.with_columns(
         intraday_cum = pl.col("residual_ret").cum_sum().over("sid")
-    ).drop(["signal_price", "median_ret"])
+    ).drop(["signal_price", "median_ret", "minute_bucket"])
 
     # ==========================================
     # trigger
@@ -193,48 +348,7 @@ def process_to_residuals(panel_df: pl.DataFrame, signal_type: str) -> dict:
     return hf_dfs
 
 
-def compute_rolling_macro_states(bench_df: pl.DataFrame, loopback: int):
-    """
-        Lazy Chain
-    """
-    min_periods = int(loopback / 2)
-    
-    df = (
-        bench_df.lazy()
-        .with_columns(
-            datetime = pl.from_epoch(pl.col("tick"), time_unit="s")
-        )
-        .filter(
-            pl.col("datetime").dt.hour() * 60 + pl.col("datetime").dt.minute() <= 14 * 60 + 55
-        )
-        .with_columns(
-            day = pl.col("datetime").dt.strftime("%Y%m%d").cast(pl.Int32)
-        )
-        .group_by("day").agg(
-            close_1455 = pl.col("close").last() 
-        )
-        .sort("day")
-        .with_columns(
-            daily_ret_1455 = pl.col("close_1455").pct_change()
-        )
-        .with_columns(
-            p20 = pl.col("daily_ret_1455").rolling_quantile(quantile=0.2, window_size=loopback, min_periods=min_periods),
-            p80 = pl.col("daily_ret_1455").rolling_quantile(quantile=0.8, window_size=loopback, min_periods=min_periods)
-        )
-        .drop_nulls()
-        .with_columns(
-            macro_state = pl.when(pl.col("daily_ret_1455") < pl.col("p20")).then(0)  
-                          .when(pl.col("daily_ret_1455") > pl.col("p80")).then(2)  
-                          .otherwise(1)                                            
-        )
-        .select(["day", "macro_state"])
-        .collect()
-    )
-    
-    return dict(zip(df["day"].to_list(), df["macro_state"].to_list()))
-
-
-def calculate_gpd(returns_series: np.array, quantiles: list): 
+def calculate_gpd(returns_series: np.ndarray, quantiles: list): 
     """
     :param returns_series: np.array daily_returns
     :param quantiles: np.array  bins
@@ -242,50 +356,64 @@ def calculate_gpd(returns_series: np.array, quantiles: list):
     returns = np.array(returns_series)
     returns = returns[np.isfinite(returns)]
     
+    if len(returns) < 50: 
+        return None, None
+        
     centers = np.zeros(len(quantiles) + 1)
+   # ==========================================================
+    # z-score replace gpd when not enough data
+    # Fallback avoid TypeError
+    # ==========================================================
+    if len(returns) < 15:
+        theoretical = np.random.randn(10000)
+        edges = np.quantile(theoretical, quantiles)
+        for i in range(1, len(edges)):
+            mask = (theoretical >= edges[i-1]) & (theoretical < edges[i])
+            centers[i] = np.mean(theoretical[mask])
 
-    edges = np.quantile(returns, quantiles) # any np.nan return nan
+        centers[0] = np.mean(theoretical[theoretical < edges[0]])
+        centers[-1] = np.mean(theoretical[theoretical > edges[-1]])
+        return edges, centers
+
+    # gpd calculation
+    edges = np.quantile(returns, quantiles) 
+    
     u_down = edges[0] 
     u_up = edges[-1]  
     
-    # ==========================================
-    # empritical
-    # ==========================================
-    centers[1] = np.mean(returns[(returns >= edges[0]) & (returns < edges[1])])
-    centers[2] = np.mean(returns[(returns >= edges[1]) & (returns < edges[2])])
-    centers[3] = np.mean(returns[(returns >= edges[2]) & (returns < edges[3])])
-    
-    # ==========================================
-    # right GPD 
-    # ==========================================
-    right_tail = returns[returns > u_up] - u_up # loc = 0
-
-    if len(right_tail) > 10:
-        # scipy genpareto
-        c_right, loc_right, scale_right = genpareto.fit(right_tail, floc=0) # evt and gpd
-        
-        # GPD E[X - u | X > u] = scale / (1 - c) 
-        if c_right < 1:
-            expected_excess_up = scale_right / (1 - c_right)
-            centers[4] = u_up + expected_excess_up
+    for i in range(1, len(edges)):
+        mask = (returns >= edges[i-1]) & (returns < edges[i])
+        if np.any(mask):
+            centers[i] = np.mean(returns[mask])
         else:
-            centers[4] = np.mean(returns[returns > u_up])
+            centers[i] = (edges[i-1] + edges[i]) / 2.0
+            
+    # ==========================================
+    # Right Tail GPD E[X | X > u] = u + scale / (1 - c)
+    # ==========================================
+    right_tail = returns[returns > u_up] - u_up 
+    if len(right_tail) > 10:
+        c_right, loc_right, scale_right = genpareto.fit(right_tail, floc=0) 
+        if c_right < 1:
+            centers[-1] = u_up + (scale_right / (1 - c_right))
+        else:
+            centers[-1] = np.mean(returns[returns > u_up])
     else:
-        centers[4] = np.mean(returns[returns > u_up])
+        centers[-1] = np.mean(returns[returns > u_up]) if len(right_tail) > 0 else u_up
         
     # ==========================================
-    # left GPD
+    # Left Tail GPD E[X | X < u] = u - scale / (1 - c)
     # ==========================================
-    left_tail = -returns[returns < u_down] - (-u_down) # min 
+    left_tail = -returns[returns < u_down] - (-u_down) 
     if len(left_tail) > 10:
         c_left, loc_left, scale_left = genpareto.fit(left_tail, floc=0)
         if c_left < 1:
-            expected_excess_down = scale_left / (1 - c_left)
-            centers[0] = - (-u_down + expected_excess_down) 
+            centers[0] = - (-u_down + (scale_left / (1 - c_left))) 
         else:
             centers[0] = np.mean(returns[returns < u_down])
     else:
-        centers[0] = np.mean(returns[returns < u_down])
+        centers[0] = np.mean(returns[returns < u_down]) if len(left_tail) > 0 else u_down
+        
     return edges, centers
 
 

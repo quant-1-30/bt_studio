@@ -50,16 +50,17 @@ def wfo_pipeline(start_year: int, end_year: int):
             "run_params": {
                 "start_date": 20050101, 
                 "end_date": 20260101, 
-                # "benchmark": b"A00001", 
-                "benchmark": "A00001", 
-                "market": "6", 
-                "num_samples": 200, 
+                "benchmark": "1A0001", 
                 "quantiles": [0.1, 0.3, 0.7, 0.9],
                 "loopback": 504,
                 "freq_month": 6, 
                 "stats_window": [5, 10, 20], 
                 "signal_type": "vwap",
-                "thres_vol": 0.015
+
+                # num_asset
+                "num_samples": 0.1,
+                # tune trials
+                "num_trials": 200 
             },
             "search_bounds": {
                 "downsample": [15, 20, 30, 60], 
@@ -70,7 +71,8 @@ def wfo_pipeline(start_year: int, end_year: int):
                 "dtw_window_frac": [0.05, 0.10, 0.15, 0.20], 
 
                 # metrics
-                "penalty_m": [20, 30, 40], 
+                "penalty_m": [20, 30, 40],
+
             },
         }
 
@@ -85,10 +87,8 @@ def wfo_pipeline(start_year: int, end_year: int):
         # out_path = "/data/fsm/global_daily.parquet"
         os.makedirs(BASE_DIR, exist_ok=True)
 
-        universe = prepare_universe(rq["start_date"], rq["end_date"], rq["market"])
-
-        global_daily_ret, global_macro_dict = prepare_daily(
-            universe, rq["benchmark"], rq["start_date"], rq["end_date"], rq["stats_window"], rq["thres_vol"])
+        universe, global_macro_dict, global_daily_ret = prepare_macro(
+            rq["start_date"], rq["end_date"], rq["benchmark"], rq["stats_window"], loopback=rq["loopback"])
     
         dret_path = f"{BASE_DIR}/global_dret.parquet"
         global_daily_ret.write_parquet(dret_path)
@@ -262,7 +262,7 @@ def wfo_pipeline(start_year: int, end_year: int):
                     param_space=search_space,   
                     tune_config=tune.TuneConfig(
                         search_alg=search_alg, 
-                        num_samples=rp["num_samples"],            
+                        num_samples=rp["num_trials"],            
                         scheduler=asha_scheduler
                     ),
                     run_config=tune.RunConfig(

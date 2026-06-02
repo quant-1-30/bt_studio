@@ -131,7 +131,7 @@ airflow dags delete example_branch_operator -y
 
 airflow dags report-import-errors
 
-poetry run airflow dags test fsm_wfo_pipeline_v3`
+poetry run airflow dags test fsm_wfo_pipeline_v3
 
 poetry run airflow dags list-import-errors
 
