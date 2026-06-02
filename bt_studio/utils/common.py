@@ -7,19 +7,8 @@ import numpy as np
 import polars as pl
 import reactivex.operators as ops
 from typing import List, Any, Dict
-from bt_core.execution.actor import AsyncRunner
-from bt_sdk.core.client import GetMdApi
 from bt_sdk.utils.util import _merge2DataFrame
-
-
-def initialize_mdapi(timeout=1000):
-    md_addr = os.getenv("MD_ADDR", "127.0.0.1:50051").split(":")
-    mdapi = GetMdApi(addr=(md_addr[0], int(md_addr[1])), timeout=timeout)
-    _runner = AsyncRunner()
-    _runner.start() # new_event_loop
-    _loop = _runner.get_loop()
-    mdapi.start(_loop)
-    return mdapi
+from bt_core._external import _cleanup_runner
 
 
 def robust_z_normalize(window_data):

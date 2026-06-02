@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from scipy.stats import chi2_contingency, ks_2samp, skew, genpareto
 
-from bt_studio.utils.common import initialize_mdapi, _collect_stream_sync
+from bt_studio.utils.common import _collect_stream_sync
 from bt_sdk.core.protocol import QueryBody
 from bt_sdk.core.client.api import RpcTopic, FactorTopic
 from bt_sdk.core.factor import apply_factor

@@ -1,6 +1,3 @@
-    # # run live
-
-
 class LiveMacroStateManager:
     def __init__(self, cache_file="/data/state/macro_history.json"):
         self.cache_file = cache_file
@@ -108,3 +105,20 @@ def live_trading_1455_task(today_date_int):
     #     state["fsm_prior"] = new_fsm_matrix
     #     save_pickle(state, "/models/last_valid_state.pkl")
     #     save_json(today_signals, "/models/yesterday_signals.json")
+
+
+# # import sys
+# # import signal
+
+# # def handle_sigint(signum, frame):
+# #     print("\n[警告] 捕获到 Ctrl+C (SIGINT)，正在安全保存数据并清理内存...")
+# #     try:
+# #         cerebro._shutdown()
+# #     except Exception as e:
+# #         print(f"清理时出错: {e}")
+# #     finally:
+# #         print("清理完成，安全退出。")
+# #         sys.exit(0)
+
+# # signal.signal(signal.SIGINT, handle_sigint)
+

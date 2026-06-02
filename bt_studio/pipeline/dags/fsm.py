@@ -3,14 +3,20 @@ import joblib
 import shutil
 import polars as pl
 from datetime import datetime
+from dotenv import load_dotenv
+from ray import tune
+from ray.tune.search.hyperopt import HyperOptSearch
 from airflow.sdk import dag, task, task_group
 from airflow.task.trigger_rule import TriggerRule
 from airflow import DAG
 
 from bt_studio.pipeline.fsm.preprocess import *
+from bt_studio.pipeline.fsm.tune import MotifFSMModel, trainable
 
 BASE_DIR = "/Users/hengxinliu/startup/bt_studio/result/fsm"
 MODEL_DIR = f"{BASE_DIR}/models"
+
+load_dotenv()
 
 
 def get_latest_ckpt(target_year: int) -> str:
@@ -37,7 +43,7 @@ def get_latest_ckpt(target_year: int) -> str:
 
 
 @dag(dag_id="fsm_wfo_pipeline_v3", start_date=datetime(2023, 1, 1), schedule=None, catchup=False)
-def wfo_pipeline(start_year: int, end_year: int):
+def wfo_pipeline():
 
     # ========================================================
     # load yaml
@@ -48,8 +54,8 @@ def wfo_pipeline(start_year: int, end_year: int):
         """
         return {
             "run_params": {
-                "start_date": 20050101, 
-                "end_date": 20260101, 
+                "start_date": 20090101, 
+                "end_date": 20151231, 
                 "benchmark": "1A0001", 
                 "quantiles": [0.1, 0.3, 0.7, 0.9],
                 "loopback": 504,
@@ -210,6 +216,7 @@ def wfo_pipeline(start_year: int, end_year: int):
                 # =================================================================
                 # Default Prior To Historical Prior 
                 # =================================================================
+                search_bounds = config["search_bounds"]
                 prev_model_path = get_latest_ckpt(year - 1)
 
                 if prev_model_path:
@@ -226,14 +233,14 @@ def wfo_pipeline(start_year: int, end_year: int):
                 # avoid Airflow XCom Crash
                 search_space = {
                     "downsample": tune.choice(search_bounds["downsample"]), 
-                    "ndays": tune.choice(search_bounds["m"]), 
+                    "ndays": tune.choice(search_bounds["ndays"]), 
 
                     # dtw / linalg_norm
-                    "threshold_r": tune.uniform(search_bounds["threshold_d"][0], search_bounds["threshold_d"][1]),
-                    "dtw_window_frac": tune.choice([0.05, 0.10, 0.15, 0.20]), 
+                    "threshold_r": tune.uniform(search_bounds["threshold_r"][0], search_bounds["threshold_r"][1]),
+                    "dtw_window_frac": tune.choice(search_bounds["dtw_window_frac"]), 
 
                     # metrics
-                    "penalty_m": tune.choice(search_bounds["penalty_m"]), 
+                    "penalty_m": tune.choice(search_bounds["penalty_m"])
                 }
 
                 # load Ray Train
@@ -247,7 +254,7 @@ def wfo_pipeline(start_year: int, end_year: int):
 
                 wrapped_trainable = tune.with_resources(
                     tune.with_parameters(
-                        fsm_trainable, 
+                        trainable, 
                         hf_dfs=hf_dfs, 
                         daily_ret=daily_ret,
                         macro_dict=macro_data["macro_dict"],
@@ -344,16 +351,17 @@ def wfo_pipeline(start_year: int, end_year: int):
     # WFO
     # ========================================================
     prev_group = None
-    for y in range(2008, 2027):
+    for y in range(2009, 2015):
         curr_group = build_wfo_year_group(y)
         if prev_group is not None:
             prev_group >> curr_group
         prev_group = curr_group
 
 
-dag = wfo_pipeline(2006, 2026)
+dag = wfo_pipeline()
 
 
 # if __name__ == "__main__":
-
 #     dag.test()
+
+# 2007 数据存在问题 
