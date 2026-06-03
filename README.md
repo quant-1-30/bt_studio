@@ -100,9 +100,6 @@ export AIRFLOW__CORE__DAGS_FOLDER=$(pwd)/bt_studio/pipeline/dags
 # 终极杀手锏：强制要求任何操作都不准加载 Example！
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
 
-# 2. 注入核心环境变量：戒断默认 DAG
-export AIRFLOW__CORE__LOAD_EXAMPLES=False
-
 # 3. 注入其他生产环境必备参数（如改端口、改时区）
 export AIRFLOW__WEBSERVER__WEB_SERVER_PORT=9000
 export AIRFLOW__CORE__DEFAULT_TIMEZONE=Asia/Shanghai
@@ -119,6 +116,8 @@ poetry run airflow db migrate
 # 5. 验证是否还有 Example DAGs
 poetry run airflow dags list
 
+poetry run airflow dags test fsm_wfo_pipeline_v3
+
 
 # 查看现有的 dag 列表，确认那些 examples 的 ID
 airflow dags list
@@ -132,8 +131,6 @@ airflow dags delete example_bash_operator -y
 airflow dags delete example_branch_operator -y
 
 airflow dags report-import-errors
-
-poetry run airflow dags test fsm_wfo_pipeline_v3
 
 poetry run airflow dags list-import-errors
 

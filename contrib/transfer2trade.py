@@ -1,3 +1,5 @@
+
+
 class LiveMacroStateManager:
     def __init__(self, cache_file="/data/state/macro_history.json"):
         self.cache_file = cache_file
@@ -121,4 +123,16 @@ def live_trading_1455_task(today_date_int):
 # #         sys.exit(0)
 
 # # signal.signal(signal.SIGINT, handle_sigint)
+
+
+# a. yesterday based on market to calculate score filter on topkn
+# b. today calculate topkn indicator or score
+# c. market closed to calculate all today score and transfer to a
+
+# key point is to save topkn tick when live trading
+# timer on specific tick 14:55
+
+# 收盘之后 数据回灌到本地 计算score
+# 实际收益率 与 回测结果定时比较  比如5天比较一次如果偏差触发报警
+
 

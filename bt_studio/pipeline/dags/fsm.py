@@ -76,8 +76,8 @@ def wfo_pipeline():
         """
         return {
             "run_params": {
-                "start_date": 20090101, 
-                "end_date": 20151231, 
+                "start_date": 20040101, 
+                "end_date": 20231231, 
                 "benchmark": "1A0001", 
                 "quantiles": [0.1, 0.3, 0.7, 0.9],
                 "loopback": 504,
@@ -401,7 +401,7 @@ def wfo_pipeline():
     # WFO
     # ========================================================
     prev_group = None
-    for y in range(2009, 2015):
+    for y in range(2004, 2023):
         curr_group = build_wfo_year_group(y)
         if prev_group is not None:
             prev_group >> curr_group
