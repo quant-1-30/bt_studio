@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'ray'
+    static_configs:
+      # host.docker.internal
+      - targets: ['host.docker.internal:8080']
+  

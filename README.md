@@ -8,168 +8,32 @@
 | Edge    | msedgedriver |
 
 
-(experiments-py3.11) hengxinliu@hengxindeMacBook-Pro tests % poetry cache list
+poetry cache list
 PyPI
 _default_cache
 devpi
 tuna
-(experiments-py3.11) hengxinliu@hengxindeMacBook-Pro tests % poetry cache clear devpi --all
+poetry cache clear devpi --all
 
 brew services start redis
 caffeinate -i -s python finetune.py
 
-
-# Dag rpc处理 + extract_Feature + ray tune ----> dag
-
-result = subprocess.run(cmd, capture_output=True, text=True)
-if result.returncode != 0:
-    raise RuntimeError(f"Script failed: {result.stderr}")
-return result.stdout
-
-@dag(
-    dag_id="fsm_wfo_pipeline_v2",
-    start_date=datetime(2023, 1, 1),
-    schedule=None,
-    catchup=False,
-    tags=["quant", "wfo"],
-    
-    # 🌟 补充 1：限制当前 DAG 同时在跑的实例数量。
-    # 防止多个人同时手动狂点触发，导致多个 WFO 任务并跑把 GPU/Ray 显存顶爆。
-    max_active_runs=1,
-    
-    # 🌟 补充 2：整个 DAG 的超时死锁控制。
-    # 比如 WFO 优化由于参数空间太大在 Ray 里卡死了，3小时内不完事系统自动强行报错，释放算力
-    dagrun_timeout=timedelta(hours=3),
-    
-    # 🌟 补充 3：默认的任务级别配置（会继承给该 DAG 下的所有 Task）
-    default_args={
-        "retries": 2,                  # 任何一个 Task 失败了，自动重试 2 次
-        "retry_delay": timedelta(seconds=60), # 重试间隔 60 秒
-        "owner": "hengxinliu"          # 负责人标签
-    }
-)
-
-<!-- schedule=None
-含义：调度策略（频次）
-
-常见配置
-
-None：不自动运行，只靠外部触发（非常适合你的量化参数调优 wfo 流水线）
-
-"@daily" 或 "0 0 * * *"：每天凌晨运行一次（适合收盘后日线级别因子挖掘）
-
-"@hourly"：每小时运行一次 -->
-
-    # num_rows = filter_df.height  
-    # num_samples = max(1, int(num_rows * frac))
-    # random_idx = np.random.choice(num_rows, size=num_samples, replace=False)
-    # sample_df = filter_df[random_idx]  
-    
-    # samples = sample_df["sid"].cast(pl.Binary).to_list()
-
-
-<!-- def generate_quarter(start_date: int, end_date: int, overlap_days: int = 15):
-    start_dt = datetime.strptime(str(start_date), "%Y%m%d")
-    end_dt = datetime.strptime(str(end_date), "%Y%m%d")
-    chunks =[]
-    curr_start = start_dt
-    
-    while curr_start <= end_dt:
-        curr_end = curr_start + relativedelta(months=3) - timedelta(days=1)
-        if curr_end > end_dt: curr_end = end_dt
-            
-        req_start = curr_start - timedelta(days=overlap_days)
-        chunks.append({
-            "req_start": int(req_start.strftime("%Y%m%d")),
-            "end_date": int(curr_end.strftime("%Y%m%d")),
-            "valid_start": int(curr_start.strftime("%Y%m%d"))
-        })
-        curr_start = curr_end + timedelta(days=1)
-    return chunks -->
-
-放弃在 Cerebro 中添加多个策略，而是创建一个**主策略 (MetaStrategy)**，将 StrategyA 和 StrategyB 降级为单纯的**信号生成器 (Signal Generators)**。由 MetaStrategy 统筹 Kelly 权重和统一下单
-
-### 第二步：使用 `multiple_outputs=True`（Airflow 最佳实践）
-当一个 Task 返回字典时，强烈建议加上 `multiple_outputs=True`。这样你就可以在函数外部直接使用字典的 `[key]` 进行传参，Airflow 会在底层自动解构并解析为**真实的字符串**。
-
-# 2. 强制指定各种环境变量（这些变量的优先级高于 cfg 文件）
-export AIRFLOW_HOME=$(pwd)/airflow_home
-export PYTHONPATH=$(pwd)
-export AIRFLOW__CORE__DAGS_FOLDER=$(pwd)/bt_studio/pipeline/dags
-
-# 终极杀手锏：强制要求任何操作都不准加载 Example！
-export AIRFLOW__CORE__LOAD_EXAMPLES=False
-
-# 3. 注入其他生产环境必备参数（如改端口、改时区）
-export AIRFLOW__WEBSERVER__WEB_SERVER_PORT=9000
-export AIRFLOW__CORE__DEFAULT_TIMEZONE=Asia/Shanghai
-
-# 3. 彻底毁灭旧的数据库（解决 "数据重置但是没生效" 的幽灵缓存）
-# 如果你是默认的 sqlite，直接删文件最彻底
-rm -f $AIRFLOW_HOME/airflow.db
-
-# 4. 用干净的配置重新初始化数据库
-poetry run airflow db migrate
-
-<!-- poetry run airflow standalone -->
-
-# 5. 验证是否还有 Example DAGs
-poetry run airflow dags list
-
-poetry run airflow dags test fsm_wfo_pipeline_v3
-
-
-# 查看现有的 dag 列表，确认那些 examples 的 ID
-airflow dags list
-
-# 强行删除某个具体的示例 DAG
-
-# 🛑 警告：这会清空所有历史 DAG 运行记录，仅限本地开发环境使用
-airflow db reset -y
-
-airflow dags delete example_bash_operator -y
-airflow dags delete example_branch_operator -y
-
-airflow dags report-import-errors
-
-poetry run airflow dags list-import-errors
-
 ps -ef | grep airflow | grep -v grep | awk '{print $2}' | xargs kill -9
 
-
-# 幂律分布
-# **极值理论 (Extreme Value Theory, EVT)：** 在对策略历史回撤进行建模时，单独把那些超过阈值的极值（Tails）切出来，用**广义帕累托分布 (GPD)** 去拟合。这能准确预测出“黑天鹅降临时，我到底会亏多少”。
-# ***小数凯利 (Fractional Kelly)：** 经典的凯利公式 $f = p - q/b$ 也是基于温和分布假设的。在幂律市场中，极端亏损会导致分母爆发。实盘中，顶级机构算出的最佳仓位后，通常只执行 **半凯利 (Half-Kelly) 甚至 1/4 凯利**，留足现金应对幂律左尾的深
-# ### 2. 工业级应用方案：稳健缩放（Robust Scaling）
-# 面对幂律特征（如成交量、极端收益率），不要用均值和标准差，改用：
-# *   **横截面排序 (Cross-sectional Ranking)：** 将 5000 只股票当天的成交量转化为 0~1 之间的百分位排名（Percentile Rank）。无论极端放量有多恐怖，最大值永远是 1.0。
-# *   **中位数绝对偏差 (MAD, Median Absolute Deviation)：** 用中位数代替均值，用 MAD 代替标准差。
-# *   **对数转换 (Log Transformation)：** 对于价格和成交量，必须先取对数 $\log(x)$，将乘性的幂律爆发转化为线性的加法，再喂给 FSM 或机器学习模型。
-
-# 在您的量化系统中，这表现为两种截然不同的子策略并行：
-
-# 1. **左侧极度保守（90% 资金）：**
-#    配置在极低风险、免疫市场黑天鹅的策略上。例如：您的**无风险套利策略**、**严格 Beta 中性的高频残差策略**。这部分提供缓慢但确定性的线性收益。
-# 2. **右侧极度激进（10% 资金）：**
-#    配置在专门捕获“幂律右尾”的高赔率策略上。例如：您之前设计的**“宏观牛市条件下的微观 VCP 形态突破贝叶斯策略”**。这部分策略平时可能经常因为小止损而流血（Bleeding），但一旦压中一个长达数月的连招主升浪，这 10% 的资金翻 10 倍，足以覆盖整个组合的风险。
-# 3. **绝对不碰中间地带：**
-#    坚决不把重仓放在那些“胜率 60%，盈亏比 1:1，但可能遭遇黑天鹅一波带走”的平庸策略上。
-
-# 转化为“鲁棒标准差” (Robust SD):** 为了让 MAD 在数值尺度上与传统的标准差兼容（方便套用 Z-Score），统计学上通常乘以一个常数 `1.4826`（在正态分布假设下的渐近缩放因子）。
-# $\sigma_{robust} = 1.4826 \times MAD$
-
-# universe / cross section # 拼接由于市场政策变化 创业板10%-20%, 因此标的nbins 适配特定时点变化
-# Volatility Clustering 
-# revision ---> 14:55 降低日内回撤风险
-### **1. 状态机匹配 (Step FSM)**；**2. 贝叶斯大脑更新 (Update Posterior)**；**3. 全概率预测 (Predict)**
-
-嵌套优化问题（Nested Optimization Problem）”**。
-
-**业界顶尖解决方案：“网格化降维 + 代理评估模型 (Surrogate-Assisted Hierarchical Search)”**
+ps -ef | grep airflow | awk '{print $2}' | xargs kill -9
 
 
-# Ray Scale
-RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=1 ray start --address='172.20.10.3:6379' / --head --object-store-memory=****
+# `multiple_outputs=True`（Airflow 最佳实践
+Task return dict `multiple_outputs=True`  `[key]` Airflow 会在底层自动解构并解析为**真实的字符串**
+
+
+# Ray Scale GCS ---> Redis
+RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=1 ray start --head --port=6379 --include-dashboard=false --metrics-export-port=8080  
+--num-cpus=8 --object-store-memory 21474836480 --memory 34359738368 
+--system-config='{"automatic_object_spilling_enabled": false, "metrics_export_port": 8080}' 
+
+配置这两个参数时，--memory + --object-memory 的总和绝对不能接近或超过物理内存的总量！ 必须至少留下 10% ~ 20% 的空闲物理内存 留给操作系统内核以及我们在前面问题中聊到的 wired（系统常驻）和 compressor 空间。否则，一旦触发操作系统的硬交换（Swap to SSD），整个 Ray 集群的吞吐量将会直接瘫痪。 
+
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 ray stop 
@@ -177,7 +41,6 @@ ray stop
 ray status
 
 127.0.0.1:8265 # dashboard
-
 
 Ray can't initialize sys standard streams due to fd restricted
 
@@ -192,12 +55,7 @@ Ray:
 
 1.  **持久化连接**：它持有的 TCP/ZMQ 连接非常昂贵，不能因为你跑了一次 `bt_core.py` 脚本结束了，连接就断开。下次跑还得重新连。
 2.  **共享复用**：你可能同时起 5 个不同的回测脚本（Driver），它们都要连接同一个 `StoreAgent`。如果是默认模式，谁创建谁负责销毁，很难共享。
-3.  **服务发现**：因为它是 Detached 且有名字（Name），任何后来的脚本只要知道名字 `StoreAgent_NodeID`，就能通过 `ray.get_actor()` 连上它，而不需要重新创建
-
-1.  `self.chan.put`  Actor 无法访问你本地进程的 Queue
-
-*   **原则** **Rx 流操作 (pipe/subscribe)**、**复杂中间态处理** 的逻辑，都应该 **留在 Actor 内部**
-*   **接口** Actor 对外只暴露 **“请求 -> 响应”** 的粗粒度接口
+3.  **服务发现**：因为它是 Detached 且有名字（Name），任何后来的脚本只要知道名字 `StoreAgent_NodeID`，就能通过 `ray.get_actor()` 
 
 # .  **内存极度受限**：你设置了 `object_store_memory=2GB`。
 # 2.  **并发压力**：4 个 Agent 同时在跑，每个都在疯狂往里 `ray.put` 数据（PyArrow Tables）。
@@ -205,11 +63,8 @@ Ray:
 
 ValueError: The configured object store size (25.0GiB) exceeds the optimal size on Mac (2.0GiB). This will harm performance! There is a known issue where Ray's performance degrades with object store size greater than 2.0GB on a Mac.To reduce the object store capacity, specify`object_store_memory` when calling ray.init() or ray start.To ignore this warning, set RAY_ENABLE_MAC_LARGE_OBJECT_STORE=1.
 
-
 # Parallel(n_jobs=pool_size)(delayed(rpc)(meta) for meta in batches) # Parallel(n_jobs=2, return_as="generator")
 # export RAY_record_ref_creation_sites=1
-
-ray start --head --object-store-memory 21474836480 --metrics-export-port=8080 # 20G 
 
 ray service struck reason:
 1\  allocate memory and cpus
@@ -219,10 +74,7 @@ ray service struck reason:
 export RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE=0 # avoid swap to ssd
 
 
-ray start --head --num-cpus 12 --memory 34359738368 
-
 ✅ ray.put + yield ObjectRef:  The object has already been deleted by the reference counting protocol. This should not happen.
-
 
 CPU 使用率从 20% 提升到 30% 说明之前的优化（如 Async StoreAgent）生效了，消除了死锁和部分阻塞，但**系统的并发度（Concurrency）依然不足以填满 CPU**。
 
@@ -231,23 +83,6 @@ CPU 使用率从 20% 提升到 30% 说明之前的优化（如 Async StoreAgent�
 要将 CPU 压榨到 80%-90% 以上，你需要实施 **“超额订阅（Oversubscription）”** 和 **“去中心化（Sharding）”**
 
 StoreAgent 占用的 CPU 100% 计入 ray start / ray.init() 启动的 Ray 节点资源池里，它不会是“额外”的系统进程资源
-
-# pytest 
-
-| scope    | 作用范围             |
-| -------- | ---------------- |
-| function | 每个 test 一次（默认）   |
-| class    | 每个类一次            |
-| module   | 每个文件一次           |
-| session  | 整个 pytest 进程一次 ⭐ |
-
-
-asyncio.get_running_loop()` 的行为**：
-    *   这个函数只有在 **协程内部** 或者已经通过 `asyncio.run()` 启动的上下文中才能调用 
-
-grpc-aio 与 uvloop 冲突
-import asyncio
-asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
 
 ## 1. 为什么不能直接用 `get_running_loop`？（死锁陷阱）
@@ -277,55 +112,12 @@ loop.create_task() 返回的 asyncio.Task 需用 await 等待，而 run_coroutin
 
 proxy for batchwriter
 
-
 Ray Tune 默认会在控制台（CLI）输出参数表。如果你通过 with_parameters 传入了 data_ref 或 actor，控制台可能会显示类似 ObjectRef(xxx) 或 Actor 的字符串表示
-
-*避坑指南：**
-永远不要用以下名字命名你的 Python 脚本：
-*   `signal.py`
-*   `socket.py`
-*   `select.py`
-*   `threading.py`
-*   `queue.py`
-*   `io.py`
-*   `code.py`
-*   `email.py`
-*   `random.py`
-
-# ta-lib replace indicator logic
 
 
 export RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=1
-ray start --head --include-dashboard=false --system-config='{"automatic_object_spilling_enabled": false, "metrics_export_port": 8080}' 
+
 ray summary actors
-
-
-# 按照以上思路结合实际工程落地:  以单个A市场为例（比如创业板）  
-# 1\  基于A市场抽取5%标的，2010-2020作为训练数据（chain + FSM, 2020-2026作为验证（通过ray tune 寻找最优参数）
-# 2、根据1中的最优chain 和 fsm ， 离线计算每个标每天14:55 是否到达fsm最后一个节点 + 涨的概率，形成一个parquet文件
-# 3、将所有标的parquet文件组合起来，用于backtrader 回测的数据。（根据每天所有的标的在14:55 涨区间概率）
-# 根据以上方案相当于 按照不同市场执行backtrader , 如果对接实盘 提前读取所有parquet 过滤处于fsm倒数第二个节点, 
-# 在当天14:55执行计算判断顺利迁移到最后一个节点的概率 并执行买入或者卖出操作。 应该parquet 应该包含 当前节点顺序、prob, meta应该包含（chain , fsm 等固定数据）
-
-
-### 1. Parquet 文件的 Schema 设计（保存什么？）
-
-# 对于每一个标的、在每天的 14:55，你只需要拿当天的 $m$ 分钟残差收益曲线，与你 Top-K 的 `learned_motif` 计算一次 Z-Normalized 欧氏距离。
-# **只有当 `distance < threshold_d` 时，才生成一条记录写入 Parquet。**
-
-# 这个 Parquet 文件的 Schema（表结构）建议设计如下：
-
-# | 列名 (Column) | 类型 (Type) | 说明 (Description) |
-# | :--- | :--- | :--- |
-# | `date` | `int32` | 触发日期，例如 `20200102` |
-# | `sid` | `binary` / `string` | 股票代码，例如 `b'000001'` |
-# | `trial_id` | `string` | 记录是哪个 Top-K 模型触发的（关联特定的 motif 和 FSM） |
-# | `distance` | `float32` | 实际匹配的距离（越小说明形态越逼真，可用于后续信号加权） |
-# | `macro_state` | `int8` | 触发当日的宏观状态 (0=跌, 1=震荡, 2=涨) |
-# | `signal_score` | `float32` | **核心**：基于 FSM 矩阵查表算出的该股票 T+1 预期收益得分 |
-# | `bins` 
-
-# 决策树 算法应用于量化投资
 
 
 # 编译 dtaidistance
@@ -344,7 +136,6 @@ poetry run pip install --no-cache-dir --no-binary dtaidistance dtaidistance
     from dtaidistance import dtw
     print(dtw.try_import_c())
 
-# in cluster a. nfs / b. grpc host / c. resource / d. docker distribute
 
 brew services start redis
 caffeinate -i -s python finetune.py
@@ -355,159 +146,22 @@ caffeinate -i -s python finetune.py
 # resource.setrlimit(resource.RLIMIT_NOFILE, (65536, hard))
 Ray Tune 的自动解包机制**，不再在下游手动调用 `ray.get()`
 
-# oos_gpd = build_rolling_gpd(oos_panel_all, best_config["loopback"], best_config["gpd_quantiles"], best_config["gpd_freq_month"])
-# oos_gpd_ref = ray.put(oos_gpd)
-        
-# best_config["learned_motif"] = best_trial.metrics["learned_motif"]
-# best_config["fsm_prior_matrix"] = best_trial.metrics["fsm_prior_matrix"]
-        
-# ray_oos_ds = ray.data.from_arrow(oos_panel.to_arrow()) 
-        
-# scored_ds = ray_oos_ds.map_batches(
-#     MotifFSMModel,  
-#     fn_constructor_kwargs={
-#         "config": best_config, 
-#         "macro_ref": macro_ref,   # 传指针！
-#         "gpd_ref": oos_gpd_ref    # 传指针！
-#     },
-#     batch_format="pyarrow", 
-#     batch_size=5000,
-#     num_cpus=1,
-#     concurrency=10
-# )
-
-# output_path = f"/data/factors/my_strategy/year={trade_year}"
-# scored_ds.write_parquet(output_path)
-
-    
-T-1 14:55 / T 14:55 动态分位数界定宏观状态自适应高波/低波周期避免状态太多先验概率支撑模型会严重退化 
-
 内存中 wird (freeze) / commpressed (cold data not release)
 
 RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0 # 
 
-# 恭喜你敏锐地察觉到了**“过度优化陷阱”！在量化系统开发中，这是无数极客型宽客（Quant Developer）最容易踩的坑——沉迷于把 C++
-# 引擎的耗时从 10 毫秒压榨到 1 毫秒，却忘了量化的本质是发现 Alpha**。
+RayTrainReportCallback
 
-# 当你把底层的 bt_core 打磨成了极致高效的 C++/Cython 黑盒后，你现在的角色应该从“引擎造车匠”转变为“赛车手”。
+docker-compose up -d
 
-# bt_studio 的目标是：构建一条“高吞吐、可观测、绝对可复现”的策略流水线。
+# prefect
 
-# 以下是基于 Ray + MLflow + bt_core 的工业级量化策略工厂的高效整合方案。
+prefect config set PREFECT_API_DATABASE_CONNECTION_URL="postgresql+asyncpg://postgres:yourTopSecretPassword@localhost:5432/prefect"
 
-# 一、 策略工厂架构蓝图 (The Strategy Factory)
 
-# 把你的系统想象成一条工业流水线：
-
-# 1.  原料端 (Search Space)：Ray Tune 负责生成成千上万种参数组合（FSM 状态机参数、均线周期、因子权重）。
-# 2.  加工机床 (Execution)：Ray Cluster 调度本地服务器的 64 个 CPU 核心，并行启动 64 个 bt_core 实例极速运算。
-# 3.  质检部门 (MLOps/MLflow)：收集每个实例输出的 Sharpe, SQN, Calmar。
-# 4.  档案库 (Artifact Store)：将跑得好的策略产生的 Parquet 日志 作为“资产”封存。
-# 5.  展厅 (Dashboard)：你的 Streamlit 从 MLflow 中拉取 Top 5 策略的 Parquet 文件，进行深度 2D/3D
-#     可视化。
-
-# 二、 核心整合代码：Ray Tune 握手 MLflow
-
-# 为了实现上述流线，你需要在 bt_studio 中编写一个调度脚本（Dispatcher）。
-
-# 1. 安装必要的依赖
-
-# pip install ray[tune] mlflow
-
-# 2. 编写分布式训练主脚本 (train_pipeline.py)
-
-# 这里有一个极其重要的实战经验：不要保存所有失败策略的 Parquet！（如果你跑 10000 次超参，保存所有的 Parquet
-# 会瞬间撑爆磁盘）。只让引擎输出内存里的指标，只有指标达标的，才保留生成的 Parquet 作为
-# Artifact。
-
-# 三、 可观测与可复现（Reproducibility）的三大铁律
-
-# 一旦你进入“研发阶段”，**可复现性（Reproducibility）**就是你的生命线。如果一个策略上周跑夏普是 2.0，这周跑变成了 1.0
-# 且你找不到原因，整个投研体系就会崩溃。
-
-# 在 bt_studio 层，你必须强制实施以下三大纪律：
-
-# 1. 绝对随机数种子 (Seed Everything)
-
-# 在 evaluate_strategy 的第一行，必须固定所有涉及到的随机数：
-
-# import numpy as np
-# import random
-# np.random.seed(config["seed"]) # 从搜索空间传进来
-# random.seed(config["seed"])
-
-# 如果你的 C++ 扩展 (Pybind11/Cython) 内部用到了 std::rand() 或其他随机生成器，也必须提供一个 set_seed
-# 接口，在入口处调用。
-
-# 2. 代码版本快照 (Git Hash Logging)
-
-# 一个回测跑出来的结果，不仅取决于参数，更取决于你当前的引擎代码。 在启动 Ray Tune 前，通过 Python 获取当前的 Git Commit
-# Hash，并作为 Tag 打进 MLflow：
-
-# import subprocess
-# git_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).strip().decode('utf-8')
-
-# # 在 MLflow 里记录
-# mlflow.set_tag("commit_hash", git_hash)
-
-# 这样几个月后看到一个牛逼的回测结果，你可以 git checkout 到那个 Hash 完美重现它。
-
-# 3. 数据集版本锁定 (Data Versioning)
-
-# 如果你的行情数据是不断更新的，今天跑和下个月跑同样的时间区间可能结果不同（因为除权除息导致历史数据变了）。 给你的原始数据集加上版本号（例如 Parquet
-# 文件夹叫 feed_v202605.parquet），并在 MLflow 中记录使用的 Data Version。
-
-# 四、 工作流闭环：整合 Streamlit 和 MLflow
-
-# 现在你已经跑完了。如何分析？
-
-# 打开你之前写的 Streamlit App (app.py)，加入连接 MLflow 的功能。不需要手动复制 Parquet 路径了，让代码自动拉取前五名！
-
-# import streamlit as st
-# import mlflow
-# from mlflow.tracking import MlflowClient
-
-# # 连接 MLflow
-# mlflow.set_tracking_uri("http://localhost:5000")
-# client = MlflowClient()
-
-# st.sidebar.title("🏆 Top Strategies")
-
-# # 1. 动态从 MLflow 获取夏普最高的前 5 个回测运行 (Run)
-# experiment = client.get_experiment_by_name("Alpha_FSM_Optimization")
-# best_runs = client.search_runs(
-#     experiment_ids=[experiment.experiment_id],
-#     order_by=["metrics.sharpe DESC"],
-#     max_results=5
-# )
-
-# # 2. 在左侧边栏列出这些最优策略供点击
-# selected_run = st.sidebar.radio(
-#     "选择要深度分析的策略", 
-#     options=best_runs,
-#     format_func=lambda run: f"Sharpe: {run.data.metrics.get('sharpe', 0):.2f} | Params: {run.data.params}"
-# )
-
-# if selected_run:
-#     # 3. 自动下载这个牛逼策略的 Parquet 资产！
-#     with st.spinner("正在从 MLflow 提取回测明细数据..."):
-#         # 下载 Artifact 到本地临时目录
-#         local_dir = client.download_artifacts(selected_run.info.run_id, "parquet_logs")
-#         parquet_file = f"{local_dir}/backtest_log.parquet"
-        
-#         # 4. 把这个文件喂给你之前写的极速 Bokeh 绘图类
-#         df_aligned = DataTransformer.load_and_align(parquet_file)
-#         plotter = Plot()
-#         grid_fig = plotter.plot_from_wide_df(df_aligned)
-#         st.bokeh_chart(grid_fig, use_container_width=True)
-
-# 总结
-
-# 至此，你完成了一个**“顶级量化机构”级别的投研环境闭环**：
-
-# 1.  底层：bt_core 像一门无情的大炮，负责提供微秒级的计算和日志。
-# 2.  中层：Ray Tune 和 MLflow 组成弹药库，负责大批量生成策略、筛选策略。
-# 3.  顶层：Streamlit 是你的望远镜，连接到弹药库，动态渲染那些千万里挑一的顶级策略的资金曲线和内部细节。
-
-# 享受这个流水线吧，这是量化工程师最有成就感的时刻！
-
+mlflow server \
+  --host 0.0.0.0 \
+  --port 5000 \
+  --backend-store-uri sqlite:///mlflow.db \
+  <!-- --backend-store-uri postgresql://user:password@localhost:5432/mlflow \ -->
+  --default-artifact-root s3://my-bucket/mlflow

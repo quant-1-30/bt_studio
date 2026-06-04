@@ -1,0 +1,69 @@
+version: '3.11'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: quant_postgres
+    environment:
+      POSTGRES_USER: quant_user
+      POSTGRES_PASSWORD: quant_password
+      POSTGRES_DB: studio_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    container_name: bt_prefect
+    depends_on:
+      - postgres
+    ports:
+      - "4200:4200"
+    environment:
+      - PREFECT_API_URL=http://0.0.0.0:4200/api
+      - PREFECT_SERVER_API_HOST=0.0.0.0
+      - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://postgres:yourTopSecretPassword@localhost:5432/prefect
+    volumes:
+      - prefect_data:/root/.prefect
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    container_name: quant_mlflow
+    depends_on:
+      - postgres
+    ports:
+      - "5000:5000"
+    volumes:
+      - /mnt/data/mlflow_artifacts:/opt/mlflow/artifacts
+    # environment:
+    #   - MLFLOW_TRACKING_URI=postgresql://...
+    #   - MLFLOW_MAX_LOG_THRESHOLD=100
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000 
+      --backend-store-uri postgresql://quant_user:quant_password@postgres:5432/studio_db
+      --default-artifact-root /opt/mlflow/artifacts
+
+  # 3. 监控看板
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quant_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quant_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+volumes:
+  pg_data:

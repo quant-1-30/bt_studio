@@ -482,3 +482,10 @@ def get_versions():
     return {"version": "0+unknown", "full-revisionid": None,
             "dirty": None,
             "error": "unable to compute version"}
+
+
+result = subprocess.run(cmd, capture_output=True, text=True)
+if result.returncode != 0:
+    raise RuntimeError(f"Script failed: {result.stderr}")
+return result.stdout
+

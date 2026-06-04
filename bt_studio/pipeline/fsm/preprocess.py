@@ -17,10 +17,9 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from scipy.stats import chi2_contingency, ks_2samp, skew, genpareto
 
-from bt_sdk.core.protocol import QueryBody
-from bt_sdk.core.client.api import RpcTopic, FactorTopic
 from bt_sdk.core.factor import apply_factor
-from bt_core import external_mdapi_context
+from bt_protocol.constant import FactorTopic, RpcTopic
+from bt_protocol._protocol import QueryBody
 
 from bt_studio.utils.common import _collect_stream_sync
 
@@ -125,6 +124,7 @@ def compute_rolling_macro_states(bench_df: pl.DataFrame, loopback: int):
 
 
 def prepare_macro(start_date: int, end_date: int, benchmark: str, stats_window: List[int], loopback: int, chunk_size=300):
+    from bt_sdk.ctx import external_mdapi_context
     
     with external_mdapi_context() as mdapi:
         # =======================================================
@@ -253,10 +253,10 @@ def prepare_macro(start_date: int, end_date: int, benchmark: str, stats_window: 
 
 
 def prepare_chunks(universe: list, start_date: int, end_date: int, adj:int=1):
-    print(" loading minute data ...")
+    from bt_sdk.ctx import external_mdapi_context
+
     with external_mdapi_context() as mdapi: 
         print(f"📦 [Head Node 预加载] 正在拉取 {start_date}-{end_date}...")
-
         # tick 
         body = QueryBody(start_date=start_date, end_date=end_date, sid=universe)
         tick_obs = mdapi.subscribe(body, RpcTopic.Tick)

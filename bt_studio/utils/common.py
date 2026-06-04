@@ -8,7 +8,6 @@ import polars as pl
 import reactivex.operators as ops
 from typing import List, Any, Dict
 from bt_sdk.utils.util import _merge2DataFrame
-from bt_core._external import _cleanup_runner
 
 
 def robust_z_normalize(window_data):
