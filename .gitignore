@@ -224,3 +224,5 @@ __marimo__/
 .DS_Store
 *.pkl
 *.bz2
+*.db
+result/*

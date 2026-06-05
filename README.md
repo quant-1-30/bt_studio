@@ -165,3 +165,33 @@ mlflow server \
   --backend-store-uri sqlite:///mlflow.db \
   <!-- --backend-store-uri postgresql://user:password@localhost:5432/mlflow \ -->
   --default-artifact-root s3://my-bucket/mlflow
+
+export PREFECT_TELEMETRY_ENABLE=false
+
+unset PREFECT_API_URL
+
+prefect config unset PREFECT_API_URL
+
+# server
+
+prefect server start --host 0.0.0.0
+
+
+# client
+
+prefect config set PREFECT_API_URL=http://127.0.0.1:4200/api
+
+ps -ef | grep prefect | grep -v grep | awk '{print $2}' | xargs kill -9
+
+ps -ef | grep uvicorn | grep -v grep | awk '{print $2}' | xargs kill -9
+
+rm -rf ~/.prefect
+
+unset http_proxy
+unset https_proxy
+unset all_proxy
+
+
+export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1"
+export no_proxy="localhost,127.0.0.1,0.0.0.0,::1"
+
