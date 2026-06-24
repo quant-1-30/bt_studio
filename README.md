@@ -57,14 +57,14 @@ Ray:
 2.  **共享复用**：你可能同时起 5 个不同的回测脚本（Driver），它们都要连接同一个 `StoreAgent`。如果是默认模式，谁创建谁负责销毁，很难共享。
 3.  **服务发现**：因为它是 Detached 且有名字（Name），任何后来的脚本只要知道名字 `StoreAgent_NodeID`，就能通过 `ray.get_actor()` 
 
-# .  **内存极度受限**：你设置了 `object_store_memory=2GB`。
-# 2.  **并发压力**：4 个 Agent 同时在跑，每个都在疯狂往里 `ray.put` 数据（PyArrow Tables）。
-# 3.  **驱逐机制 (Eviction)**：当 Object Store 满了（2GB 很容易满），Ray 会触发 **LRU 驱逐策略**。它会尝试把“引用计数看似较少”或者“旧的”对象清理掉，或者 Spill（溢出）到磁盘
+1.  **内存极度受限**：你设置了 `object_store_memory=2GB`。
+2.  **并发压力**：4 个 Agent 同时在跑，每个都在疯狂往里 `ray.put` 数据（PyArrow Tables）。
+3.  **驱逐机制 (Eviction)**：当 Object Store 满了（2GB 很容易满），Ray 会触发 **LRU 驱逐策略**。它会尝试把“引用计数看似较少”或者“旧的”对象清理掉，或者 Spill（溢出）到磁盘
 
 ValueError: The configured object store size (25.0GiB) exceeds the optimal size on Mac (2.0GiB). This will harm performance! There is a known issue where Ray's performance degrades with object store size greater than 2.0GB on a Mac.To reduce the object store capacity, specify`object_store_memory` when calling ray.init() or ray start.To ignore this warning, set RAY_ENABLE_MAC_LARGE_OBJECT_STORE=1.
 
-# Parallel(n_jobs=pool_size)(delayed(rpc)(meta) for meta in batches) # Parallel(n_jobs=2, return_as="generator")
-# export RAY_record_ref_creation_sites=1
+Parallel(n_jobs=pool_size)(delayed(rpc)(meta) for meta in batches) # Parallel(n_jobs=2, return_as="generator")
+export RAY_record_ref_creation_sites=1
 
 ray service struck reason:
 1\  allocate memory and cpus
@@ -136,14 +136,9 @@ poetry run pip install --no-cache-dir --no-binary dtaidistance dtaidistance
     from dtaidistance import dtw
     print(dtw.try_import_c())
 
-
 brew services start redis
 caffeinate -i -s python finetune.py
 
-# import resource
-# # temporarly avoid init_sys_streams bug
-# soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-# resource.setrlimit(resource.RLIMIT_NOFILE, (65536, hard))
 Ray Tune 的自动解包机制**，不再在下游手动调用 `ray.get()`
 
 内存中 wird (freeze) / commpressed (cold data not release)
@@ -195,3 +190,51 @@ unset all_proxy
 export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1"
 export no_proxy="localhost,127.0.0.1,0.0.0.0,::1"
 
+AIRFLOW_VERSION=2.9.1
+PYTHON_VERSION=3.9
+
+# 下载官方兼容约束文件
+CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "${CONSTRAINT_URL}"
+
+
+# 打开你之前写的 Streamlit App (app.py) 加入连接 MLflow 的功能。不需要手动复制 Parquet 
+
+# import streamlit as st
+# import mlflow
+# from mlflow.tracking import MlflowClient
+
+# # 连接 MLflow
+# mlflow.set_tracking_uri("http://localhost:5000")
+# client = MlflowClient()
+
+# st.sidebar.title("🏆 Top Strategies")
+
+# # 1. 动态从 MLflow 获取夏普最高的前 5 个回测运行 (Run)
+# experiment = client.get_experiment_by_name("Alpha_FSM_Optimization")
+# best_runs = client.search_runs(
+#     experiment_ids=[experiment.experiment_id],
+#     order_by=["metrics.sharpe DESC"],
+#     max_results=5
+# )
+
+# # 2. 在左侧边栏列出这些最优策略供点击
+# selected_run = st.sidebar.radio(
+#     "选择要深度分析的策略", 
+#     options=best_runs,
+#     format_func=lambda run: f"Sharpe: {run.data.metrics.get('sharpe', 0):.2f} | Params: {run.data.params}"
+# )
+
+# if selected_run:
+#     # 3. 自动下载这个牛逼策略的 Parquet 资产！
+#     with st.spinner("正在从 MLflow 提取回测明细数据..."):
+#         # 下载 Artifact 到本地临时目录
+#         local_dir = client.download_artifacts(selected_run.info.run_id, "parquet_logs")
+#         parquet_file = f"{local_dir}/backtest_log.parquet"
+        
+#         # 4. 把这个文件喂给你之前写的极速 Bokeh 绘图类
+#         df_aligned = DataTransformer.load_and_align(parquet_file)
+#         plotter = Plot()
+#         grid_fig = plotter.plot_from_wide_df(df_aligned)
+#         st.bokeh_chart(grid_fig, use_container_width=True)

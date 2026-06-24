@@ -1,4 +1,4 @@
-rom bt_studio.pipeline.dags.fsm import get_macro
+from bt_studio.pipeline.dags.fsm import get_macro
 
 def test_get_macro_logic():
     test_config = {"run_params": {...}}

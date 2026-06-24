@@ -10,3 +10,13 @@ def consume_time(func):
         print('{} cost {}s'.format(func.__name__, round(end_time - start_time, 3)))
         return result
     return wrapper
+
+
+def robust_z_normalize(arr: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    """Z-score"""
+    if arr.ndim == 1:
+        return (arr - np.nanmean(arr)) / (np.nanstd(arr) + eps)
+    means = np.nanmean(arr, axis=1, keepdims=True)
+    stds = np.nanstd(arr, axis=1, keepdims=True)
+    return (arr - means) / (stds + eps)
+
