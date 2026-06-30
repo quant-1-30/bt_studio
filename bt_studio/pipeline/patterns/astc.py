@@ -6,6 +6,19 @@ from typing import List, Dict, Any
 
 
 def build_fsm_panel(aligned_lfs: list[pl.LazyFrame], daily_lf: pl.LazyFrame, config: dict) -> pl.DataFrame:
+    # ensure daily_lf schema same with aligned_lfs
+    if daily_lf.schema["day"] == pl.Int32:
+            daily_lf = daily_lf.with_columns(
+                pl.col("day").cast(pl.String).str.to_date("%Y%m%d")
+            )
+    elif daily_lf.schema["day"] == pl.String:
+        daily_lf = daily_lf.with_columns(
+            pl.col("day").str.to_date("%Y%m%d")
+        )
+
+    if daily_lf.schema["sid"] == pl.Binary:
+            daily_lf = daily_lf.with_columns(pl.col("sid").cast(pl.String))
+
     bars_per_day = 240 // config["downsample"]
     
     all_feat_lf = pl.concat(aligned_lfs)
@@ -41,13 +54,13 @@ def build_fsm_panel(aligned_lfs: list[pl.LazyFrame], daily_lf: pl.LazyFrame, con
     # cross Ndays concat
     shift_exprs = [
         pl.col("daily_curve").shift(i).over("sid").alias(f"lag_{i}") 
-        for i in reversed(range(cross_days))
+        for i in reversed(range(config["cross_days"]))
     ]
 
     curve_lf = (
         curve_lf.sort(["sid", "day"])
         .with_columns(shift_exprs)
-        .drop_nulls(subset=[f"lag_{i}" for i in range(cross_days)]) 
+        .drop_nulls(subset=[f"lag_{i}" for i in range(config["cross_days"])]) 
     )
 
     panel_lf = curve_lf.join(
@@ -149,6 +162,9 @@ def evaluate_and_build_fsm(
     ) -> dict:
 
     base_score = 100.0
+
+    if panel_df["sid"].dtype != pl.Binary:
+        panel_df = panel_df.with_columns(pl.col("sid").cast(pl.Binary))
     
     # =====================================================================
     # 1. Macro States) & Return Bins 0(flow in ) / 1(vibrate) / 2(flow out) 
@@ -261,9 +277,9 @@ def evaluate_and_build_fsm(
 
 
 def discover_fsm_pattern(
-    panel_lf: pl.LazyFrame,  
-    prior_config: dict,
     search_config: dict, 
+    panel_lf: pl.LazyFrame,  
+    prior_config: dict
 ) -> Dict[str, Any]:
     
     # config
@@ -277,6 +293,20 @@ def discover_fsm_pattern(
     
     # extract curves_2d
     panel_df = panel_lf.collect()
+
+    if panel_df.height == 0:
+        return {
+            "status": "failed", 
+            "reason": "HPO 过滤后样本量归零 (零行数据)", 
+            "metrics_score": 0.0
+        }
+        
+    if panel_df.height <= m :
+        return {
+            "status": "failed", 
+            "reason": f"样本量不足以支持模式挖掘 (n={panel_df.height})", 
+            "metrics_score": 0.0
+        }
 
     lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
     lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
@@ -299,3 +329,5 @@ def discover_fsm_pattern(
             best_result = result
             
     return best_result if best_result else {"status": "failed", "reason": "未能通过统计学检验(P-val > 0.1)"}
+
+

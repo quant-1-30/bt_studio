@@ -30,8 +30,9 @@ import mlflow
 from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 from ray.air.integrations.mlflow import MLflowLoggerCallback
-from prefect import flow, task, get_run_logger
+# from prefect import flow, task, get_run_logger
 
+from bt_studio.pipeline.features import build_ofi
 from bt_studio.pipeline.patterns import build_fsm_panel, evaluate_and_build_fsm, discover_fsm_pattern
 from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample
 from bt_studio.pipeline.inference import FSMPredictor
@@ -60,7 +61,7 @@ def get_latest_ckpt(target_year: int) -> str:
 # ==============================================================================
 # Node 1 Macro and Universe
 # ==============================================================================
-@task(name="Node_Prepare_Daily_Universe") 
+# @task(name="Node_Prepare_Daily_Universe") 
 def node_prepare_daily_universe(exp_config: dict):
     rq = exp_config["run_params"]
     os.makedirs(BASE_DIR, exist_ok=True)
@@ -84,7 +85,7 @@ def node_prepare_daily_universe(exp_config: dict):
 # ==============================================================================
 # Node 2: Minute and Ofi
 # ==============================================================================
-@task(name="Node_Extract_HF_Data") 
+# @task(name="Node_Extract_HF_Data") 
 def node_extract_hf_data(year: int, sids: list[bytes], exp_config: dict):
     
     def _fetch_and_build(start_d: int, end_d: int, out_path: str):
@@ -108,7 +109,7 @@ def node_extract_hf_data(year: int, sids: list[bytes], exp_config: dict):
 # ==============================================================================
 # Node 3: OOS Decay
 # ==============================================================================
-@task(name="Node_Check_Decay") 
+# @task(name="Node_Check_Decay") 
 def node_check_decay(year: int, dret_path: str, oos_paths: list, exp_config: dict):
     prev_model_path = get_latest_ckpt(year - 1)
     if not prev_model_path:
@@ -133,29 +134,29 @@ def node_check_decay(year: int, dret_path: str, oos_paths: list, exp_config: dic
     )
    
     if eval_res.get("status") == "success" and eval_res["metrics_score"] > 0:
-        get_run_logger().info(f"✅ 历史 Motif 依然显著 (P-val: {eval_res['u_pval']:.4f})")
+        # get_run_logger().info(f"✅ 历史 Motif 依然显著 (P-val: {eval_res['u_pval']:.4f})")
         return False 
     return True
 
 # ==============================================================================
 # Node 4: Ray Tune 
 # ==============================================================================
-def trainable_fsm_worker(config, hf_paths, dret_path, stats_windows, alternative):
+def trainable_fsm_worker(config, hf_paths, dret_path, prior_config):
     """Ray 内部 Worker 函数"""
     aligned_lfs = [pl.scan_parquet(p) for p in hf_paths]
     panel_lf = build_fsm_panel(aligned_lfs, pl.scan_parquet(dret_path), config)
     
-    result = discover_fsm_pattern(panel_lf, config, stats_windows, alternative)
+    result = discover_fsm_pattern(config, panel_lf, prior_config)
     if result["status"] == "success":
-        train.report({
+        tune.report({
             "metrics_score": result["metrics_score"], "u_pval": result["u_pval"],
             "learned_motif": result["learned_motif"], "fsm_network": result["fsm_network"]
         })
     else:
-        train.report({"metrics_score": 0.0, "u_pval": 1.0})
+        tune.report({"metrics_score": 0.0, "u_pval": 1.0})
 
 
-@task(name="Node_Tune") 
+# @task(name="Node_Tune") 
 def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
     ray.init(address="auto", ignore_reinit_error=True)
 
@@ -177,8 +178,7 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
         search_alg = OptunaSearch(points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}])
 
     wrapped_trainable = tune.with_resources(
-        tune.with_parameters(trainable_fsm_worker, hf_paths=train_paths, dret_path=dret_path, 
-                             stats_windows=rp["stats_windows"], alternative=rp["alternative"]),
+        tune.with_parameters(trainable_fsm_worker, hf_paths=train_paths, dret_path=dret_path, prior_config=rp),
         resources={"cpu": 1, "gpu": 0} 
     )
 
@@ -202,8 +202,10 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
         mlflow.log_metric("train_score", best_trial.metrics["metrics_score"])
         
         model_ckpt = {
-            "config": best_trial.config, "motif": np.array(best_trial.metrics["learned_motif"]),
-            "fsm_network": best_trial.metrics["fsm_network"], "valid_year": year
+            "config": best_trial.config, 
+            "motif": np.array(best_trial.metrics.get("learned_motif", [])), 
+            "fsm_network": best_trial.metrics.get("fsm_network", {}),
+            "valid_year": year
         }
         os.makedirs(MODEL_DIR, exist_ok=True)
         with open(f"{MODEL_DIR}/model_{year}.pkl", "wb") as f: pickle.dump(model_ckpt, f)
@@ -214,7 +216,7 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
 # ==============================================================================
 # Node 5: OOS 
 # ==============================================================================
-@task(name="Node_OOS_Inference") 
+# @task(name="Node_OOS_Inference") 
 def node_oos_inference(year: int, dret_path: str, oos_paths: list, exp_config: dict):
     final_model_path = get_latest_ckpt(year)
     if not final_model_path: return
@@ -232,28 +234,28 @@ def node_oos_inference(year: int, dret_path: str, oos_paths: list, exp_config: d
         out_path = f"{BASE_DIR}/scores/scores_{year}.parquet"
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         scored_df.write_parquet(out_path)
-        get_run_logger().info(f"✅ {year} 年 OOS 生成打分: {scored_df.height} 条")
+        # get_run_logger().info(f"✅ {year} 年 OOS 生成打分: {scored_df.height} 条")
 
 
 # ==============================================================================
 # DAG (Walk-Forward)
 # ==============================================================================
-@flow(name="WFO_FSM_Pipeline")
+# @flow(name="WFO_FSM_Pipeline")
 def wfo_pipeline(exp_config):
-    logger = get_run_logger()
+    # logger = get_run_logger()
     
     # Node 1
     global_data = node_prepare_daily_universe(exp_config)
 
     for y in range(2004, 2011):
-        logger.info(f"========== 🚀 {y} 年 Walk-Forward ==========")
+        # logger.info(f"========== 🚀 {y} 年 Walk-Forward ==========")
         
         # Node 2
         paths = node_extract_hf_data(y, global_data["universe_sids"], exp_config)
         
         # Node 3
         if node_check_decay(y, global_data["dret_path"], paths["oos_paths"], exp_config):
-            logger.info(f"🔄 启动 {y-1} 年数据 Ray Tune 调优...")
+            # logger.info(f"🔄 启动 {y-1} 年数据 Ray Tune 调优...")
             
             # Node 4
             if not node_tune(y, global_data["dret_path"], paths["train_paths"], exp_config): 

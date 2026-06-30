@@ -1,6 +1,9 @@
 import polars as pl
+import numpy as np
+
 from bt_sdk.ctx import external_mdapi_context
 from bt_protocol._protocol import QueryBody
+from bt_protocol.constant import RpcTopic
 
 from bt_studio.utils.common import _collect_stream_sync
 
@@ -23,8 +26,8 @@ def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
         # =======================================================
         # Universe Daily
         # =======================================================
-        universe = valid_meta["sid"].cast(pl.Binary).to_list() 
-        body = QueryBody(start_date=start_date - warm, end_date=end_date, sid=[universe]) 
+        universe = valid_meta["sid"].cast(pl.Binary).to_list()
+        body = QueryBody(start_date=start_date - warm, end_date=end_date, sid=universe) 
     
         obs = mdapi.subscribe(body, RpcTopic.Daily) 
         raw = _collect_stream_sync(obs)
@@ -33,7 +36,13 @@ def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
         for sid, df in raw.items():
             if df.height > 0:
                 if "sid" not in df.columns:
-                    df = df.with_columns(pl.lit(sid).alias("sid")) # Literal 
+                    df = df.with_columns(
+                        pl.lit(sid).alias("sid").cast(pl.Binary)
+                    )
+                else:
+                    df = df.with_columns(
+                        pl.col("sid").cast(pl.Binary)
+                    ) 
                 lazy_frames.append(df.lazy())
                 
         if not lazy_frames:
@@ -44,26 +53,32 @@ def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
  
 
 def prepare_tick(start_date: int, end_date: int, sids: list[bytes], warm=10000):
-    body = QueryBody(start_date=start-warm, end_date=end_date, sid=sids)
+    body = QueryBody(start_date=start_date -warm, end_date=end_date, sid=sids)
 
-    obs = mdapi.subscribe(body, RpcTopic.Tick)
-    raw_tick_dict = _collect_stream_sync(obs)
+    with external_mdapi_context() as mdapi:
+        obs = mdapi.subscribe(body, RpcTopic.Tick)
+        raw_tick_dict = _collect_stream_sync(obs)
 
-    # filter on 14:55  
-    snapshot_dict = {}
-    for sid_bytes, tick_df in raw_tick_dict.items():
+        # filter on 14:55  
+        snapshot_dict = {}
+        for sid_bytes, tick_df in raw_tick_dict.items():
 
-        if tick_df.height == 0 or "tick" not in tick_df.columns:
-             pass
-        snapshot_dict[sid_bytes] = align_skeleton(tick_df.lazy())
-    return snapshot_dict
+            if tick_df.height == 0 or "tick" not in tick_df.columns:
+                 pass
+            snapshot_dict[sid_bytes] = align_skeleton(tick_df.lazy())
+        return snapshot_dict
 
 
 def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
     """
-        9:30 - 11:30 / 13:00 - 14:59 to ensure 240 minute
+        9:30 - 11:30 / 13:00 - 14:59 to ensure 240 minutes
     """
-    to_minutes = pl.col("datetime").dt.hour() * 60 + pl.col("datetime").dt.minute()
+    # f64 ---> epoch {'ns','us','ms'}
+    tick_lf = tick_lf.with_columns(
+            (pl.col("tick") * 1000).cast(pl.Int64).cast(pl.Datetime(time_unit="ms"))
+        )
+
+    to_minutes = pl.col("tick").dt.hour() * 60 + pl.col("tick").dt.minute()
     
     minute_idx_expr = (
         pl.when(to_minutes < 11 * 60 + 30)
@@ -73,7 +88,10 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
     
     base_lf = (
         tick_lf
-        .with_columns(minute_idx_expr.alias("minute_idx"))
+        .with_columns([
+            minute_idx_expr.alias("minute_idx"),
+            pl.col("tick").dt.date().alias("day")  
+        ])
         .filter((pl.col("minute_idx") >= 0) & (pl.col("minute_idx") < 240))
     )
     
@@ -92,7 +110,7 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
         .join(base_lf, on=["day", "sid", "minute_idx"], how="left")
         .sort(["day", "sid", "minute_idx"])
         .with_columns([
-            pl.col("close").forward().backward().over(["day", "sid"]),
+            pl.col("close").forward_fill().backward_fill().over(["day", "sid"]),
         ])
         .with_columns([
             pl.col("open").fill_null(pl.col("close")),
@@ -104,3 +122,4 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
     )
     
     return padded_lf
+

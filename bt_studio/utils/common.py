@@ -77,6 +77,6 @@ def _collect_stream_sync(observable) -> Dict[bytes, pl.DataFrame]:
         if isinstance(msg, Exception):
             raise msg
         tables.append(msg)
-    
+    # import pdb; pdb.set_trace() 
     data_df = _merge2DataFrame(tables)
     return data_df
