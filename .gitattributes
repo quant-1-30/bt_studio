@@ -1,0 +1,10 @@
+# linguist-vendored 官方标准指令 第三方依赖或生成的文档
+docs/** linguist-vendored
+site/** linguist-vendored
+build/** linguist-vendored
+dist/** linguist-vendored
+
+*.html                        linguist-vendors
+
+*.pyx                         linguist-language=Cython
+*.pxd                         linguist-language=Cython
