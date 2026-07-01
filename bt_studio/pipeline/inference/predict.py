@@ -1,6 +1,5 @@
 import numpy as np
 import polars as pl
-from joblib import Parallel
 
 
 class FSMPredictor:
@@ -35,20 +34,16 @@ class FSMPredictor:
         
         z_motif = np.ascontiguousarray((self.motif - np.mean(self.motif)) / (np.std(self.motif) + 1e-8), dtype=np.float64)
         
-        distances = Parallel(n_jobs=-1)(
-            delayed(calc_min_subseq_dtw)(curve, z_motif, self.m, self.dtw_w, self.threshold_d) 
-            for curve in curves_2d
-        )
-        
+        distances = [
+            calc_min_subseq_dtw(curve, z_motif, self.m, self.dtw_w, self.threshold_d) 
+            for curve in curves_2d 
+        ]
         panel_df = panel_df.with_columns(pl.Series("distance", distances))
-        
-        triggers = panel_df.filter(pl.col("distance") <= self.threshold_d)
-        if triggers.height == 0:
-            return pl.DataFrame()
-            
+         
         # Macro State
         daily_macro = (
-            triggers.group_by(["day", "sid"])
+            # triggers.group_by(["day", "sid"])
+            panel_df.group_by(["day", "sid"])
             .agg(pl.col("daily_curve").list.sum().alias("sid_ofi_sum"))
             .group_by("day")
             .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
@@ -63,6 +58,10 @@ class FSMPredictor:
             ).drop(["p33", "p67", "daily_ofi_mean"])
         )
         
+        triggers = panel_df.filter(pl.col("distance") <= self.threshold_d)
+        if triggers.height == 0:
+            return pl.DataFrame()
+
         triggers = triggers.join(daily_macro, on="day", how="left")
         
         # P(T_n | Macro)

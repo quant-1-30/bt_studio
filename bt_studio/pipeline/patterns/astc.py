@@ -1,29 +1,58 @@
 import polars as pl
 import numpy as np
 import stumpy
+import scipy.stats as stats
 
+from dtaidistance import dtw
 from typing import List, Dict, Any
 
 
-def build_fsm_panel(aligned_lfs: list[pl.LazyFrame], daily_lf: pl.LazyFrame, config: dict) -> pl.DataFrame:
-    # ensure daily_lf schema same with aligned_lfs
-    if daily_lf.schema["day"] == pl.Int32:
-            daily_lf = daily_lf.with_columns(
-                pl.col("day").cast(pl.String).str.to_date("%Y%m%d")
-            )
-    elif daily_lf.schema["day"] == pl.String:
-        daily_lf = daily_lf.with_columns(
-            pl.col("day").str.to_date("%Y%m%d")
-        )
+def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, config: dict) -> pl.DataFrame:
+    # =========================================================================
+    # config 
+    # =========================================================================
+    ds = config["downsample"]
+    bars_per_day = 240 // ds
 
-    if daily_lf.schema["sid"] == pl.Binary:
-            daily_lf = daily_lf.with_columns(pl.col("sid").cast(pl.String))
+    # =========================================================================
+    # schema align with aligned_lf
+    # =========================================================================
+    daily_schema = daily_lf.collect_schema()
 
-    bars_per_day = 240 // config["downsample"]
+    if daily_schema["day"] in [pl.Int32, pl.Int64]:
+        daily_lf = daily_lf.with_columns(pl.col("day").cast(pl.String).str.to_date("%Y%m%d"))
+    elif daily_schema["day"] == pl.String:
+        daily_lf = daily_lf.with_columns(pl.col("day").str.to_date("%Y%m%d"))
+    elif daily_schema["day"] == pl.Datetime:
+        daily_lf = daily_lf.with_columns(pl.col("day").cast(pl.Date))
+
+    daily_lf = daily_lf.with_columns([
+        pl.col("sid").cast(pl.String).str.strip_chars(" \x00\t\n"), 
+        pl.col("day").cast(pl.Date)
+    ])
     
-    all_feat_lf = pl.concat(aligned_lfs)
+    # =========================================================================
+    # schema align with aligned_lf
+    # =========================================================================
+
+    # all_feat_lf = pl.concat(aligned_lfs)
+    feat_schema = all_feat_lf.collect_schema()
     
-    # std + ret
+    if feat_schema["day"] in [pl.Int32, pl.Int64]:
+        all_feat_lf = all_feat_lf.with_columns(pl.col("day").cast(pl.String).str.to_date("%Y%m%d"))
+    elif feat_schema["day"] == pl.String:
+        all_feat_lf = all_feat_lf.with_columns(pl.col("day").str.to_date("%Y%m%d"))
+    elif feat_schema["day"] == pl.Datetime:
+        all_feat_lf = all_feat_lf.with_columns(pl.col("day").cast(pl.Date))
+
+    all_feat_lf = all_feat_lf.with_columns([
+        pl.col("sid").cast(pl.String).str.strip_chars(" \x00\t\n"), 
+        pl.col("day").cast(pl.Date)
+    ])
+
+    # =========================================================================
+    # daily_ret and vol
+    # =========================================================================
     daily_ret_lf = (
         daily_lf.sort(["sid", "day"])
         .with_columns([
@@ -39,19 +68,30 @@ def build_fsm_panel(aligned_lfs: list[pl.LazyFrame], daily_lf: pl.LazyFrame, con
             (pl.col("close").shift(-3).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_3")
         ])
     )
+ 
+    # =========================================================================
+    # downsample
+    # =========================================================================
+    if ds > 1:
+        all_feat_lf = all_feat_lf.filter((pl.col("bar_idx") % ds) == 0)
 
+    # =========================================================================
+    # join 
+    # =========================================================================
     curve_lf = (
         all_feat_lf
         .sort(["day", "sid", "bar_idx"])
         .group_by(["day", "sid"])
         .agg([
             pl.col("ofi_ratio").alias("daily_curve"),
-            pl.col("ofi_ratio").count().alias("curve_len") 
+            pl.len().alias("curve_len")  
         ])
         .filter(pl.col("curve_len") == bars_per_day) 
     )
 
-    # cross Ndays concat
+    # =========================================================================
+    # crossover concat 
+    # =========================================================================
     shift_exprs = [
         pl.col("daily_curve").shift(i).over("sid").alias(f"lag_{i}") 
         for i in reversed(range(config["cross_days"]))
@@ -221,14 +261,17 @@ def evaluate_and_build_fsm(
     # =================================================================
     # 3. DTW Triggers
     # =================================================================
+    m = tune_config["m"]
+    threshold_d = tune_config["threshold_d"]
+    dtw_w = int(m * tune_config.get("dtw_window_frac", 0.1))
 
     # curves = np.vstack(eval_df["curve"].to_list()).astype(np.float64)
     z_motif = np.ascontiguousarray((motif - np.mean(motif)) / (np.std(motif) + 1e-8), dtype=np.float64)
 
-    distances = Parallel(n_jobs=-1)(
-        delayed(calc_min_subseq_dtw)(curve, z_motif, m, dtw_w, threshold_d) 
+    distances = [
+        calc_min_subseq_dtw(curve, z_motif, m, dtw_w, threshold_d) 
         for curve in curves_2d
-    )
+    ]
     
     eval_df = eval_df.with_columns(pl.Series("distance", distances))
     triggers = eval_df.filter(pl.col("distance") <= threshold_d)
@@ -236,7 +279,7 @@ def evaluate_and_build_fsm(
     if triggers.height < 5:
         return {"status": "failed", "reason": f"匹配样本太少 (n={triggers.height})", "metrics_score": 0.0}
 
-    # === 构建马尔可夫转移矩阵  Laplace ===
+    # === Markov Laplace ===
     trans_t1 = np.ones((3, 4), dtype=np.float64) 
     trans_t1_t2 = np.ones((4, 4), dtype=np.float64) 
     trans_t2_t3 = np.ones((4, 4), dtype=np.float64) 
@@ -250,7 +293,7 @@ def evaluate_and_build_fsm(
     trans_t1_t2 = (trans_t1_t2 / trans_t1_t2.sum(axis=1, keepdims=True)).tolist()
     trans_t2_t3 = (trans_t2_t3 / trans_t2_t3.sum(axis=1, keepdims=True)).tolist()
 
-    # === 统计检验 two-sided or greater ===
+    # ===  two-sided or greater ===
     cond_rets = triggers["fwd_ret_1"].drop_nulls().to_numpy()
     uncond_rets = eval_df["fwd_ret_1"].drop_nulls().to_numpy() 
     

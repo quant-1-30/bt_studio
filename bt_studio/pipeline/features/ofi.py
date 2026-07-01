@@ -1,7 +1,7 @@
 import polars as pl
 
 
-def build_ofi(aligned_lf: pl.LazyFrame, downsample_m: int = 5) -> pl.LazyFrame:
+def build_ofi(aligned_lf: pl.LazyFrame) -> pl.LazyFrame:
     ofi_expr = (
         ((pl.col("close") * 2 - pl.col("high") - pl.col("low")) / 
          (pl.col("high") - pl.col("low") + 1e-8)) * pl.col("amount")
@@ -10,7 +10,8 @@ def build_ofi(aligned_lf: pl.LazyFrame, downsample_m: int = 5) -> pl.LazyFrame:
     feat_lf = (
         aligned_lf
         .with_columns([
-            ((pl.col("minute_idx") -1) // downsample_m).cast(pl.Int32).alias("bar_idx"),
+            # ((pl.col("minute_idx") -1) // downsample_m).cast(pl.Int32).alias("bar_idx"),
+            pl.col("minute_idx").alias("bar_idx"),
             ofi_expr.alias("raw_ofi")
         ])
         .group_by(["day", "sid", "bar_idx"])
@@ -26,3 +27,4 @@ def build_ofi(aligned_lf: pl.LazyFrame, downsample_m: int = 5) -> pl.LazyFrame:
         ])
     )
     return feat_lf
+

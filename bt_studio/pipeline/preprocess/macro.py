@@ -46,7 +46,7 @@ def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
                 lazy_frames.append(df.lazy())
                 
         if not lazy_frames:
-            raise ValueError("获取到的订阅日频数据为空，无法构建 daily_lazy")
+            raise ValueError("daily is Null")
             
         daily_lazy = pl.concat(lazy_frames)
         return universe_lazy, daily_lazy 
@@ -62,52 +62,75 @@ def prepare_tick(start_date: int, end_date: int, sids: list[bytes], warm=10000):
         # filter on 14:55  
         snapshot_dict = {}
         for sid_bytes, tick_df in raw_tick_dict.items():
-
             if tick_df.height == 0 or "tick" not in tick_df.columns:
-                 pass
+                 continue
+
+            tick_df = tick_df.with_columns(pl.lit(sid_bytes).alias("sid").cast(pl.Binary))
             snapshot_dict[sid_bytes] = align_skeleton(tick_df.lazy())
+            # import pdb; pdb.set_trace()
         return snapshot_dict
 
 
 def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
-    """
-        9:30 - 11:30 / 13:00 - 14:59 to ensure 240 minutes
-    """
-    # f64 ---> epoch {'ns','us','ms'}
-    tick_lf = tick_lf.with_columns(
-            (pl.col("tick") * 1000).cast(pl.Int64).cast(pl.Datetime(time_unit="ms"))
-        )
+    # ====================================================================
+    # Eager Mode avoid Lazy Optimize Bug
+    # ====================================================================
+    df = tick_lf.collect() 
+    if df.height == 0:
+        return df.lazy()
 
-    to_minutes = pl.col("tick").dt.hour() * 60 + pl.col("tick").dt.minute()
-    
-    minute_idx_expr = (
-        pl.when(to_minutes < 11 * 60 + 30)
-        .then(to_minutes - (9 * 60 + 30))  
-        .otherwise((to_minutes - (13 * 60)) + 120) 
-    ).cast(pl.Int32)
-    
-    base_lf = (
-        tick_lf
-        .with_columns([
-            minute_idx_expr.alias("minute_idx"),
-            pl.col("tick").dt.date().alias("day")  
-        ])
-        .filter((pl.col("minute_idx") >= 0) & (pl.col("minute_idx") < 240))
+    # TimeStamp to  Date
+    df = df.with_columns(
+        (pl.col("tick") * 1000).cast(pl.Int64).cast(pl.Datetime("ms")).alias("tick_dt")
     )
-    
-    unique_pairs = base_lf.select(["sid", "day"]).unique()
-    
-    skeleton_lf = (
+
+    # ====================================================================
+    #  UTC + 8 Hour ---> Aisa Shanghai
+    # ====================================================================
+    median_hour = df.select(pl.col("tick_dt").dt.hour().median()).item()
+    if median_hour is not None and median_hour < 8:
+        df = df.with_columns(tick_dt = pl.col("tick_dt").dt.offset_by("8h"))
+
+    # default i8 ---> Int32
+    df = df.with_columns([
+        (
+            pl.col("tick_dt").dt.hour().cast(pl.Int32) * 60 + 
+            pl.col("tick_dt").dt.minute().cast(pl.Int32)
+        ).alias("to_minutes"),
+        pl.col("tick_dt").dt.date().alias("day")
+    ])
+
+    # filter by A trading 
+    df = df.filter(
+        ((pl.col("to_minutes") >= 9 * 60 + 30) & (pl.col("to_minutes") < 11 * 60 + 30)) |
+        ((pl.col("to_minutes") >= 13 * 60) & (pl.col("to_minutes") < 15 * 60))
+    )
+
+    if df.height == 0:
+        return df.lazy()
+
+    # minute ---> 0-239 index
+    df = df.with_columns(
+        minute_idx = pl.when(pl.col("to_minutes") < 11 * 60 + 30)
+                       .then(pl.col("to_minutes") - (9 * 60 + 30))  
+                       .otherwise((pl.col("to_minutes") - (13 * 60)) + 120)
+                       .cast(pl.Int32)
+    ).filter((pl.col("minute_idx") >= 0) & (pl.col("minute_idx") < 240))
+
+    # ====================================================================
+    # explode replace Cross Join
+    # ====================================================================
+    unique_pairs = df.select(["sid", "day"]).unique()
+    skeleton_df = (
         unique_pairs
-        .join(
-            pl.LazyFrame({"minute_idx": np.arange(240, dtype=np.int32)}), 
-            how="cross"
-        )
+        .with_columns(pl.int_ranges(0, 240, dtype=pl.Int32).alias("minute_idx"))
+        .explode("minute_idx")
     )
     
-    padded_lf = (
-        skeleton_lf
-        .join(base_lf, on=["day", "sid", "minute_idx"], how="left")
+    # join skeleton_df with df to fill missing minute_idx, then forward/backward fill close, and fill other columns with default values
+    padded_df = (
+        skeleton_df
+        .join(df, on=["day", "sid", "minute_idx"], how="left")
         .sort(["day", "sid", "minute_idx"])
         .with_columns([
             pl.col("close").forward_fill().backward_fill().over(["day", "sid"]),
@@ -119,7 +142,8 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
             pl.col("amount").fill_null(0.0),
             pl.col("volume").fill_null(0.0)
         ])
+        .drop(["tick", "to_minutes"])
+        .rename({"tick_dt": "tick"})
     )
     
-    return padded_lf
-
+    return padded_df.lazy()

@@ -53,6 +53,23 @@ def intercept(config):
     return {"status": "success"}
 
 
+def get_latest_ckpt(target_year: int, model_dir: str) -> str:
+    if not os.path.exists(model_dir): return None
+    valid_models = []
+    for f in os.listdir(model_dir):
+        if f.startswith("model_") and f.endswith(".pkl"):
+            try:
+                y = int(f.replace("model_", "").replace(".pkl", ""))
+                if y <= target_year:
+                    valid_models.append((y, os.path.join(model_dir, f)))
+            except ValueError:
+                continue
+                
+    if not valid_models: return None
+    valid_models.sort(key=lambda x: x[0], reverse=True)
+    return valid_models[0][1]
+
+
 def _collect_stream_sync(observable) -> Dict[bytes, pl.DataFrame]:
     q = queue.Queue()
     observable.pipe(
