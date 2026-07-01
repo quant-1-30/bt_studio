@@ -1,5 +1,6 @@
 import numpy as np
 import polars as pl
+from bt_studio.pipeline.patterns.astc import calc_min_subseq_dtw
 
 
 class FSMPredictor:
@@ -47,6 +48,7 @@ class FSMPredictor:
             .agg(pl.col("daily_curve").list.sum().alias("sid_ofi_sum"))
             .group_by("day")
             .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
+            .sort("day") 
             .with_columns([
                 pl.col("daily_ofi_mean").quantile(1/3).alias("p33"),
                 pl.col("daily_ofi_mean").quantile(2/3).alias("p67")
@@ -55,7 +57,10 @@ class FSMPredictor:
                 pl.when(pl.col("daily_ofi_mean") <= pl.col("p33")).then(0)
                 .when(pl.col("daily_ofi_mean") <= pl.col("p67")).then(1)
                 .otherwise(2).cast(pl.Int32).alias("macro_state")
-            ).drop(["p33", "p67", "daily_ofi_mean"])
+            )
+            .with_columns(pl.col("macro_state").shift(1)) # avoid lookahead bias
+            .drop(["p33", "p67", "daily_ofi_mean"])
+            .drop_nulls()
         )
         
         triggers = panel_df.filter(pl.col("distance") <= self.threshold_d)
@@ -79,10 +84,21 @@ class FSMPredictor:
             )
             return float(score)
             
-        scores = [calc_alpha_score(m) for m in triggers["macro_state"].to_list()]
-        
+        # macro_State 0, 1, 2
+        score_map = {
+            0: calc_alpha_score(0),
+            1: calc_alpha_score(1),
+            2: calc_alpha_score(2)
+        }
+
+        # missing macro_state
+        score_map[None] = 0.0
+
         return (
-            triggers.with_columns(pl.Series("fsm_score", scores))
+            # Polars C replace
+            triggers.with_columns(
+                pl.col("macro_state").replace(score_map, default=0.0).alias("fsm_score")
+            )
             .select(["day", "sid", "distance", "macro_state", "fsm_score"])
             .sort(["day", "fsm_score"], descending=[False, True])
         )

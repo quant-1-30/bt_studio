@@ -59,10 +59,9 @@ def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, con
             (pl.col("close") / pl.col("close").shift(1).over("sid") - 1.0).alias("daily_ret")
         ])
         .with_columns([
-            pl.col("daily_ret").rolling_std(window_size=20, min_periods=5)
-              .over("sid").fill_null(strategy="forward")
-              .clip(lower_bound=0.005).alias("vol_20d"),
-              
+            # pl.col("daily_ret").rolling_std(window_size=20, min_periods=5)
+            #   .over("sid").fill_null(strategy="forward")
+            #   .clip(lower_bound=0.005).alias("vol_20d"),
             (pl.col("close").shift(-1).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_1"),
             (pl.col("close").shift(-2).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_2"),
             (pl.col("close").shift(-3).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_3")
@@ -104,26 +103,11 @@ def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, con
     )
 
     panel_lf = curve_lf.join(
-        daily_ret_lf.select(["day", "sid", "vol_20d", "fwd_ret_1", "fwd_ret_2", "fwd_ret_3"]),
+        # daily_ret_lf.select(["day", "sid", "vol_20d", "fwd_ret_1", "fwd_ret_2", "fwd_ret_3"]),
+        daily_ret_lf.select(["day", "sid", "fwd_ret_1", "fwd_ret_2", "fwd_ret_3"]),
         on=["day", "sid"], how="inner"
     )
     return panel_lf
-
-
-def prepare_stumpy_array(curves_2d: np.ndarray, config: dict) -> np.ndarray:
-    if curves_2d.size == 0:
-        return np.array([])
-        
-    m = config["m"]
-    # repair raw curve
-    clean_curves = np.nan_to_num(curves_2d, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
-    
-    stumpy_arr = np.hstack([clean_curves, nan_buffer]).flatten()
-    
-    # abundan last m np.nan
-    return stumpy_arr[:-m] 
 
 
 def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) -> List[np.ndarray]:
@@ -164,6 +148,40 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) ->
     return candidates
 
 
+# def get_candidate_mstump_motifs(raw_array_2d: np.ndarray, config: dict, top_k: int = 5):
+#     # raw_array_2d shape: (2, N) -> 维度0: OFI, 维度1: VOL
+#     m = config["m"]
+    
+#     # stumpy.mstump 返回两个核心矩阵：
+#     # mps: 形状 (d, N-m+1), mps[0]是1D Motif, mps[1]是2D Motif 距离
+#     # indices: 对应的最近邻索引
+#     mps, indices = stumpy.mstump(raw_array_2d, m=m)
+    
+#     # 我们需要多维完全匹配的特征，所以取 d-1 (即 index 1)
+#     distances = np.copy(mps[1, :]) 
+    
+#     zero_mask = distances <= 1e-5
+#     distances[zero_mask] = np.inf
+
+#     candidates = []
+#     for _ in range(top_k):
+#         anchor_idx = int(np.nanargmin(distances))
+#         v_d = distances[anchor_idx]
+        
+#         if v_d > config["threshold_d"] or np.isinf(v_d):
+#             break
+            
+#         # 截取二维候选 Motif，形状为 (2, m)
+#         candidate_motif = raw_array_2d[:, anchor_idx : anchor_idx + m]
+#         candidates.append(candidate_motif)
+        
+#         exclude_start = max(0, anchor_idx - m)
+#         exclude_end = min(len(distances), anchor_idx + m)
+#         distances[exclude_start:exclude_end] = np.inf
+        
+#     return candidates
+
+
 def calc_min_subseq_dtw(
     row_curve: np.ndarray, 
     z_motif: np.ndarray, 
@@ -179,6 +197,10 @@ def calc_min_subseq_dtw(
     
     for i in range(L - motif_len + 1):
         sub_seq = row_curve[i : i + motif_len]
+
+        # skip if np.nan 
+        if np.isnan(sub_seq).any():
+            continue
         
         std = np.std(sub_seq) + 1e-8
         z_sub = (sub_seq - np.mean(sub_seq)) / std
@@ -191,6 +213,13 @@ def calc_min_subseq_dtw(
         if d < min_dist:
             min_dist = d
     return min_dist
+
+
+# def calc_min_subseq_dtw_ndim(row_curve_2d: np.ndarray, z_motif_2d: np.ndarray, dtw_w: int):
+#     # row_curve_2d shape: (N, 2), dtaidistance 需要 (N, d)
+#     # Z-Score 标准化必须在多维上【独立】进行，防止量纲冲突
+#     # 然后直接调用 dtaidistance 的多维 DTW
+#     return dtw_ndim.distance_fast(row_curve_2d, z_motif_2d, window=dtw_w)
 
 
 def evaluate_and_build_fsm(
@@ -231,6 +260,7 @@ def evaluate_and_build_fsm(
             .cast(pl.Int32)
             .alias("macro_state")
         )
+        .with_columns(pl.col("macro_state").shift(1)) # avoid lookahead bias
         .drop(["p33", "p67"])
         .sort("day")
     )
@@ -242,21 +272,39 @@ def evaluate_and_build_fsm(
    # =================================================================
     # 2. Time-Adjusted Zero-Anchored Bins Based on std
     # =================================================================
-    z_bound = tune_config["z_abs_bound"] # 默认为 1.0
+    # z_bound = tune_config["z_abs_bound"] # 默认为 1.0
+
+    # for fw in common_config["stats_windows"]:
+    #     col = f"fwd_ret_{fw}"
+    #     if col not in panel_df.columns: continue
+            
+    #     panel_df = panel_df.with_columns([
+    #         # T +1 / T+2 / T+3 std ---> sqrt(T)
+    #         (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
+    #     ]).with_columns([
+    #         pl.when(pl.col(f"z_abs_{fw}") < -z_bound).then(0)
+    #         .when(pl.col(f"z_abs_{fw}") < 0.0).then(1)
+    #         .when(pl.col(f"z_abs_{fw}") < z_bound).then(2)
+    #         .otherwise(3).cast(pl.Int32).alias(f"bin_{fw}")
+    #     ])
+
+    edge_ratio = common_config["edge_ratio"]
 
     for fw in common_config["stats_windows"]:
         col = f"fwd_ret_{fw}"
         if col not in panel_df.columns: continue
-            
+        
         panel_df = panel_df.with_columns([
-            # T +1 / T+2 / T+3 std ---> sqrt(T)
-            (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
+            # # T +1 / T+2 / T+3 std ---> sqrt(T)
+            # (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
+            # method="average" to calculate Rank Ascending, then normalize to [0,1]
+            (pl.col(col).rank(method="average") / pl.len()).over("day").alias(f"rank_{fw}")
         ]).with_columns([
-            pl.when(pl.col(f"z_abs_{fw}") < -z_bound).then(0)
-            .when(pl.col(f"z_abs_{fw}") < 0.0).then(1)
-            .when(pl.col(f"z_abs_{fw}") < z_bound).then(2)
-            .otherwise(3).cast(pl.Int32).alias(f"bin_{fw}")
-        ])
+            pl.when(pl.col(f"rank_{fw}") <= edge_ratio).then(0)                
+            .when(pl.col(f"rank_{fw}") <= 0.50).then(1)                       
+            .when(pl.col(f"rank_{fw}") <= (1.0 - edge_ratio)).then(2)         
+            .otherwise(3).cast(pl.Int32).alias(f"bin_{fw}")                    
+        ]).drop(f"rank_{fw}") 
 
     # =================================================================
     # 3. DTW Triggers
@@ -277,7 +325,7 @@ def evaluate_and_build_fsm(
     triggers = eval_df.filter(pl.col("distance") <= threshold_d)
     
     if triggers.height < 5:
-        return {"status": "failed", "reason": f"匹配样本太少 (n={triggers.height})", "metrics_score": 0.0}
+        return {"status": "failed", "reason": f"Matching Not enough (n={triggers.height})", "metrics_score": 0.0}
 
     # === Markov Laplace ===
     trans_t1 = np.ones((3, 4), dtype=np.float64) 
@@ -298,16 +346,16 @@ def evaluate_and_build_fsm(
     uncond_rets = eval_df["fwd_ret_1"].drop_nulls().to_numpy() 
     
     if len(cond_rets) < 5 or np.std(cond_rets) < 1e-8:
-         return {"status": "failed", "reason": "触发收益方差为0", "metrics_score": 0.0}
+         return {"status": "failed", "reason": "ret Std 0 means supend or delist", "metrics_score": 0.0}
     
     try:
-        u_stat, u_pval = stats.mannwhitneyu(cond_rets, uncond_rets, alternative=common_config["alternative"]) # 'two-sided' 
+        u_stat, u_pval = stats.mannwhitneyu(cond_rets, uncond_rets, alternative=common_config["alternative"])
     except ValueError:
         return {"status": "failed", "reason": "MW-U 检验数学越界", "metrics_score": 0.0}
     
     score = 100.0 if u_pval <= 0.05 else (10.0 if u_pval <= 0.10 else 0.0)
     if score == 0.0:
-        return {"status": "failed", "reason": f"缺乏统计显著性 (P-val={u_pval:.4f})", "metrics_score": 0.0}
+        return {"status": "failed", "reason": f"(P-val={u_pval:.4f})", "metrics_score": 0.0}
 
     return {
         "status": "success",
@@ -319,10 +367,26 @@ def evaluate_and_build_fsm(
     }
 
 
+def prepare_stumpy_array(curves_2d: np.ndarray, config: dict) -> np.ndarray:
+    if curves_2d.size == 0:
+        return np.array([])
+        
+    m = config["m"]
+    clean_curves = np.copy(curves_2d)
+    # clean_curves = np.nan_to_num(curves_2d, nan=0.0, posinf=0.0, neginf=0.0)
+    clean_curves[np.isinf(clean_curves)] = 0.0 
+    
+    # m NaN as separate between assets
+    nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
+    stumpy_arr = np.hstack([clean_curves, nan_buffer]).flatten()
+    # abundan last m np.nan
+    return stumpy_arr[:-m] 
+
+
 def discover_fsm_pattern(
     search_config: dict, 
     panel_lf: pl.LazyFrame,  
-    prior_config: dict
+    common_config: dict
 ) -> Dict[str, Any]:
     
     # config
@@ -335,24 +399,31 @@ def discover_fsm_pattern(
     tune_config["threshold_d"] = threshold_d
     
     # extract curves_2d
-    panel_df = panel_lf.collect()
+    panel_df = panel_lf.collect(engine="streaming")
 
     if panel_df.height == 0:
         return {
             "status": "failed", 
-            "reason": "HPO 过滤后样本量归零 (零行数据)", 
+            "reason": "HPO Panel_df Zero after filter", 
             "metrics_score": 0.0
         }
         
     if panel_df.height <= m :
         return {
             "status": "failed", 
-            "reason": f"样本量不足以支持模式挖掘 (n={panel_df.height})", 
+            "reason": f"Not enough data (n={panel_df.height})", 
             "metrics_score": 0.0
         }
 
     lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
     lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
+    lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
+    
+    # lag_0 today 14:55  np.nan！
+    tail_bars = common_config.get("exclude_bars", 10) // int(search_config["downsample"])
+    if tail_bars > 0:
+        lag_arrays[-1][:, -tail_bars:] = np.nan
+
     curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
     
     # extract stumpy feature
@@ -360,17 +431,15 @@ def discover_fsm_pattern(
     candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, top_k=5)
     
     if not candidate_motifs: 
-        return {"status": "failed", "reason": "未找到候选 Motif"}
+        return {"status": "failed", "reason": " Not Found Motif"}
     
     best_result, highest_score = None, -1.0
     for motif in candidate_motifs:
 
         result = evaluate_and_build_fsm(
-            panel_df, curves_2d, motif, tune_config, prior_config)
+            panel_df, curves_2d, motif, tune_config, common_config)
         if result["status"] == "success" and result["metrics_score"] > highest_score:
             highest_score = result["metrics_score"]
             best_result = result
             
-    return best_result if best_result else {"status": "failed", "reason": "未能通过统计学检验(P-val > 0.1)"}
-
-
+    return best_result if best_result else {"status": "failed", "reason": "(P-val > 0.1)"}

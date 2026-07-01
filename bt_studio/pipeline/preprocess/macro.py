@@ -75,7 +75,7 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
     # ====================================================================
     # Eager Mode avoid Lazy Optimize Bug
     # ====================================================================
-    df = tick_lf.collect() 
+    df = tick_lf.collect(engine="streaming") 
     if df.height == 0:
         return df.lazy()
 

@@ -65,14 +65,18 @@ def node_prepare_daily_universe(exp_config: dict, warm=10000):
     )
     # sample universe 
     filtered_uni_lf = universe_sample(universe_lf, daily_lf, exceed=120, topk=0.80)
-    filtered_uni_df = filtered_uni_lf.collect()
-    
-    valid_sids = filtered_uni_df["sid"].unique().to_list()
-
     dret_path = f"{BASE_DIR}/global_daily.parquet"
-    filtered_uni_df.write_parquet(dret_path)
+    
+    filtered_uni_lf.sink_parquet(dret_path)  
+    
+    valid_sids = (
+        pl.scan_parquet(dret_path)        
+        .select(pl.col("sid").unique())   
+        .collect(engine="streaming")      
+        ["sid"]
+        .to_list()
+    )
     return {"dret_path": dret_path, "universe_sids": valid_sids}
-
 
 # ==============================================================================
 # Node 2: Minute and Ofi
@@ -98,7 +102,8 @@ def node_extract_hf_data(year: int, sids: list[bytes], exp_config: dict):
             
         if lfs:
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            pl.concat(lfs).collect().write_parquet(out_path)
+            # pl.concat(lfs).collect().write_parquet(out_path)
+            pl.concat(lfs).sink_parquet(out_path)
             return out_path
         return None
 
@@ -126,7 +131,7 @@ def node_check_decay(year: int, dret_path: str, oos_paths: list, exp_config: dic
     if not aligned_lfs: return True
 
     # Panel Data
-    oos_panel_df = build_fsm_panel(aligned_lfs, pl.scan_parquet(dret_path), model_ckpt["config"]).collect()
+    oos_panel_df = build_fsm_panel(aligned_lfs, pl.scan_parquet(dret_path), model_ckpt["config"]).collect(engine="streaming")
     cross_days = int(model_ckpt["config"]["cross_days"])
     curves_2d = np.hstack([np.vstack(oos_panel_df[f"lag_{i}"].to_list()) for i in reversed(range(cross_days))])
     
@@ -178,6 +183,8 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
     # put into Ray Plasma
     hf_ref = ray.put(hf_pa)
     dret_ref = ray.put(dret_pa)
+    
+    prev_ckpt = get_latest_ckpt(year - 1, MODEL_DIR)
 
     # =========================================================================
     # ray tune and search
@@ -189,11 +196,17 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
         "motif_minutes": tune.choice(sb["motif_minutes"]), 
         "threshold_r": tune.uniform(*sb["threshold_r"]),
         "dtw_window_frac": tune.uniform(*sb["dtw_window_frac"]), 
-        "z_abs_bound": tune.uniform(*sb["z_abs_bound"])
     }
 
     search_alg = OptunaSearch()
-    prev_ckpt = get_latest_ckpt(year - 1, MODEL_DIR)
+
+    # # multithread / sample optimize
+    # optuna_sampler = optuna.samplers.TPESampler(n_startup_trials=20, multivariate=True)
+    # search_alg = OptunaSearch(
+    #     sampler=optuna_sampler,
+    #     points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}] if prev_ckpt else None
+    # )
+
     if prev_ckpt:
         prior_cfg = pickle.load(open(prev_ckpt, "rb"))["config"]
         search_alg = OptunaSearch(points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}])
@@ -320,19 +333,20 @@ if __name__ == "__main__":
             "vol_window": 20 , # used for vol in fut_ret_fw
             "top_k_ratio": 0.25, # used for sample
             "stats_windows": [1,2,3], # T+1 ---> T+3
-            "alternative": "greater" 
+            "alternative": "greater",
+            "exclude_bars": 10, # exclude last 10 bars means 14:50
+            "edge_ratio": 0.25 # ratio of macro state edge bins 
         },
 
         "search_bounds": {
-            "downsample": [1, 3, 5], 
-            "cross_days": [3, 4, 5], # concat cross_days of lagged curves to 2D array for DTW 
-            "motif_minutes": [30, 60, 120, 240, 360], # used from motif length  
-            "threshold_r": [0.30, 0.90], 
-            "dtw_window_frac": [0.05, 0.20], # used for DTW offset 
-            "z_abs_bound": [0.6, 1.5],
+            "downsample": [3, 5, 10], # downsample for DTW
+            "cross_days": [2, 3, 4], # concat cross_days of lagged curves to 2D array for DTW 
+            "motif_minutes": [30, 60, 120, 240], # used from motif length intraday
+            "threshold_r": [0.7, 0.90], 
+            "dtw_window_frac": [0.05, 0.10], # used for DTW offset 
             "grace_period": 5, "reduction_factor": 4, 
             "num_trials": 100, 
-            "max_concurrent_trials": 8
+            "max_concurrent_trials": 4
         }
     }
 
