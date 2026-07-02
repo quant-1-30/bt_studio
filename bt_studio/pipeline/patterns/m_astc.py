@@ -1,5 +1,7 @@
 import stumpy
+import numpy as np
 from dtaidistance import dtw_ndim
+from numpy.lib.stride_tricks import sliding_window_view
 
 
 def prepare_mstumpy_array(panel_df: pl.DataFrame, common_config: dict, tune_config: dict):
@@ -65,32 +67,73 @@ def get_candidate_motifs_md(T_multi: np.ndarray, config: dict, top_k=5):
     return candidate_motifs
 
 
-def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_md: np.ndarray, dtw_w: int, threshold_d: float):
-    # row_md shape: (D, Length)
-    # z_motif_md shape: (D, m)
-    D, L = row_md.shape
-    m = z_motif_md.shape[1]
-    min_dist = np.inf
+# def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_md: np.ndarray, dtw_w: int, threshold_d: float):
+#     # row_md shape: (D, Length)
+#     # z_motif_md shape: (D, m)
+#     D, L = row_md.shape
+#     m = z_motif_md.shape[1]
+#     min_dist = np.inf
    
-    z_motif_t = np.ascontiguousarray(z_motif_md.T, dtype=np.float64) # (Length, Dims)
+#     z_motif_t = np.ascontiguousarray(z_motif_md.T, dtype=np.float64) # (Length, Dims)
     
-    for i in range(L - m + 1):
-        sub_md = row_md[:, i : i + m] # Shape: (D, m)
+#     for i in range(L - m + 1):
+#         sub_md = row_md[:, i : i + m] # Shape: (D, m)
         
-        if np.isnan(sub_md).any(): 
+#         if np.isnan(sub_md).any(): 
+#             continue
+            
+#         #  keepdims=True D ---> Z-Score！
+#         means = np.mean(sub_md, axis=1, keepdims=True)
+#         stds = np.std(sub_md, axis=1, keepdims=True) + 1e-8
+#         z_sub_md = (sub_md - means) / stds
+        
+#         z_sub_t = np.ascontiguousarray(z_sub_md.T, dtype=np.float64)
+        
+#         d = dtw_ndim.distance_fast(z_sub_t, z_motif_t, window=dtw_w, max_dist=min(min_dist, threshold_d))
+#         if d < min_dist: 
+#             min_dist = d
+            
+#     return min_dist
+
+
+def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_t: np.ndarray, dtw_w: int, threshold_d: float):
+    # row_md shape: (D, L)
+    # z_motif_t shape: (m, D) 
+    D, L = row_md.shape
+    m = z_motif_t.shape[0]
+    
+    if L < m:
+        return np.inf
+
+    # 1. windows shape : (D, window, m)
+    windows = sliding_window_view(row_md, window_shape=m, axis=1)
+    
+    # 2. Transpose -> (window, D, m)
+    windows_iter = np.transpose(windows, (1, 0, 2))
+    
+    # 3. nan mask / axis=(1,2) (D, m) 
+    is_valid_window = ~np.isnan(windows_iter).any(axis=(1, 2))
+
+    min_dist = np.inf
+    for i in range(len(windows_iter)):
+        if not is_valid_window[i]:
             continue
             
-        #  keepdims=True D ---> Z-Score！
+        # Shape (D, m)
+        sub_md = windows_iter[i]
+        
         means = np.mean(sub_md, axis=1, keepdims=True)
         stds = np.std(sub_md, axis=1, keepdims=True) + 1e-8
+        
         z_sub_md = (sub_md - means) / stds
         
+        # dtaidistance C (m, D) 
         z_sub_t = np.ascontiguousarray(z_sub_md.T, dtype=np.float64)
         
         d = dtw_ndim.distance_fast(z_sub_t, z_motif_t, window=dtw_w, max_dist=min(min_dist, threshold_d))
+        
         if d < min_dist: 
             min_dist = d
-            
     return min_dist
 
 

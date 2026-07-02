@@ -10,6 +10,8 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["POLARS_MAX_THREADS"] = "1"
+os.environ["RAYON_NUM_THREADS"] = "1"
+os.environ["NUMBA_NUM_THREADS"] = "1"
 os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
 
 import multiprocessing
@@ -297,6 +299,8 @@ def wfo_pipeline(exp_config):
     runtime_env = {
         "env_vars": {
             "POLARS_MAX_THREADS": "1",
+            "RAYON_NUM_THREADS": "1",       # rayon Rust 
+            "NUMBA_NUM_THREADS": "1",       # numba
             "OMP_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1",
@@ -354,7 +358,7 @@ if __name__ == "__main__":
             "dtw_window_frac": [0.05, 0.10], # used for DTW offset 
             "grace_period": 5, "reduction_factor": 4, 
             "num_trials": 100, 
-            "max_concurrent_trials": 2
+            "max_concurrent_trials": 8
         }
     }
 

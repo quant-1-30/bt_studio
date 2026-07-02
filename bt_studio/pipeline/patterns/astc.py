@@ -1,10 +1,12 @@
 import polars as pl
 import numpy as np
 import stumpy
+import numpy as np
 import scipy.stats as stats
 
 from dtaidistance import dtw
 from typing import List, Dict, Any
+from numpy.lib.stride_tricks import sliding_window_view
 
 
 def prepare_stumpy_array(curves_2d: np.ndarray, config: dict) -> np.ndarray:
@@ -58,6 +60,38 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) ->
     return candidates
 
 
+# def calc_min_subseq_dtw(
+#     row_curve: np.ndarray, 
+#     z_motif: np.ndarray, 
+#     motif_len: int, 
+#     dtw_w: int, 
+#     threshold_d: float,
+# ) -> float:
+#     L = len(row_curve)
+#     if L < motif_len:
+#         return np.inf
+        
+#     min_dist = np.inf
+    
+#     for i in range(L - motif_len + 1):
+#         sub_seq = row_curve[i : i + motif_len]
+
+#         # skip if np.nan 
+#         if np.isnan(sub_seq).any():
+#             continue
+        
+#         std = np.std(sub_seq) + 1e-8
+#         z_sub = (sub_seq - np.mean(sub_seq)) / std
+
+#         z_sub = np.ascontiguousarray(z_sub, dtype=np.float64)
+        
+#         d = dtw.distance_fast(z_sub, z_motif, window=dtw_w, max_dist= min(min_dist, threshold_d) )
+        
+#         if d < min_dist:
+#             min_dist = d
+#     return min_dist
+
+
 def calc_min_subseq_dtw(
     row_curve: np.ndarray, 
     z_motif: np.ndarray, 
@@ -65,29 +99,35 @@ def calc_min_subseq_dtw(
     dtw_w: int, 
     threshold_d: float,
 ) -> float:
+
     L = len(row_curve)
     if L < motif_len:
         return np.inf
-        
-    min_dist = np.inf
-    
-    for i in range(L - motif_len + 1):
-        sub_seq = row_curve[i : i + motif_len]
 
-        # skip if np.nan 
-        if np.isnan(sub_seq).any():
+    # 1. Shape: (window, motif_len)
+    windows = sliding_window_view(row_curve, window_shape=motif_len)
+    
+    # 2. vector mask
+    is_valid_window = ~np.isnan(windows).any(axis=-1)
+    
+    min_dist = np.inf
+    # 3. loop over valid windows
+    for i in range(len(windows)):
+        if not is_valid_window[i]:
             continue
+            
+        sub_seq = windows[i]
         
         std = np.std(sub_seq) + 1e-8
         z_sub = (sub_seq - np.mean(sub_seq)) / std
-
+        
         z_sub = np.ascontiguousarray(z_sub, dtype=np.float64)
         
-        d = dtw.distance_fast(z_sub, z_motif, window=dtw_w, max_dist= min(min_dist, threshold_d) )
-        
+        d = dtw.distance_fast(z_sub, z_motif, window=dtw_w, max_dist=min(min_dist, threshold_d))
         if d < min_dist:
             min_dist = d
-    return min_dist
+            
+    return min_dist 
 
 
 def evaluate_and_build_fsm(
