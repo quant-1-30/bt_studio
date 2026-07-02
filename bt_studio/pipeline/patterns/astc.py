@@ -7,107 +7,20 @@ from dtaidistance import dtw
 from typing import List, Dict, Any
 
 
-def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, config: dict) -> pl.DataFrame:
-    # =========================================================================
-    # config 
-    # =========================================================================
-    ds = config["downsample"]
-    bars_per_day = 240 // ds
-
-    # =========================================================================
-    # schema align with aligned_lf
-    # =========================================================================
-    daily_schema = daily_lf.collect_schema()
-
-    if daily_schema["day"] in [pl.Int32, pl.Int64]:
-        daily_lf = daily_lf.with_columns(pl.col("day").cast(pl.String).str.to_date("%Y%m%d"))
-    elif daily_schema["day"] == pl.String:
-        daily_lf = daily_lf.with_columns(pl.col("day").str.to_date("%Y%m%d"))
-    elif daily_schema["day"] == pl.Datetime:
-        daily_lf = daily_lf.with_columns(pl.col("day").cast(pl.Date))
-
-    daily_lf = daily_lf.with_columns([
-        pl.col("sid").cast(pl.String).str.strip_chars(" \x00\t\n"), 
-        pl.col("day").cast(pl.Date)
-    ])
+def prepare_stumpy_array(curves_2d: np.ndarray, config: dict) -> np.ndarray:
+    if curves_2d.size == 0:
+        return np.array([])
+        
+    m = config["m"]
+    clean_curves = np.copy(curves_2d)
+    # clean_curves = np.nan_to_num(curves_2d, nan=0.0, posinf=0.0, neginf=0.0)
+    clean_curves[np.isinf(clean_curves)] = 0.0 
     
-    # =========================================================================
-    # schema align with aligned_lf
-    # =========================================================================
-
-    # all_feat_lf = pl.concat(aligned_lfs)
-    feat_schema = all_feat_lf.collect_schema()
-    
-    if feat_schema["day"] in [pl.Int32, pl.Int64]:
-        all_feat_lf = all_feat_lf.with_columns(pl.col("day").cast(pl.String).str.to_date("%Y%m%d"))
-    elif feat_schema["day"] == pl.String:
-        all_feat_lf = all_feat_lf.with_columns(pl.col("day").str.to_date("%Y%m%d"))
-    elif feat_schema["day"] == pl.Datetime:
-        all_feat_lf = all_feat_lf.with_columns(pl.col("day").cast(pl.Date))
-
-    all_feat_lf = all_feat_lf.with_columns([
-        pl.col("sid").cast(pl.String).str.strip_chars(" \x00\t\n"), 
-        pl.col("day").cast(pl.Date)
-    ])
-
-    # =========================================================================
-    # daily_ret and vol
-    # =========================================================================
-    daily_ret_lf = (
-        daily_lf.sort(["sid", "day"])
-        .with_columns([
-            (pl.col("close") / pl.col("close").shift(1).over("sid") - 1.0).alias("daily_ret")
-        ])
-        .with_columns([
-            # pl.col("daily_ret").rolling_std(window_size=20, min_periods=5)
-            #   .over("sid").fill_null(strategy="forward")
-            #   .clip(lower_bound=0.005).alias("vol_20d"),
-            (pl.col("close").shift(-1).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_1"),
-            (pl.col("close").shift(-2).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_2"),
-            (pl.col("close").shift(-3).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_3")
-        ])
-    )
- 
-    # =========================================================================
-    # downsample
-    # =========================================================================
-    if ds > 1:
-        all_feat_lf = all_feat_lf.filter((pl.col("bar_idx") % ds) == 0)
-
-    # =========================================================================
-    # join 
-    # =========================================================================
-    curve_lf = (
-        all_feat_lf
-        .sort(["day", "sid", "bar_idx"])
-        .group_by(["day", "sid"])
-        .agg([
-            pl.col("ofi_ratio").alias("daily_curve"),
-            pl.len().alias("curve_len")  
-        ])
-        .filter(pl.col("curve_len") == bars_per_day) 
-    )
-
-    # =========================================================================
-    # crossover concat 
-    # =========================================================================
-    shift_exprs = [
-        pl.col("daily_curve").shift(i).over("sid").alias(f"lag_{i}") 
-        for i in reversed(range(config["cross_days"]))
-    ]
-
-    curve_lf = (
-        curve_lf.sort(["sid", "day"])
-        .with_columns(shift_exprs)
-        .drop_nulls(subset=[f"lag_{i}" for i in range(config["cross_days"])]) 
-    )
-
-    panel_lf = curve_lf.join(
-        # daily_ret_lf.select(["day", "sid", "vol_20d", "fwd_ret_1", "fwd_ret_2", "fwd_ret_3"]),
-        daily_ret_lf.select(["day", "sid", "fwd_ret_1", "fwd_ret_2", "fwd_ret_3"]),
-        on=["day", "sid"], how="inner"
-    )
-    return panel_lf
+    # m NaN as separate between assets
+    nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
+    stumpy_arr = np.hstack([clean_curves, nan_buffer]).flatten()
+    # abundan last m np.nan
+    return stumpy_arr[:-m] 
 
 
 def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) -> List[np.ndarray]:
@@ -124,12 +37,9 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) ->
         return []
 
     distances = np.copy(mp[:, 0])
-    
-    zero_mask = distances <= 1e-5
-    distances[zero_mask] = np.inf
+    distances[distances <= 1e-5] = np.inf
 
     candidates = []
-    
     for _ in range(top_k):
         anchor_idx = int(np.nanargmin(distances)) # argmin
         v_d = distances[anchor_idx]
@@ -146,40 +56,6 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) ->
         exclude_end = min(len(distances), anchor_idx + m)
         distances[exclude_start:exclude_end] = np.inf
     return candidates
-
-
-# def get_candidate_mstump_motifs(raw_array_2d: np.ndarray, config: dict, top_k: int = 5):
-#     # raw_array_2d shape: (2, N) -> 维度0: OFI, 维度1: VOL
-#     m = config["m"]
-    
-#     # stumpy.mstump 返回两个核心矩阵：
-#     # mps: 形状 (d, N-m+1), mps[0]是1D Motif, mps[1]是2D Motif 距离
-#     # indices: 对应的最近邻索引
-#     mps, indices = stumpy.mstump(raw_array_2d, m=m)
-    
-#     # 我们需要多维完全匹配的特征，所以取 d-1 (即 index 1)
-#     distances = np.copy(mps[1, :]) 
-    
-#     zero_mask = distances <= 1e-5
-#     distances[zero_mask] = np.inf
-
-#     candidates = []
-#     for _ in range(top_k):
-#         anchor_idx = int(np.nanargmin(distances))
-#         v_d = distances[anchor_idx]
-        
-#         if v_d > config["threshold_d"] or np.isinf(v_d):
-#             break
-            
-#         # 截取二维候选 Motif，形状为 (2, m)
-#         candidate_motif = raw_array_2d[:, anchor_idx : anchor_idx + m]
-#         candidates.append(candidate_motif)
-        
-#         exclude_start = max(0, anchor_idx - m)
-#         exclude_end = min(len(distances), anchor_idx + m)
-#         distances[exclude_start:exclude_end] = np.inf
-        
-#     return candidates
 
 
 def calc_min_subseq_dtw(
@@ -207,19 +83,11 @@ def calc_min_subseq_dtw(
 
         z_sub = np.ascontiguousarray(z_sub, dtype=np.float64)
         
-        current_limit = min(min_dist, threshold_d) 
-        d = dtw.distance_fast(z_sub, z_motif, window=dtw_w, max_dist=current_limit)
+        d = dtw.distance_fast(z_sub, z_motif, window=dtw_w, max_dist= min(min_dist, threshold_d) )
         
         if d < min_dist:
             min_dist = d
     return min_dist
-
-
-# def calc_min_subseq_dtw_ndim(row_curve_2d: np.ndarray, z_motif_2d: np.ndarray, dtw_w: int):
-#     # row_curve_2d shape: (N, 2), dtaidistance 需要 (N, d)
-#     # Z-Score 标准化必须在多维上【独立】进行，防止量纲冲突
-#     # 然后直接调用 dtaidistance 的多维 DTW
-#     return dtw_ndim.distance_fast(row_curve_2d, z_motif_2d, window=dtw_w)
 
 
 def evaluate_and_build_fsm(
@@ -270,23 +138,8 @@ def evaluate_and_build_fsm(
     eval_df = panel_df.join(daily_macro.select(["day", "macro_state"]), on="day", how="left")
 
    # =================================================================
-    # 2. Time-Adjusted Zero-Anchored Bins Based on std
+    # 2. Time-Adjusted Zero-Anchored Bins Based on Rank not std
     # =================================================================
-    # z_bound = tune_config["z_abs_bound"] # 默认为 1.0
-
-    # for fw in common_config["stats_windows"]:
-    #     col = f"fwd_ret_{fw}"
-    #     if col not in panel_df.columns: continue
-            
-    #     panel_df = panel_df.with_columns([
-    #         # T +1 / T+2 / T+3 std ---> sqrt(T)
-    #         (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
-    #     ]).with_columns([
-    #         pl.when(pl.col(f"z_abs_{fw}") < -z_bound).then(0)
-    #         .when(pl.col(f"z_abs_{fw}") < 0.0).then(1)
-    #         .when(pl.col(f"z_abs_{fw}") < z_bound).then(2)
-    #         .otherwise(3).cast(pl.Int32).alias(f"bin_{fw}")
-    #     ])
 
     edge_ratio = common_config["edge_ratio"]
 
@@ -313,7 +166,6 @@ def evaluate_and_build_fsm(
     threshold_d = tune_config["threshold_d"]
     dtw_w = int(m * tune_config.get("dtw_window_frac", 0.1))
 
-    # curves = np.vstack(eval_df["curve"].to_list()).astype(np.float64)
     z_motif = np.ascontiguousarray((motif - np.mean(motif)) / (np.std(motif) + 1e-8), dtype=np.float64)
 
     distances = [
@@ -367,22 +219,6 @@ def evaluate_and_build_fsm(
     }
 
 
-def prepare_stumpy_array(curves_2d: np.ndarray, config: dict) -> np.ndarray:
-    if curves_2d.size == 0:
-        return np.array([])
-        
-    m = config["m"]
-    clean_curves = np.copy(curves_2d)
-    # clean_curves = np.nan_to_num(curves_2d, nan=0.0, posinf=0.0, neginf=0.0)
-    clean_curves[np.isinf(clean_curves)] = 0.0 
-    
-    # m NaN as separate between assets
-    nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
-    stumpy_arr = np.hstack([clean_curves, nan_buffer]).flatten()
-    # abundan last m np.nan
-    return stumpy_arr[:-m] 
-
-
 def discover_fsm_pattern(
     search_config: dict, 
     panel_lf: pl.LazyFrame,  
@@ -416,7 +252,6 @@ def discover_fsm_pattern(
         }
 
     lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
-    lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
     lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
     
     # lag_0 today 14:55  np.nan！

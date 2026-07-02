@@ -20,8 +20,7 @@ class FSMPredictor:
         self.p_t2_t1 = np.array(fsm_network["P(T2|T1)"])       # Shape: (4, 4)
         self.p_t3_t2 = np.array(fsm_network["P(T3|T2)"])       # Shape: (4, 4)
         
-        # 0:大跌, 1:微跌, 2:微涨, 3:大涨
-        self.bin_weights = np.array([-1.0, -0.5, 0.5, 1.0])
+        self.bin_weights = np.array([-1.0, -0.5, 0.5, 1.0]) #  # 0:大跌, 1:微跌, 2:微涨, 3:大涨
 
     def predict(self, panel_lf: pl.LazyFrame) -> pl.DataFrame:
         

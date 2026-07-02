@@ -24,17 +24,18 @@ except RuntimeError:
     pass 
 
 import ray
+import optuna
 import mlflow
-import gc
 import pickle
+import gc
 from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 from ray.air.integrations.mlflow import MLflowLoggerCallback
 # from prefect import flow, task, get_run_logger
 
-from bt_studio.pipeline.patterns import build_fsm_panel, evaluate_and_build_fsm, discover_fsm_pattern
-from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample
+from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample, build_fsm_panel
 from bt_studio.pipeline.features import build_ofi
+from bt_studio.pipeline.patterns import evaluate_and_build_fsm, discover_fsm_pattern
 from bt_studio.pipeline.inference import FSMPredictor
 from bt_studio.utils.common import get_latest_ckpt
 
@@ -44,6 +45,7 @@ MODEL_DIR = f"{BASE_DIR}/models"
 # ==============================================================================
 # Node 1 Macro and Universe
 # ==============================================================================
+
 # @task(name="Node_Prepare_Daily_Universe") 
 def node_prepare_daily_universe(exp_config: dict, warm=10000):
     rq = exp_config["run_params"]
@@ -81,8 +83,9 @@ def node_prepare_daily_universe(exp_config: dict, warm=10000):
 # ==============================================================================
 # Node 2: Minute and Ofi
 # ==============================================================================
-# @task(name="Node_Extract_HF_Data") 
-def node_extract_hf_data(year: int, sids: list[bytes], exp_config: dict):
+
+# @task(name="Node_Extract_feature") 
+def node_extract_feature(year: int, sids: list[bytes], exp_config: dict):
     
     def _fetch_and_build(target_year: int, out_path: str):
         out_path = f"{BASE_DIR}/features/hf_{target_year}.parquet"
@@ -118,6 +121,7 @@ def node_extract_hf_data(year: int, sids: list[bytes], exp_config: dict):
 # ==============================================================================
 # Node 3: OOS Decay
 # ==============================================================================
+
 # @task(name="Node_Check_Decay") 
 def node_check_decay(year: int, dret_path: str, oos_paths: list, exp_config: dict):
     prev_model_path = get_latest_ckpt(year - 1, MODEL_DIR)
@@ -150,9 +154,9 @@ def node_check_decay(year: int, dret_path: str, oos_paths: list, exp_config: dic
 # ==============================================================================
 # Node 4: Ray Tune 
 # ==============================================================================
+
 def trainable_fsm_worker(config, hf_pa, dret_pa, prior_config):
     # ray.tune auto ray.get from ptr to Arrow ---> Polars DataFrame
-
     hf_lf = pl.from_arrow(hf_pa).clone().lazy() # 
     dret_lf = pl.from_arrow(dret_pa).clone().lazy()
 
@@ -168,6 +172,9 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, prior_config):
         print(f"\n[Worker Filtered] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
         tune.report({"metrics_score": 0.0, "u_pval": 1.0})
 
+    # enforce recycle
+    del panel_lf, hf_lf, dret_lf
+    gc.collect()
 
 # @task(name="Node_Tune") 
 def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
@@ -198,19 +205,19 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
         "dtw_window_frac": tune.uniform(*sb["dtw_window_frac"]), 
     }
 
-    search_alg = OptunaSearch()
 
-    # # multithread / sample optimize
-    # optuna_sampler = optuna.samplers.TPESampler(n_startup_trials=20, multivariate=True)
-    # search_alg = OptunaSearch(
-    #     sampler=optuna_sampler,
-    #     points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}] if prev_ckpt else None
-    # )
-
+    points_to_evaluate = None
     if prev_ckpt:
         prior_cfg = pickle.load(open(prev_ckpt, "rb"))["config"]
-        search_alg = OptunaSearch(points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}])
+        points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}]
 
+    # multithread / sample optimize
+    optuna_sampler = optuna.samplers.TPESampler(n_startup_trials=10, multivariate=True) #
+    search_alg = OptunaSearch(
+        sampler=optuna_sampler,
+        points_to_evaluate=points_to_evaluate
+    )
+    
     wrapped_trainable = tune.with_resources(
         # tune.with_parameters(trainable_fsm_worker, hf_paths=train_paths, dret_path=dret_path, prior_config=rp),
         tune.with_parameters(
@@ -259,6 +266,7 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
 # ==============================================================================
 # Node 5: OOS 
 # ==============================================================================
+
 # @task(name="Node_OOS_Inference") 
 def node_oos_inference(year: int, dret_path: str, oos_paths: list, exp_config: dict):
     final_model_path = get_latest_ckpt(year, MODEL_DIR)
@@ -309,7 +317,7 @@ def wfo_pipeline(exp_config):
         # logger.info(f"========== 🚀 {y} year Walk-Forward ==========")
         
         # Node 2
-        paths = node_extract_hf_data(y, global_data["universe_sids"], exp_config)
+        paths = node_extract_feature(y, global_data["universe_sids"], exp_config)
         
         # Node 3
         if node_check_decay(y, global_data["dret_path"], paths["oos_paths"], exp_config):
@@ -346,7 +354,7 @@ if __name__ == "__main__":
             "dtw_window_frac": [0.05, 0.10], # used for DTW offset 
             "grace_period": 5, "reduction_factor": 4, 
             "num_trials": 100, 
-            "max_concurrent_trials": 4
+            "max_concurrent_trials": 2
         }
     }
 
