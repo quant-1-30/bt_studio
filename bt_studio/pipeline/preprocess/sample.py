@@ -10,7 +10,14 @@ def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, exceed=12
         .join(meta_lf, on="sid", how="left")
         .with_columns([
             pl.col("day").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d").alias("date"),
-            pl.col("first_trading").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d").alias("ipo_date")
+            pl.col("first_trading").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d").alias("ipo_date"),
+            
+            # =====================================================================
+            # 688 \ 3 \ 0 \ 6
+            # =====================================================================
+            pl.when(pl.col("sid").cast(pl.String).str.starts_with("688")).then(pl.lit("688"))
+              .otherwise(pl.col("sid").cast(pl.String).str.slice(0, 1))
+              .alias("board")
         ])
     )
     
@@ -18,14 +25,13 @@ def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, exceed=12
         uni_lf.sort(["sid", "day"])
         .with_columns([
             pl.col("date").dt.strftime("%Y%m").cast(pl.Int32).alias("month_id"),
-            # dt.offset_by("1mo") solve 12 to 13 bug
             pl.col("date").dt.offset_by("1mo").dt.strftime("%Y%m").cast(pl.Int32).alias("trade_month_id"),
         ])
     )
     
     sample_lf = (
         uni_lf
-        .group_by(["sid", "month_id"])
+        .group_by(["sid", "month_id", "board"])
         .agg([
             pl.col("amount").mean().alias("avg_amount"),
             # pl.col("close").last().alias("month_end_close"), 
@@ -35,11 +41,12 @@ def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, exceed=12
         ])
         .filter(
             (pl.col("days_since_ipo") >= exceed) 
-            # & (pl.col("month_end_close") >= 2.0) 
-        )
+            # & (pl.col("month_end_close") >= 2.0)
+        ) 
         .with_columns(
-            rank = pl.col("avg_amount").rank(descending=True).over("month_id"),
-            total_rank = pl.col("sid").count().over("month_id")
+            # rank by board
+            rank = pl.col("avg_amount").rank(descending=True).over(["month_id", "board"]),
+            total_rank = pl.col("sid").count().over(["month_id", "board"])
         )
         .filter(pl.col("rank") <= pl.col("total_rank") * topk)
         .select(["sid", "trade_month_id"])
@@ -52,4 +59,3 @@ def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, exceed=12
     )
     
     return filtered_uni_lf
-

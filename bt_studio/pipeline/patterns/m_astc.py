@@ -4,14 +4,10 @@ from dtaidistance import dtw_ndim
 from numpy.lib.stride_tricks import sliding_window_view
 
 
-def prepare_mstumpy_array(panel_df: pl.DataFrame, common_config: dict, tune_config: dict):
-    # =========================================================================
-    # (N, D, L) 3D 
-    # ========================================================================= 
-    m, cross_days = int(tune_config["m"]), int(tune_config["cross_days"])
-
+def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
+    """DataFrame (N, D, L) tensor and NaN boarder"""
+    cross_days = int(tune_config["cross_days"])
     feature_cols = common_config.get("features", ["ofi_ratio", "volatility"]) 
-    D, N = len(feature_cols), panel_df.height
     
     curves_list = []
     for feat in feature_cols:
@@ -19,32 +15,13 @@ def prepare_mstumpy_array(panel_df: pl.DataFrame, common_config: dict, tune_conf
         feat_matrix = np.hstack([np.vstack(panel_df[col].to_list()) for col in lag_cols])
         curves_list.append(feat_matrix)
     
-    # Shape: (D, N, Length)
-    curves_md = np.array(curves_list) 
+    curves_md = np.array(curves_list) # Shape: (D, N, L)
     
-    # NaN eg. 10 Minutes
-    tail_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
+    tail_bars = common_config.get("exclude_bars", 10) // int(tune_config["downsample"])
     if tail_bars > 0:
         curves_md[:, :, -tail_bars:] = np.nan
     
-    # Shape: (N, D, L)
-    curves_md = np.swapaxes(curves_md, 0, 1) 
-
-    # =========================================================================
-    # 💡 MStump (D, Total_L) and Nan Between
-    # =========================================================================
-    clean_curves = np.copy(curves_md)
-    clean_curves[np.isinf(clean_curves)] = 0.0
-    
-    flat_dims = []
-    for d in range(D):
-        dim_data = clean_curves[:, d, :] # (N, L)
-        nan_buf = np.full((N, m), np.nan)
-        dim_flat = np.hstack([dim_data, nan_buf]).flatten()[:-m]
-        flat_dims.append(dim_flat)
-        
-    T_multi = np.vstack(flat_dims) # Shape: (D, Total_N_L)
-    return T_multi
+    return np.swapaxes(curves_md, 0, 1) # Shape: (N, D, L)
 
 
 def get_candidate_motifs_md(T_multi: np.ndarray, config: dict, top_k=5):
@@ -67,45 +44,14 @@ def get_candidate_motifs_md(T_multi: np.ndarray, config: dict, top_k=5):
     return candidate_motifs
 
 
-# def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_md: np.ndarray, dtw_w: int, threshold_d: float):
-#     # row_md shape: (D, Length)
-#     # z_motif_md shape: (D, m)
-#     D, L = row_md.shape
-#     m = z_motif_md.shape[1]
-#     min_dist = np.inf
-   
-#     z_motif_t = np.ascontiguousarray(z_motif_md.T, dtype=np.float64) # (Length, Dims)
-    
-#     for i in range(L - m + 1):
-#         sub_md = row_md[:, i : i + m] # Shape: (D, m)
-        
-#         if np.isnan(sub_md).any(): 
-#             continue
-            
-#         #  keepdims=True D ---> Z-Score！
-#         means = np.mean(sub_md, axis=1, keepdims=True)
-#         stds = np.std(sub_md, axis=1, keepdims=True) + 1e-8
-#         z_sub_md = (sub_md - means) / stds
-        
-#         z_sub_t = np.ascontiguousarray(z_sub_md.T, dtype=np.float64)
-        
-#         d = dtw_ndim.distance_fast(z_sub_t, z_motif_t, window=dtw_w, max_dist=min(min_dist, threshold_d))
-#         if d < min_dist: 
-#             min_dist = d
-            
-#     return min_dist
-
-
 def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_t: np.ndarray, dtw_w: int, threshold_d: float):
-    # row_md shape: (D, L)
-    # z_motif_t shape: (m, D) 
-    D, L = row_md.shape
-    m = z_motif_t.shape[0]
+    D, L = row_md.shape  # row_md shape: (D, L)
+    m = z_motif_t.shape[0] # z_motif_t shape: (m, D) 
     
     if L < m:
         return np.inf
 
-    # 1. windows shape : (D, window, m)
+    # 1. vectorize windows shape : (D, window, m)
     windows = sliding_window_view(row_md, window_shape=m, axis=1)
     
     # 2. Transpose -> (window, D, m)
@@ -155,15 +101,17 @@ def evaluate_and_build_fsm_md(
     # ======================================================================
     
     daily_macro_lf = (
-        panel_df
-        .group_by(["day", "sid"])
-        .agg(
-            pl.col("daily_curve").sum().alias("sid_ofi_sum")
-        )
+        panel_df.lazy()
+        .select([
+            "day", 
+            "sid", 
+            pl.col("lag_0").list.sum().alias("sid_ofi_sum") # list[f64]
+        ])
         .group_by("day")
         .agg(
             pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean")
         )
+        .sort("day")
         .with_columns([
             pl.col("daily_ofi_mean").quantile(1/3).alias("p33"),
             pl.col("daily_ofi_mean").quantile(2/3).alias("p67"),
@@ -175,9 +123,10 @@ def evaluate_and_build_fsm_md(
             .cast(pl.Int32)
             .alias("macro_state")
         )
-        .with_columns(pl.col("macro_state").shift(1)) # avoid lookahead bias
-        .drop(["p33", "p67"])
-        .sort("day")
+        # avoid loopforward with shift
+        .with_columns(pl.col("macro_state").shift(1))
+        .drop(["p33", "p67", "daily_ofi_mean"])
+        .drop_nulls() 
     )
 
     daily_macro = daily_macro_lf.collect()
@@ -189,12 +138,14 @@ def evaluate_and_build_fsm_md(
     # =======================================================================
 
     edge_ratio = common_config["edge_ratio"]
+    bin_cols = [] 
 
     for fw in common_config["stats_windows"]:
         col = f"fwd_ret_{fw}"
-        if col not in panel_df.columns: continue
+        if col not in eval_df.columns: continue
         
-        panel_df = panel_df.with_columns([
+        bin_cols.append( f"bin_{fw}") 
+        eval_df = eval_df.with_columns([
             # # T +1 / T+2 / T+3 std ---> sqrt(T)
             # (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
             # method="average" to calculate Rank Ascending, then normalize to [0,1]
@@ -238,7 +189,7 @@ def evaluate_and_build_fsm_md(
     trans_t1_t2 = np.ones((4, 4), dtype=np.float64) 
     trans_t2_t3 = np.ones((4, 4), dtype=np.float64) 
     
-    valid_chain = triggers.drop_nulls(subset=["macro_state", "bin_1", "bin_2", "bin_3"])
+    valid_chain = triggers.drop_nulls(subset=["macro_state"] + bin_cols)
     if valid_chain.height > 0:
         for ms, b1, b2, b3 in valid_chain.select(["macro_state", "bin_1", "bin_2", "bin_3"]).rows():
             trans_t1[ms, b1] += 1.0; trans_t1_t2[b1, b2] += 1.0; trans_t2_t3[b2, b3] += 1.0
@@ -279,6 +230,8 @@ def discover_fsm_pattern_md(
     common_config: dict
 ) -> Dict[str, Any]:
 
+    m = int(search_config["motif_minutes"] // search_config["downsample"])
+
     # =========================================================================
     # Filter Panel DataFrame
     # =========================================================================
@@ -290,7 +243,7 @@ def discover_fsm_pattern_md(
             "metrics_score": 0.0
         }
         
-    if panel_df.height <= m :
+    if panel_df.height <= m or m < 3:
         return {
             "status": "failed", 
             "reason": f"Not enough data (n={panel_df.height})", 
@@ -298,26 +251,51 @@ def discover_fsm_pattern_md(
         }
     
     # =========================================================================
-    # Calculate Config
+    # 1 Calculate Stumpy Length
     # =========================================================================
-    m = int(search_config["motif_minutes"] // search_config["downsample"])
     threshold_d = float(np.sqrt(2 * m * (1.0 - search_config.get("threshold_r", 0.85))))
     
     tune_config = search_config.copy()
     tune_config.update({"m": m, "threshold_d": threshold_d})
     
     # =========================================================================
-    # Multi_Curves(D, Total_N_L) for MStump ---> Shape: (D, Total_N_L)
+    # 2 Features Matrix (N,D,L)
     # =========================================================================
-    curves_md = prepare_mstumpy_array(panel_df, common_config, tune_config)
+    curves_md = prepare_curves(panel_df, common_config, tune_config)
+    N, D, L = curves_md.shape
     
     # =========================================================================
-    # T_multi Motif Candidates
+    # 3 Volatility-Driven Sampling for stumpy
     # =========================================================================
+    # diff ---> mutation Shape -> (N, D, L-1) / nanmax ---> (N, D) / nansum --> (N,)
+    mutation_scores = np.nansum(np.nanmax(np.abs(np.diff(curves_md, axis=2)), axis=2), axis=1)
+    # mutation_scores = np.nansum(np.nansum(np.abs(np.diff(curves_md, axis=2)), axis=2), axis=1)
+    # mutation_scores = np.nansum(np.nanvar(curves_md, axis=2), axis=1)
+    
+    budget = common_config.get("max_discovery_points", 20000)
+    sample_size = min(N, max(5, int(budget / L))) 
+    
+    active_idx = np.argsort(mutation_scores)[-sample_size:]
+    sampled_curves = curves_md[active_idx] # Shape: (Sample_N, D, L)
+
+    # =========================================================================
+    # 3 Nans between assets and Stumpy T_multi(D, Sample_N * L) For Candidates 
+    # =========================================================================
+    clean_curves = np.copy(sampled_curves)
+    clean_curves[np.isinf(clean_curves)] = 0.0
+    
+    flat_dims = []
+    for d in range(D):
+        dim_data = clean_curves[:, d, :] 
+        nan_buf = np.full((sample_size, m), np.nan) 
+        dim_flat = np.hstack([dim_data, nan_buf]).flatten()[:-m]
+        flat_dims.append(dim_flat)
+        
+    T_multi = np.vstack(flat_dims) # Shape: (D, Sample_N * L)
     candidate_motifs = get_candidate_motifs_md(T_multi, tune_config, top_k=5)
     
     # =========================================================================
-    # Evaluate Motif and Build FSM
+    # 4 Evaluate Motif and Build FSM
     # =========================================================================
     best_result, highest_score = None, -1.0
 

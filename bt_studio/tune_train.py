@@ -294,9 +294,11 @@ def node_oos_inference(year: int, dret_path: str, oos_paths: list, exp_config: d
 # ==============================================================================
 # DAG (Walk-Forward)
 # ==============================================================================
+
 # @flow(name="WFO_FSM_Pipeline")
 def wfo_pipeline(exp_config):
     # logger = get_run_logger()
+
     runtime_env = {
         "env_vars": {
             "POLARS_MAX_THREADS": "1",
@@ -321,7 +323,7 @@ def wfo_pipeline(exp_config):
     end_year = exp_config["run_params"]["end_date"] // 10000
 
     for y in range(start_year, end_year + 1):
-        # logger.info(f"========== 🚀 {y} year Walk-Forward ==========")
+        # logger.info(f"==========  {y} year Walk-Forward ==========")
 
         # =====================================================================
         # Node 2 Select UniversePool between Train and Oss
@@ -333,7 +335,7 @@ def wfo_pipeline(exp_config):
         if not target_sids:
             continue
 
-        # logger.info(f"========== 🚀 {y} year Walk-Forward (Active Universe: {len(target_sids)} stocks) ==========") 
+        # logger.info(f"========= {y} year Walk-Forward (Active Universe: {len(target_sids)} ==========") 
         
         # =====================================================================
         # Node 3 Feature Extraction
@@ -365,10 +367,10 @@ if __name__ == "__main__":
         "run_params": {
             "start_date": 20100101, "end_date": 20201231, "benchmark": "1A0001", 
             "top_k_ratio": 0.25, # used for sample
-            "stats_windows": [1,2,3], # T+1 ---> T+3
-            "alternative": "greater",
             "exclude_bars": 10, # exclude last 10 bars means 14:50
-            "edge_ratio": 0.25 # ratio of macro state edge bins 
+            "edge_ratio": 0.25, # ratio of macro state edge bins 
+            "alternative": "greater", # stats 
+            "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
         },
 
         "search_bounds": {

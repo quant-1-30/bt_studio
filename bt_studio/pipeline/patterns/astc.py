@@ -9,20 +9,20 @@ from typing import List, Dict, Any
 from numpy.lib.stride_tricks import sliding_window_view
 
 
-def prepare_stumpy_array(curves_2d: np.ndarray, config: dict) -> np.ndarray:
-    if curves_2d.size == 0:
-        return np.array([])
-        
-    m = config["m"]
-    clean_curves = np.copy(curves_2d)
-    # clean_curves = np.nan_to_num(curves_2d, nan=0.0, posinf=0.0, neginf=0.0)
-    clean_curves[np.isinf(clean_curves)] = 0.0 
+def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
+    """DataFrame (N, L) tensor and NaN boarder"""
+    cross_days = int(tune_config["cross_days"])
+
+    lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
+    lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
     
-    # m NaN as separate between assets
-    nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
-    stumpy_arr = np.hstack([clean_curves, nan_buffer]).flatten()
-    # abundan last m np.nan
-    return stumpy_arr[:-m] 
+    # lag_0 today 14:55  np.nan！
+    tail_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
+    if tail_bars > 0:
+        lag_arrays[-1][:, -tail_bars:] = np.nan
+
+    curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
+    return curves_2d    # # Shape: (N, L)
 
 
 def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) -> List[np.ndarray]:
@@ -148,15 +148,17 @@ def evaluate_and_build_fsm(
     # =====================================================================
     
     daily_macro_lf = (
-        panel_df
-        .group_by(["day", "sid"])
-        .agg(
-            pl.col("daily_curve").sum().alias("sid_ofi_sum")
-        )
+        panel_df.lazy()
+        .select([
+            "day", 
+            "sid", 
+            pl.col("lag_0").list.sum().alias("sid_ofi_sum") # list[f64]
+        ])
         .group_by("day")
         .agg(
             pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean")
         )
+        .sort("day")
         .with_columns([
             pl.col("daily_ofi_mean").quantile(1/3).alias("p33"),
             pl.col("daily_ofi_mean").quantile(2/3).alias("p67"),
@@ -168,9 +170,10 @@ def evaluate_and_build_fsm(
             .cast(pl.Int32)
             .alias("macro_state")
         )
-        .with_columns(pl.col("macro_state").shift(1)) # avoid lookahead bias
-        .drop(["p33", "p67"])
-        .sort("day")
+        # avoid loopforward with shift
+        .with_columns(pl.col("macro_state").shift(1))
+        .drop(["p33", "p67", "daily_ofi_mean"])
+        .drop_nulls() 
     )
 
     daily_macro = daily_macro_lf.collect()
@@ -182,12 +185,14 @@ def evaluate_and_build_fsm(
     # =================================================================
 
     edge_ratio = common_config["edge_ratio"]
+    bin_cols = [] 
 
     for fw in common_config["stats_windows"]:
         col = f"fwd_ret_{fw}"
-        if col not in panel_df.columns: continue
-        
-        panel_df = panel_df.with_columns([
+        if col not in eval_df.columns: continue
+
+        bin_cols.append( f"bin_{fw}") 
+        eval_df = eval_df.with_columns([
             # # T +1 / T+2 / T+3 std ---> sqrt(T)
             # (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
             # method="average" to calculate Rank Ascending, then normalize to [0,1]
@@ -224,7 +229,8 @@ def evaluate_and_build_fsm(
     trans_t1_t2 = np.ones((4, 4), dtype=np.float64) 
     trans_t2_t3 = np.ones((4, 4), dtype=np.float64) 
     
-    valid_chain = triggers.drop_nulls(subset=["macro_state", "bin_1", "bin_2", "bin_3"])
+    valid_chain = triggers.drop_nulls(subset=["macro_state"] + bin_cols)
+
     if valid_chain.height > 0:
         for ms, b1, b2, b3 in valid_chain.select(["macro_state", "bin_1", "bin_2", "bin_3"]).rows():
             trans_t1[ms, b1] += 1.0; trans_t1_t2[b1, b2] += 1.0; trans_t2_t3[b2, b3] += 1.0
@@ -263,20 +269,15 @@ def discover_fsm_pattern(
     search_config: dict, 
     panel_lf: pl.LazyFrame,  
     common_config: dict
-) -> Dict[str, Any]:
-    
-    # config
-    cross_days = int(search_config["cross_days"])
-    m = int(search_config["motif_minutes"] // search_config["downsample"])
-    threshold_d = float(np.sqrt(2 * m * (1.0 - search_config.get("threshold_r", 0.85))))
-    
-    tune_config = search_config.copy()
-    tune_config["m"] = m
-    tune_config["threshold_d"] = threshold_d
-    
-    # extract curves_2d
-    panel_df = panel_lf.collect(engine="streaming")
+) -> Dict[str, Any]: 
 
+    m = int(search_config["motif_minutes"] // search_config["downsample"])
+    cross_days = int(search_config["cross_days"])
+
+    # =========================================================================
+    # 1. Filter Panel DataFrame
+    # =========================================================================
+    panel_df = panel_lf.collect(engine="streaming")
     if panel_df.height == 0:
         return {
             "status": "failed", 
@@ -284,25 +285,57 @@ def discover_fsm_pattern(
             "metrics_score": 0.0
         }
         
-    if panel_df.height <= m :
+    if panel_df.height <= m or m < 3:
         return {
             "status": "failed", 
             "reason": f"Not enough data (n={panel_df.height})", 
             "metrics_score": 0.0
         }
 
-    lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
-    lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
+    # =========================================================================
+    # 2. Calculate Stumpy Length
+    # =========================================================================
+    threshold_d = float(np.sqrt(2 * m * (1.0 - search_config.get("threshold_r", 0.85))))
     
-    # lag_0 today 14:55  np.nan！
-    tail_bars = common_config["exclude_bars"] // int(search_config["downsample"])
-    if tail_bars > 0:
-        lag_arrays[-1][:, -tail_bars:] = np.nan
+    tune_config = search_config.copy()
+    tune_config["m"] = m
+    tune_config["threshold_d"] = threshold_d
 
-    curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
+    # =========================================================================
+    # 3. Features Matrix (N,D,L)
+    # =========================================================================
+    curves_2d = prepare_curves(panel_df, common_config, tune_config)
+    N, L = curves_2d.shape
+
+    if curves_2d.size == 0:
+        return np.array([])
+
+    # =========================================================================
+    # 4. Volatility-Driven Sampling for stumpy
+    # =========================================================================
+    # diff ---> mutation Shape -> diff (N, L-1) / abs ---> (N, L-1) / nanmax --> (N,)
+    mutation_scores = np.nanmax(np.abs(np.diff(curves_2d, axis=1)), axis=1)
+    # mutation_scores = np.nanmax(np.abs(np.diff(curves_2d, axis=1)), axis=1)
+    # mutation_scores = np.nanmax(np.nanvar(curves_2d, axis=1), axis=1)
     
-    # extract stumpy feature
-    stumpy_1d_array = prepare_stumpy_array(curves_2d, tune_config)
+    theory_points = common_config.get("max_points", 20000)
+    sample_size = min(N, max(5, int(theory_points / L))) 
+    
+    active_idx = np.argsort(mutation_scores)[-sample_size:]
+    sampled_curves = curves_2d[active_idx] # Shape: (Sample_N, D, L)
+
+    # =========================================================================
+    # 5. Nans between assets and Stumpy T_multi(Sample_N * L) For Candidates 
+    # =========================================================================
+        
+    clean_curves = np.copy(sampled_curves)
+    # clean_curves = np.nan_to_num(sampled_curves, nan=0.0, posinf=0.0, neginf=0.0)
+    clean_curves[np.isinf(clean_curves)] = 0.0 
+    
+    # m NaN as separate between assets
+    nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
+    stumpy_1d_array = np.hstack([clean_curves, nan_buffer]).flatten()[:-m] # abundan last m np.nan
+
     candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, top_k=5)
     
     if not candidate_motifs: 
