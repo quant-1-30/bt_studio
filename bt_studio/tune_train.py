@@ -48,39 +48,40 @@ MODEL_DIR = f"{BASE_DIR}/models"
 # Node 1 Macro and Universe
 # ==============================================================================
 
-# @task(name="Node_Prepare_Daily_Universe") 
-def node_prepare_daily_universe(exp_config: dict, warm=10000):
+# @task(name="Node_Prepare_Macro")
+def node_prepare_macro(exp_config: dict, warm=10000):
     rq = exp_config["run_params"]
     os.makedirs(BASE_DIR, exist_ok=True)
     dret_path = f"{BASE_DIR}/global_daily.parquet"
 
     if os.path.exists(dret_path):
         print(f"✅ [Cache Hit] Daily Cache: {dret_path}")
-        df = pl.read_parquet(dret_path)
-        valid_sids = df["sid"].unique().to_list()
-        valid_sids = [s.encode() if isinstance(s, str) else s for s in valid_sids]
-        return {"dret_path": dret_path, "universe_sids": valid_sids}
+    else: 
+        print(f"🚀 [Cache Miss] Generating Daily Universe...")
+        universe_lf, daily_lf = prepare_macro(
+            start_date=rq["start_date"] - warm, 
+            end_date=rq["end_date"], 
+            benchmark=rq["benchmark"].encode()
+        )
+        filtered_uni_lf = universe_sample(universe_lf, daily_lf, exceed=120, topk=rq["top_k_ratio"])
+        filtered_uni_lf.sink_parquet(dret_path) # engine=streaming  
+        
+    final_scan_lf = pl.scan_parquet(dret_path) # lazy operation than read_parquet() for small parquet files 
 
-    
-    universe_lf, daily_lf = prepare_macro(
-        start_date=rq["start_date"] - warm, 
-        end_date=rq["end_date"], 
-        benchmark=rq["benchmark"].encode()
+    dynamic_sids_by_year = dict(
+        final_scan_lf.select([
+            # pl.col("day").dt.year().alias("year"),
+            # pl.col("day").from_epoch(time_unit="s").dt.year().alias("year"),
+            pl.col("day").cast(pl.String).str.to_date("%Y%m%d").dt.year().alias("year"),
+            pl.col("sid")
+        ])
+        .group_by("year")
+        .agg(pl.col("sid").unique())
+        .collect(engine="streaming")  
+        .iter_rows() # yield (year, [sids]) 
     )
-    # sample universe 
-    filtered_uni_lf = universe_sample(universe_lf, daily_lf, exceed=120, topk=0.80)
-    dret_path = f"{BASE_DIR}/global_daily.parquet"
-    
-    filtered_uni_lf.sink_parquet(dret_path)  
-    
-    valid_sids = (
-        pl.scan_parquet(dret_path)        
-        .select(pl.col("sid").unique())   
-        .collect(engine="streaming")      
-        ["sid"]
-        .to_list()
-    )
-    return {"dret_path": dret_path, "universe_sids": valid_sids}
+    return {"dret_path": dret_path, "universe_sids": dynamic_sids_by_year}
+
 
 # ==============================================================================
 # Node 2: Minute and Ofi
@@ -311,27 +312,48 @@ def wfo_pipeline(exp_config):
 
     ray.init(num_cpus=6, runtime_env=runtime_env, ignore_reinit_error=True)
 
-    # Node 1
-    global_data = node_prepare_daily_universe(exp_config)
+    # =====================================================================
+    # Node 1 Macro State
+    # =====================================================================
+    global_data = node_prepare_macro(exp_config)
 
     start_year = exp_config["run_params"]["start_date"] // 10000
     end_year = exp_config["run_params"]["end_date"] // 10000
 
     for y in range(start_year, end_year + 1):
         # logger.info(f"========== 🚀 {y} year Walk-Forward ==========")
+
+        # =====================================================================
+        # Node 2 Select UniversePool between Train and Oss
+        # =====================================================================
+        sids_y_minus_1 = global_data["universe_sids"].get(y - 1, [])
+        sids_y = global_data["universe_sids"].get(y, [])
         
-        # Node 2
-        paths = node_extract_feature(y, global_data["universe_sids"], exp_config)
+        target_sids = list(set(sids_y_minus_1 + sids_y)) # for speed
+        if not target_sids:
+            continue
+
+        # logger.info(f"========== 🚀 {y} year Walk-Forward (Active Universe: {len(target_sids)} stocks) ==========") 
         
-        # Node 3
+        # =====================================================================
+        # Node 3 Feature Extraction
+        # =====================================================================
+        paths = node_extract_feature(y, target_sids, exp_config)
+        
+        # =====================================================================
+        # Node 4 Test Decay of Previous Model
+        # =====================================================================
         if node_check_decay(y, global_data["dret_path"], paths["oos_paths"], exp_config):
             # logger.info(f"🔄 启动 {y-1} Ray Tune ...")
-            
-            # Node 4
+            # =====================================================================
+            # Node 5 Ray Tune for new Model
+            # =====================================================================
             if not node_tune(y, global_data["dret_path"], paths["train_paths"], exp_config): 
                 continue
         
-        # Node 5
+        # =====================================================================
+        # Node 6 Oss Inference
+        # =====================================================================
         node_oos_inference(y, global_data["dret_path"], paths["oos_paths"], exp_config)
 
 
@@ -342,7 +364,6 @@ if __name__ == "__main__":
     exp_config = {
         "run_params": {
             "start_date": 20100101, "end_date": 20201231, "benchmark": "1A0001", 
-            "vol_window": 20 , # used for vol in fut_ret_fw
             "top_k_ratio": 0.25, # used for sample
             "stats_windows": [1,2,3], # T+1 ---> T+3
             "alternative": "greater",
@@ -358,7 +379,7 @@ if __name__ == "__main__":
             "dtw_window_frac": [0.05, 0.10], # used for DTW offset 
             "grace_period": 5, "reduction_factor": 4, 
             "num_trials": 100, 
-            "max_concurrent_trials": 8
+            "max_concurrent_trials": 6
         }
     }
 

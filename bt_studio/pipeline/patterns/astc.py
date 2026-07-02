@@ -295,7 +295,7 @@ def discover_fsm_pattern(
     lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
     
     # lag_0 today 14:55  np.nan！
-    tail_bars = common_config.get("exclude_bars", 10) // int(search_config["downsample"])
+    tail_bars = common_config["exclude_bars"] // int(search_config["downsample"])
     if tail_bars > 0:
         lag_arrays[-1][:, -tail_bars:] = np.nan
 

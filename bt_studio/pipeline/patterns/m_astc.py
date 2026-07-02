@@ -23,7 +23,7 @@ def prepare_mstumpy_array(panel_df: pl.DataFrame, common_config: dict, tune_conf
     curves_md = np.array(curves_list) 
     
     # NaN eg. 10 Minutes
-    tail_bars = common_config.get("exclude_bars", 10) // int(tune_config["downsample"])
+    tail_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
     if tail_bars > 0:
         curves_md[:, :, -tail_bars:] = np.nan
     
