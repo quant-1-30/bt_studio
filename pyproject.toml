@@ -24,6 +24,7 @@ mlflow = "^3.13.0"
 prefect = "^3.7.3"
 scikit-learn = "^1.9.0"
 bt-core = "0.4.5"
+tensorboard = "^2.21.0"
 
 [build-system]
 requires = ["poetry-core"]

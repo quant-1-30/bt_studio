@@ -3,6 +3,8 @@ import numpy as np
 from dtaidistance import dtw_ndim
 from numpy.lib.stride_tricks import sliding_window_view
 
+from bt_studio.pipeline.metrics import calculate_hpo_score
+
 
 def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
     """DataFrame (N, D, L) tensor and NaN boarder"""
@@ -17,9 +19,10 @@ def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dic
     
     curves_md = np.array(curves_list) # Shape: (D, N, L)
     
-    tail_bars = common_config.get("exclude_bars", 10) // int(tune_config["downsample"])
-    if tail_bars > 0:
-        curves_md[:, :, -tail_bars:] = np.nan
+    # lag_0 today eg 14:55  np.nan！
+    execlude_bars = common_config.get("exclude_bars", 10) // int(tune_config["downsample"])
+    if execlude_bars > 0:
+        curves_md[:, :, -execlude_bars:] = np.nan
     
     return np.swapaxes(curves_md, 0, 1) # Shape: (N, D, L)
 
@@ -68,7 +71,7 @@ def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_t: np.ndarray, dtw_w: int
         # Shape (D, m)
         sub_md = windows_iter[i]
         
-        means = np.mean(sub_md, axis=1, keepdims=True)
+        means = np.mean(sub_md, axis=1, keepdims=True) # keepdims to broadcast
         stds = np.std(sub_md, axis=1, keepdims=True) + 1e-8
         
         z_sub_md = (sub_md - means) / stds
@@ -198,7 +201,9 @@ def evaluate_and_build_fsm_md(
     trans_t1_t2 = (trans_t1_t2 / trans_t1_t2.sum(axis=1, keepdims=True)).tolist()
     trans_t2_t3 = (trans_t2_t3 / trans_t2_t3.sum(axis=1, keepdims=True)).tolist()
 
-    # ===  two-sided or greater ===
+    # =======================================================================
+    # 5. Statistics Pval
+    # =======================================================================
     cond_rets = triggers["fwd_ret_1"].drop_nulls().to_numpy()
     uncond_rets = eval_df["fwd_ret_1"].drop_nulls().to_numpy() 
     
@@ -209,8 +214,14 @@ def evaluate_and_build_fsm_md(
         u_stat, u_pval = stats.mannwhitneyu(cond_rets, uncond_rets, alternative=common_config["alternative"])
     except ValueError:
         return {"status": "failed", "reason": "MW-U 检验数学越界", "metrics_score": 0.0}
+
+    # =======================================================================
+    # 6. Final Score
+    # =======================================================================
+    score = calculate_hpo_score(
+        u_pval, len(cond_rets), cond_rets, uncond_rets, common_config["alternative"]
+    )
     
-    score = 100.0 if u_pval <= 0.05 else (10.0 if u_pval <= 0.10 else 0.0)
     if score == 0.0:
         return {"status": "failed", "reason": f"(P-val={u_pval:.4f})", "metrics_score": 0.0}
 
@@ -267,13 +278,18 @@ def discover_fsm_pattern_md(
     # =========================================================================
     # 3 Volatility-Driven Sampling for stumpy
     # =========================================================================
-    # diff ---> mutation Shape -> (N, D, L-1) / nanmax ---> (N, D) / nansum --> (N,)
-    mutation_scores = np.nansum(np.nanmax(np.abs(np.diff(curves_md, axis=2)), axis=2), axis=1)
-    # mutation_scores = np.nansum(np.nansum(np.abs(np.diff(curves_md, axis=2)), axis=2), axis=1)
-    # mutation_scores = np.nansum(np.nanvar(curves_md, axis=2), axis=1)
+    # curves_md Shape: (N, D, L) and axis=2 --> abs diff 
+    curves_asbdiff_sum = np.nansum(np.abs(np.diff(curves_md, axis=2)), axis=2) # Shape -> (N, D)
+    # Cross-sectional Z-score For features eg. OFI and Volatility
+    _mean = np.nanmean(curves_asbdiff_sum, axis=0, keepdims=True)
+    _std = np.nanstd(curves_asbdiff_sum, axis=0, keepdims=True) + 1e-8
+    z_md = (curves_asbdiff_sum - _mean) / _std  # Shape -> (N, D)
     
-    budget = common_config.get("max_discovery_points", 20000)
-    sample_size = min(N, max(5, int(budget / L))) 
+    #  Sum ofi + vol --->  Shape(N,)
+    mutation_scores = np.nansum(z_md, axis=1)
+    
+    theory_points = common_config.get("max_discovery_points", 20000)
+    sample_size = min(N, max(5, int(theory_points / L))) 
     
     active_idx = np.argsort(mutation_scores)[-sample_size:]
     sampled_curves = curves_md[active_idx] # Shape: (Sample_N, D, L)
@@ -290,8 +306,8 @@ def discover_fsm_pattern_md(
         nan_buf = np.full((sample_size, m), np.nan) 
         dim_flat = np.hstack([dim_data, nan_buf]).flatten()[:-m]
         flat_dims.append(dim_flat)
-        
     T_multi = np.vstack(flat_dims) # Shape: (D, Sample_N * L)
+
     candidate_motifs = get_candidate_motifs_md(T_multi, tune_config, top_k=5)
     
     # =========================================================================

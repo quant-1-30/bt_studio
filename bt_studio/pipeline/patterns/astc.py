@@ -8,6 +8,8 @@ from dtaidistance import dtw
 from typing import List, Dict, Any
 from numpy.lib.stride_tricks import sliding_window_view
 
+from bt_studio.pipeline.metrics import calculate_hpo_score
+
 
 def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
     """DataFrame (N, L) tensor and NaN boarder"""
@@ -16,13 +18,13 @@ def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dic
     lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
     lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
     
-    # lag_0 today 14:55  np.nan！
-    tail_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
-    if tail_bars > 0:
-        lag_arrays[-1][:, -tail_bars:] = np.nan
+    # lag_0 today eg 14:55  np.nan！
+    execlude_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
+    if execlude_bars > 0:
+        lag_arrays[-1][:, -execlude_bars:] = np.nan
 
     curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
-    return curves_2d    # # Shape: (N, L)
+    return curves_2d    # Shape: (N, L)
 
 
 def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) -> List[np.ndarray]:
@@ -52,44 +54,11 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) ->
         candidate_motif = raw_array[anchor_idx : anchor_idx + m]
         candidates.append(candidate_motif)
         
-        # --- Exclusion Zone ---
-        # anchor around m ---> inf incase pattern shift
+        # --- Exclusion Zone --- anchor around m keep isolate
         exclude_start = max(0, anchor_idx - m)
         exclude_end = min(len(distances), anchor_idx + m)
         distances[exclude_start:exclude_end] = np.inf
     return candidates
-
-
-# def calc_min_subseq_dtw(
-#     row_curve: np.ndarray, 
-#     z_motif: np.ndarray, 
-#     motif_len: int, 
-#     dtw_w: int, 
-#     threshold_d: float,
-# ) -> float:
-#     L = len(row_curve)
-#     if L < motif_len:
-#         return np.inf
-        
-#     min_dist = np.inf
-    
-#     for i in range(L - motif_len + 1):
-#         sub_seq = row_curve[i : i + motif_len]
-
-#         # skip if np.nan 
-#         if np.isnan(sub_seq).any():
-#             continue
-        
-#         std = np.std(sub_seq) + 1e-8
-#         z_sub = (sub_seq - np.mean(sub_seq)) / std
-
-#         z_sub = np.ascontiguousarray(z_sub, dtype=np.float64)
-        
-#         d = dtw.distance_fast(z_sub, z_motif, window=dtw_w, max_dist= min(min_dist, threshold_d) )
-        
-#         if d < min_dist:
-#             min_dist = d
-#     return min_dist
 
 
 def calc_min_subseq_dtw(
@@ -146,7 +115,6 @@ def evaluate_and_build_fsm(
     # =====================================================================
     # 1. Macro States) & Return Bins 0(flow in ) / 1(vibrate) / 2(flow out) 
     # =====================================================================
-    
     daily_macro_lf = (
         panel_df.lazy()
         .select([
@@ -180,10 +148,9 @@ def evaluate_and_build_fsm(
     
     eval_df = panel_df.join(daily_macro.select(["day", "macro_state"]), on="day", how="left")
 
-   # =================================================================
+    # =================================================================
     # 2. Time-Adjusted Zero-Anchored Bins Based on Rank not std
     # =================================================================
-
     edge_ratio = common_config["edge_ratio"]
     bin_cols = [] 
 
@@ -224,7 +191,9 @@ def evaluate_and_build_fsm(
     if triggers.height < 5:
         return {"status": "failed", "reason": f"Matching Not enough (n={triggers.height})", "metrics_score": 0.0}
 
-    # === Markov Laplace ===
+    # =================================================================
+    # 4. Markov Laplace
+    # =================================================================
     trans_t1 = np.ones((3, 4), dtype=np.float64) 
     trans_t1_t2 = np.ones((4, 4), dtype=np.float64) 
     trans_t2_t3 = np.ones((4, 4), dtype=np.float64) 
@@ -239,7 +208,9 @@ def evaluate_and_build_fsm(
     trans_t1_t2 = (trans_t1_t2 / trans_t1_t2.sum(axis=1, keepdims=True)).tolist()
     trans_t2_t3 = (trans_t2_t3 / trans_t2_t3.sum(axis=1, keepdims=True)).tolist()
 
-    # ===  two-sided or greater ===
+    # =================================================================
+    # 5. Statistics Pval
+    # =================================================================
     cond_rets = triggers["fwd_ret_1"].drop_nulls().to_numpy()
     uncond_rets = eval_df["fwd_ret_1"].drop_nulls().to_numpy() 
     
@@ -251,7 +222,13 @@ def evaluate_and_build_fsm(
     except ValueError:
         return {"status": "failed", "reason": "MW-U 检验数学越界", "metrics_score": 0.0}
     
-    score = 100.0 if u_pval <= 0.05 else (10.0 if u_pval <= 0.10 else 0.0)
+    # =================================================================
+    # 6. Final Score 
+    # =================================================================
+    score = calculate_hpo_score(
+        u_pval, len(cond_rets), cond_rets, uncond_rets, common_config["alternative"]
+    )
+
     if score == 0.0:
         return {"status": "failed", "reason": f"(P-val={u_pval:.4f})", "metrics_score": 0.0}
 
@@ -314,20 +291,18 @@ def discover_fsm_pattern(
     # 4. Volatility-Driven Sampling for stumpy
     # =========================================================================
     # diff ---> mutation Shape -> diff (N, L-1) / abs ---> (N, L-1) / nanmax --> (N,)
-    mutation_scores = np.nanmax(np.abs(np.diff(curves_2d, axis=1)), axis=1)
-    # mutation_scores = np.nanmax(np.abs(np.diff(curves_2d, axis=1)), axis=1)
     # mutation_scores = np.nanmax(np.nanvar(curves_2d, axis=1), axis=1)
+    mutation_scores = np.nansum(np.abs(np.diff(curves_2d, axis=1)), axis=1)
     
     theory_points = common_config.get("max_points", 20000)
     sample_size = min(N, max(5, int(theory_points / L))) 
     
     active_idx = np.argsort(mutation_scores)[-sample_size:]
-    sampled_curves = curves_2d[active_idx] # Shape: (Sample_N, D, L)
-
+    sampled_curves = curves_2d[active_idx] # Shape: (Sample_N, L)
+    
     # =========================================================================
     # 5. Nans between assets and Stumpy T_multi(Sample_N * L) For Candidates 
     # =========================================================================
-        
     clean_curves = np.copy(sampled_curves)
     # clean_curves = np.nan_to_num(sampled_curves, nan=0.0, posinf=0.0, neginf=0.0)
     clean_curves[np.isinf(clean_curves)] = 0.0 
