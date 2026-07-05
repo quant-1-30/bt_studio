@@ -275,7 +275,7 @@ def discover_fsm_pattern(
     tune_config["m"] = m
     tune_config["threshold_d"] = threshold_d
 
-    curves_2d = prepare_curves(panel_df, common_config, tune_config)
+    curves_2d = prepare_curves(panel_df, tune_config, common_config)
     N, L = curves_2d.shape
 
     if curves_2d.size == 0:

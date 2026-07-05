@@ -67,7 +67,6 @@ def prepare_tick(start_date: int, end_date: int, sids: list[bytes], warm=10000):
 
             tick_df = tick_df.with_columns(pl.lit(sid_bytes).alias("sid").cast(pl.Binary))
             snapshot_dict[sid_bytes] = align_skeleton(tick_df.lazy())
-            # import pdb; pdb.set_trace()
         return snapshot_dict
 
 

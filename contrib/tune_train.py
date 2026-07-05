@@ -247,7 +247,7 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
     hf_ref = ray.put(hf_pa)
     dret_ref = ray.put(dret_pa)
     
-    prev_ckpt = get_latest_ckpt(year - 1, MODEL_DIR)
+    # prev_ckpt = get_latest_ckpt(year - 1, MODEL_DIR)
 
     # =========================================================================
     # ray tune and search
@@ -364,7 +364,7 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
 
 # @task(name="Node_OOS_Inference") 
 def node_oos_inference(year: int, dret_path: str, oos_paths: list, exp_config: dict):
-    final_model_path = get_latest_ckpt(year, MODEL_DIR)
+    # final_model_path = get_latest_ckpt(year, MODEL_DIR)
     if not final_model_path: return
         
     with open(final_model_path, "rb") as f: model_ckpt = pickle.load(f)

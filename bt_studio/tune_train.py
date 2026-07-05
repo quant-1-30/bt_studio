@@ -31,6 +31,7 @@ import mlflow
 import pickle
 import shutil
 import gc
+import calendar
 from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 from ray.air.integrations.mlflow import MLflowLoggerCallback
@@ -41,7 +42,6 @@ from bt_studio.pipeline.features import build_ofi
 from bt_studio.pipeline.patterns import evaluate_and_build_fsm, discover_fsm_pattern
 from bt_studio.pipeline.inference import FSMPredictor
 from bt_studio.pipeline.metrics import find_pareto_front, select_best_model_from_pareto
-from bt_studio.utils.common import get_latest_ckpt
 
 BASE_DIR = "/Users/hengxinliu/startup/bt_studio/result/fsm"
 MODEL_DIR = f"{BASE_DIR}/models"
@@ -99,35 +99,77 @@ def node_prepare_macro(exp_config: dict, warm=10000):
 # @task(name="Node_Extract_feature") 
 def node_extract_feature_monthly(ymonths: list[int], sids: list[bytes], exp_config: dict) -> list[str]:
     """
-    - months: [201001, 201002, ...]
+    - ymonths: [200912, 201001, 201002, ...]
     """
+    if not ymonths:
+        return []
+
     paths = []
+    missing_ymonths = []
     for ym in ymonths:
         out_path = f"{FEATURE_DIR}/hf_{ym}.parquet"
-        
         if os.path.exists(out_path):
             paths.append(out_path)
-            continue
+        else:
+            missing_ymonths.append(ym)
             
-        print(f"📥 [I/O] {ym} feature and calculate from Tick ...")
+    if not missing_ymonths:
+        return sorted(paths)
+
+    missing_ymonths = sorted(missing_ymonths)
+
+    # calculate rpc intervals 
+    min_ym = missing_ymonths[0]
+    start_d = min_ym * 100 + 1
+    
+    max_ym = missing_ymonths[-1]
+    max_year, max_month = max_ym // 100, max_ym % 100
+    _, last_day = calendar.monthrange(max_year, max_month)
+    end_d = max_ym * 100 + last_day
+
+    print(f"📥 [gRPC Batch] Fetching giant tick data from {start_d} to {end_d} for {len(missing_ymonths)} months...")
+    
+    snapshot_dict = prepare_tick(start_date=start_d, end_date=end_d, sids=sids)
+    
+    eager_dfs = []
+    print("🧮 Calculating features per security (Eager Evaluation)...")
+    for sid_bytes, lf in snapshot_dict.items():
+        processed_lf = build_ofi(lf)
         
-        # YYYYMM ---> YYYYMMDD
-        start_d = m * 100 + 1
-        end_d = m * 100 + 31 
+        # avoid offload of lazyframe
+        processed_df = processed_lf.collect()
         
-        snapshot_dict = prepare_tick(start_date=start_d, end_date=end_d, sids=sids)
+        if processed_df.height > 0:
+            eager_dfs.append(processed_df)
         
-        lfs = []
-        for sid_bytes, lf in snapshot_dict.items():
-            # eg. OFI / OFI + Volatility 
-            lfs.append(build_ofi_vol(lf))
-            
-        if lfs:
-            # pl.concat(lfs).collect(streaming=True).write_parquet(out_path)
-            pl.concat(lfs).sink_parquet(out_path)
+    if not eager_dfs:
+        print("⚠️ [Warning] No data found in this period.")
+        return sorted(paths)
+
+    print("🥞 Merging securities into a unified DataFrame...")
+    big_df = pl.concat(eager_dfs)
+    # big_df = big_df.with_columns((pl.col("day") // 100).alias("month_id"))
+    big_df = big_df.with_columns(
+    (pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id")
+    )
+    
+    print("💾 Writing partitioned monthly parquets to disk...")
+    for ym in missing_ymonths:
+        out_path = f"{FEATURE_DIR}/hf_{ym}.parquet"
+        
+        month_df = big_df.filter(pl.col("month_id") == ym).drop("month_id")
+        # month_lf = big_lf.filter(pl.col("month_id") == ym).drop("month_id")
+        # month_lf.sink_parquet(out_path) # not supported with window func
+        # month_lf.collect(streaming=False).write_parquet(out_path)
+        
+        if month_df.height > 0:
+            month_df.write_parquet(out_path)
             paths.append(out_path)
-            print(f"💾 [I/O] {ym} save to : {out_path}")
-    return paths
+            print(f"✅ Saved feature: {out_path}")
+        else:
+            print(f"ℹ️ Month {ym} has no record data, skipping save.")
+
+    return sorted(list(set(paths)))
 
 
 # ==============================================================================
@@ -135,35 +177,6 @@ def node_extract_feature_monthly(ymonths: list[int], sids: list[bytes], exp_conf
 # ==============================================================================
 
 # @task(name="Node_Check_Decay") 
-def node_check_decay(year: int, dret_path: str, oos_paths: list, exp_config: dict):
-    prev_model_path = get_latest_ckpt(year - 1, MODEL_DIR)
-    if not prev_model_path:
-        return True 
-        
-    with open(prev_model_path, "rb") as f: 
-        model_ckpt = pickle.load(f)
-
-    aligned_lfs = [pl.scan_parquet(p) for p in oos_paths if os.path.exists(p)]
-    if not aligned_lfs: return True
-
-    # Panel Data
-    oos_panel_df = build_fsm_panel(aligned_lfs, pl.scan_parquet(dret_path), model_ckpt["config"]).collect(engine="streaming")
-    cross_days = int(model_ckpt["config"]["cross_days"])
-    curves_2d = np.hstack([np.vstack(oos_panel_df[f"lag_{i}"].to_list()) for i in reversed(range(cross_days))])
-    
-    rp = exp_config["run_params"]
-    
-    eval_res = evaluate_and_build_fsm(
-        panel_df=oos_panel_df, curves_2d=curves_2d, motif=model_ckpt["motif"],
-        config=model_ckpt["config"], stats_windows=rp["stats_windows"], alternative=rp["alternative"]
-    )
-   
-    if eval_res.get("status") == "success" and eval_res["metrics_score"] > 0:
-        # get_run_logger().info(f"History Motif (P-val: {eval_res['u_pval']:.4f}) stil effective")
-        return False 
-    return True
-
-
 def node_check_decay_monthly(
     prev_model_id: int, 
     prev_oos_months: list[int], 
@@ -208,13 +221,13 @@ def node_check_decay_monthly(
 # Node 4: Ray Tune 
 # ==============================================================================
 
-def trainable_fsm_worker(config, hf_pa, dret_pa, prior_config):
+def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     # ray.tune auto ray.get from ptr to Arrow ---> Polars DataFrame
     hf_lf = pl.from_arrow(hf_pa).clone().lazy() # 
     dret_lf = pl.from_arrow(dret_pa).clone().lazy()
 
     panel_lf = build_fsm_panel(hf_lf, dret_lf, config)
-    result = discover_fsm_pattern(config, panel_lf, prior_config)
+    result = discover_fsm_pattern(panel_lf, config, common_config)
 
     if result["status"] == "success":
         tune.report({
@@ -225,20 +238,19 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, prior_config):
         print(f"\n[Worker Filtered] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
         tune.report({"metrics_score": 0.0, "u_pval": 1.0})
 
-    # enforce recycle
     del panel_lf, hf_lf, dret_lf
     gc.collect()
 
 
 # @task(name="Node_Tune") 
-def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp_config: dict) -> bool:
+def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp_config: dict, prev_model_id:str) -> bool:
     common_config, sb = exp_config["run_params"], exp_config["search_bounds"]
 
     # =========================================================================
     # read_parquet and put arrow into Ray Plasma
     # =========================================================================
 
-    hf_dfs = [pl.read_parquet(p, columns=["day", "sid", "bar_idx", "ofi_ratio", "volatility"]) for p in train_paths if os.path.exists(p)]
+    hf_dfs = [pl.read_parquet(p) for p in train_paths if os.path.exists(p)] 
     if not hf_dfs: 
         return False
     
@@ -261,9 +273,11 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     }
 
     points_to_evaluate = None
-    if prev_ckpt:
-        prior_cfg = pickle.load(open(prev_ckpt, "rb"))["config"]
-        points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}]
+    if os.path.exists(f"{MODEL_DIR}/model_{prev_model_id}.pkl"):
+        print(f"NotFound{prev_model_id} or First force to retune...")
+        with open(prev_model_path, "rb") as f:
+            prior_cfg = pickle.load(f)["config"]
+            points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}]
 
     # multithread / sample optimize
     optuna_sampler = optuna.samplers.TPESampler(n_startup_trials=10, multivariate=True) #
@@ -280,7 +294,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
             trainable_fsm_worker,
             hf_pa=hf_ref,      
             dret_pa=dret_ref,   
-            prior_config=common_config),
+            common_config=common_config),
         resources={"cpu": 1, "gpu": 0} 
     )
 
@@ -301,9 +315,10 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
             max_concurrent_trials=sb["max_concurrent_trials"]
         ),
         run_config=tune.RunConfig(
-            name=f"fsm_hpo_{year}", 
-            storage_path="/tmp/ray_results"),
-            callbacks=[mlflow_callback]  
+            name=f"fsm_hpo_{model_id}", 
+            storage_path="/tmp/ray_results",
+            callbacks=[mlflow_callback]
+            )  
         )
     
     # =========================================================================
@@ -435,7 +450,8 @@ def wfo_pipeline(exp_config):
     
     daily_df = pl.read_parquet(global_data["dret_path"], columns=["day"])
     all_months = (
-        daily_df.select((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
+        # daily_df.select((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
+        daily_df.select((pl.col("day") // 100).cast(pl.Int32).alias("month_id"))
         .unique().sort("month_id")["month_id"].to_list()
     )
     
@@ -452,10 +468,10 @@ def wfo_pipeline(exp_config):
         
         sids_train = []
         for m in train_months:
-            sids_train.extend(global_data["dynamic_sids_by_year"].get(m // 100, []))
+            sids_train.extend(global_data["universe_sids"].get(m // 100, []))
         sids_train = list(set(sids_train))
         
-        sids_oos = list(set(global_data["dynamic_sids_by_year"].get(model_id // 100, [])))
+        sids_oos = list(set(global_data["universe_sids"].get(model_id // 100, [])))
         
         if not sids_train or not sids_oos: 
             continue
@@ -480,7 +496,7 @@ def wfo_pipeline(exp_config):
         
         if is_decayed:
             print(f"🔄 Model decayed or First Run. Tuning Model for {model_id}...")
-            success = node_tune_monthly(model_id, global_data["dret_path"], train_paths, exp_config)
+            success = node_tune_monthly(model_id, global_data["dret_path"], train_paths, exp_config, last_available_model_id)
             if not success:
                 print(f"⚠️ {model_id} HPO Failed. Skipping this window.")
                 continue

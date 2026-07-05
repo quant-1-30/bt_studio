@@ -6,7 +6,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 from bt_studio.pipeline.metrics import calculate_hpo_score
 
 
-def prepare_mcurves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
+def prepare_mcurves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
     """DataFrame (N, D, L) tensor and NaN boarder"""
     cross_days = int(tune_config["cross_days"])
     feature_cols = common_config.get("features", ["ofi_ratio", "volatility"]) 
@@ -264,7 +264,7 @@ def discover_fsm_pattern_md(
     # =========================================================================
     # 2. Features Matrix (N,D,L)
     # =========================================================================
-    curves_md = prepare_mcurves(panel_df, common_config, tune_config)
+    curves_md = prepare_mcurves(panel_df, tune_config, common_config)
     N, D, L = curves_md.shape
     
     # =========================================================================
