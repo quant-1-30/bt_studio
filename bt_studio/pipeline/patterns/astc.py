@@ -11,7 +11,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 from bt_studio.pipeline.metrics import calculate_hpo_score
 
 
-def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
+def prepare_curves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
     """DataFrame (N, L) tensor and NaN boarder"""
     cross_days = int(tune_config["cross_days"])
 
@@ -104,7 +104,7 @@ def evaluate_and_build_fsm(
     curves_2d: np.ndarray,
     motif: np.ndarray, 
     tune_config: dict,
-    common_config: dict
+    common_config: dict,
     ) -> dict:
 
     base_score = 100.0
@@ -192,7 +192,7 @@ def evaluate_and_build_fsm(
         return {"status": "failed", "reason": f"Matching Not enough (n={triggers.height})", "metrics_score": 0.0}
 
     # =================================================================
-    # 4. Markov Laplace
+    # 4. Markov Laplace and Bayesian Prior 
     # =================================================================
     trans_t1 = np.ones((3, 4), dtype=np.float64) 
     trans_t1_t2 = np.ones((4, 4), dtype=np.float64) 
@@ -226,8 +226,7 @@ def evaluate_and_build_fsm(
     # 6. Final Score 
     # =================================================================
     score = calculate_hpo_score(
-        u_pval, len(cond_rets), cond_rets, uncond_rets, common_config["alternative"]
-    )
+        u_pval, len(cond_rets), cond_rets, uncond_rets, tune_config, common_config)
 
     if score == 0.0:
         return {"status": "failed", "reason": f"(P-val={u_pval:.4f})", "metrics_score": 0.0}
@@ -243,13 +242,14 @@ def evaluate_and_build_fsm(
 
 
 def discover_fsm_pattern(
-    search_config: dict, 
     panel_lf: pl.LazyFrame,  
+    tune_config: dict, 
     common_config: dict
 ) -> Dict[str, Any]: 
 
-    m = int(search_config["motif_minutes"] // search_config["downsample"])
-    cross_days = int(search_config["cross_days"])
+    m = int(tune_config["motif_minutes"] // tune_config["downsample"])
+    cross_days = int(tune_config["cross_days"])
+    threshold_d = float(np.sqrt(2 * m * (1.0 - tune_config.get("threshold_r", 0.85))))
 
     # =========================================================================
     # 1. Filter Panel DataFrame
@@ -270,17 +270,11 @@ def discover_fsm_pattern(
         }
 
     # =========================================================================
-    # 2. Calculate Stumpy Length
+    # 2. Features Matrix (N,L)
     # =========================================================================
-    threshold_d = float(np.sqrt(2 * m * (1.0 - search_config.get("threshold_r", 0.85))))
-    
-    tune_config = search_config.copy()
     tune_config["m"] = m
     tune_config["threshold_d"] = threshold_d
 
-    # =========================================================================
-    # 3. Features Matrix (N,D,L)
-    # =========================================================================
     curves_2d = prepare_curves(panel_df, common_config, tune_config)
     N, L = curves_2d.shape
 
@@ -288,20 +282,20 @@ def discover_fsm_pattern(
         return np.array([])
 
     # =========================================================================
-    # 4. Volatility-Driven Sampling for stumpy
+    # 3. Volatility-Driven Sampling for stumpy
     # =========================================================================
     # diff ---> mutation Shape -> diff (N, L-1) / abs ---> (N, L-1) / nanmax --> (N,)
     # mutation_scores = np.nanmax(np.nanvar(curves_2d, axis=1), axis=1)
     mutation_scores = np.nansum(np.abs(np.diff(curves_2d, axis=1)), axis=1)
     
-    theory_points = common_config.get("max_points", 20000)
+    theory_points = common_config.get("max_points", 20000) # bug 
     sample_size = min(N, max(5, int(theory_points / L))) 
     
     active_idx = np.argsort(mutation_scores)[-sample_size:]
     sampled_curves = curves_2d[active_idx] # Shape: (Sample_N, L)
     
     # =========================================================================
-    # 5. Nans between assets and Stumpy T_multi(Sample_N * L) For Candidates 
+    # 4. Nans between assets and Stumpy T_multi(Sample_N * L) For Candidates 
     # =========================================================================
     clean_curves = np.copy(sampled_curves)
     # clean_curves = np.nan_to_num(sampled_curves, nan=0.0, posinf=0.0, neginf=0.0)

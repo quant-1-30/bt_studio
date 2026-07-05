@@ -6,7 +6,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 from bt_studio.pipeline.metrics import calculate_hpo_score
 
 
-def prepare_curves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
+def prepare_mcurves(panel_df: pl.DataFrame, common_config: dict, tune_config: dict) -> np.ndarray:
     """DataFrame (N, D, L) tensor and NaN boarder"""
     cross_days = int(tune_config["cross_days"])
     feature_cols = common_config.get("features", ["ofi_ratio", "volatility"]) 
@@ -218,9 +218,7 @@ def evaluate_and_build_fsm_md(
     # =======================================================================
     # 6. Final Score
     # =======================================================================
-    score = calculate_hpo_score(
-        u_pval, len(cond_rets), cond_rets, uncond_rets, common_config["alternative"]
-    )
+    score = calculate_hpo_score(u_pval, len(cond_rets), cond_rets, uncond_rets, tune_config, common_config)
     
     if score == 0.0:
         return {"status": "failed", "reason": f"(P-val={u_pval:.4f})", "metrics_score": 0.0}
@@ -236,15 +234,17 @@ def evaluate_and_build_fsm_md(
 
 
 def discover_fsm_pattern_md(
-    search_config: dict, 
     panel_lf: pl.LazyFrame,  
+    tune_config: dict, 
     common_config: dict
 ) -> Dict[str, Any]:
 
     m = int(search_config["motif_minutes"] // search_config["downsample"])
+    threshold_d = float(np.sqrt(2 * m * (1.0 - search_config.get("threshold_r", 0.85))))
+    tune_config.update({"m": m, "threshold_d": threshold_d})
 
     # =========================================================================
-    # Filter Panel DataFrame
+    # 1. Filter Panel DataFrame
     # =========================================================================
     panel_df = panel_lf.collect(engine="streaming")
     if panel_df.height == 0:
@@ -262,21 +262,13 @@ def discover_fsm_pattern_md(
         }
     
     # =========================================================================
-    # 1 Calculate Stumpy Length
+    # 2. Features Matrix (N,D,L)
     # =========================================================================
-    threshold_d = float(np.sqrt(2 * m * (1.0 - search_config.get("threshold_r", 0.85))))
-    
-    tune_config = search_config.copy()
-    tune_config.update({"m": m, "threshold_d": threshold_d})
-    
-    # =========================================================================
-    # 2 Features Matrix (N,D,L)
-    # =========================================================================
-    curves_md = prepare_curves(panel_df, common_config, tune_config)
+    curves_md = prepare_mcurves(panel_df, common_config, tune_config)
     N, D, L = curves_md.shape
     
     # =========================================================================
-    # 3 Volatility-Driven Sampling for stumpy
+    # 3. Volatility-Driven Sampling for stumpy
     # =========================================================================
     # curves_md Shape: (N, D, L) and axis=2 --> abs diff 
     curves_asbdiff_sum = np.nansum(np.abs(np.diff(curves_md, axis=2)), axis=2) # Shape -> (N, D)
@@ -289,13 +281,13 @@ def discover_fsm_pattern_md(
     mutation_scores = np.nansum(z_md, axis=1)
     
     theory_points = common_config.get("max_discovery_points", 20000)
-    sample_size = min(N, max(5, int(theory_points / L))) 
+    sample_size = min(N, max(5, int(theory_points / L))) # D * L 
     
     active_idx = np.argsort(mutation_scores)[-sample_size:]
     sampled_curves = curves_md[active_idx] # Shape: (Sample_N, D, L)
 
     # =========================================================================
-    # 3 Nans between assets and Stumpy T_multi(D, Sample_N * L) For Candidates 
+    # 4. Nans between assets and Stumpy T_multi(D, Sample_N * L) For Candidates 
     # =========================================================================
     clean_curves = np.copy(sampled_curves)
     clean_curves[np.isinf(clean_curves)] = 0.0
@@ -311,7 +303,7 @@ def discover_fsm_pattern_md(
     candidate_motifs = get_candidate_motifs_md(T_multi, tune_config, top_k=5)
     
     # =========================================================================
-    # 4 Evaluate Motif and Build FSM
+    # 5. Evaluate Motif and Build FSM
     # =========================================================================
     best_result, highest_score = None, -1.0
 
