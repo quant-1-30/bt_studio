@@ -27,13 +27,17 @@ def prepare_mcurves(panel_df: pl.DataFrame, tune_config: dict, common_config: di
     return np.swapaxes(curves_md, 0, 1) # Shape: (N, D, L)
 
 
-def get_candidate_motifs_md(T_multi: np.ndarray, config: dict, top_k=5):
+def get_candidate_motifs_md(T_multi: np.ndarray, config: dict, dimension: int, top_k=5):
     # Motif
     m = config["m"]
     mps, indices = stumpy.mstump(T_multi, m=m)
-    distances = np.copy(mps[D - 1, :]) 
+
+    distances = np.copy(mps[dimension - 1, :]).astype(np.float64) 
     distances[distances <= 1e-5] = np.inf
     
+    if np.all(np.isinf(distances)):
+        return []
+
     candidate_motifs = []
     for _ in range(top_k):
         anchor = int(np.nanargmin(distances))
@@ -165,7 +169,7 @@ def evaluate_and_build_fsm_md(
     # =======================================================================
     m = tune_config["m"]
     threshold_d = tune_config["threshold_d"]
-    dtw_w = int(m * tune_config.get("dtw_window_frac", 0.1))
+    dtw_w = max(1, int(m * tune_config["dtw_window_frac"] * 0.1))
 
     # Motif Z-Score
     m_means = np.mean(motif_md, axis=1, keepdims=True)
@@ -316,7 +320,7 @@ def discover_fsm_pattern_md(
         flat_dims.append(dim_flat)
     T_multi = np.vstack(flat_dims) # Shape: (D, Sample_N * L)
 
-    candidate_motifs = get_candidate_motifs_md(T_multi, tune_config, top_k=5)
+    candidate_motifs = get_candidate_motifs_md(T_multi, tune_config, dimension=D, top_k=5)
     
     # =========================================================================
     # 5. Evaluate Motif and Build FSM

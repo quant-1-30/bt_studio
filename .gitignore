@@ -226,3 +226,7 @@ __marimo__/
 *.bz2
 *.db
 result/*
+
+# mlflow artifacts
+mlartifacts/*
+mlflow.db

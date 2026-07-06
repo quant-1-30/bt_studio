@@ -41,7 +41,12 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) ->
         return []
 
     distances = np.copy(mp[:, 0])
+    # mp two different dtype --> object --> float64
+    distances = np.copy(mp[:, 0]).astype(np.float64)
     distances[distances <= 1e-5] = np.inf
+
+    if np.all(np.isinf(distances)):
+        return []
 
     candidates = []
     for _ in range(top_k):
@@ -176,7 +181,7 @@ def evaluate_and_build_fsm(
     # =================================================================
     m = tune_config["m"]
     threshold_d = tune_config["threshold_d"]
-    dtw_w = int(m * tune_config.get("dtw_window_frac", 0.1))
+    dtw_w = max(1, int(m * tune_config["dtw_window_frac"]))
 
     z_motif = np.ascontiguousarray((motif - np.mean(motif)) / (np.std(motif) + 1e-8), dtype=np.float64)
 

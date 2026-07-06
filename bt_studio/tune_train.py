@@ -232,12 +232,13 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     result = discover_fsm_pattern(panel_lf, config, common_config)
 
     if result["status"] == "success":
+        print(f"\n[Trail Success] Config: {config}\n")
         tune.report({
             "metrics_score": result["metrics_score"], "u_pval": result["u_pval"],
             "learned_motif": result["learned_motif"], "fsm_network": result["fsm_network"]
         })
     else:
-        print(f"\n[Worker Filtered] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
+        print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
         tune.report({"metrics_score": 0.0, "u_pval": 1.0})
 
     del panel_lf, hf_lf, dret_lf
