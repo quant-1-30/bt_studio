@@ -49,7 +49,7 @@ def get_candidate_motifs_md(T_multi: np.ndarray, config: dict, dimension: int, t
         distances[max(0, anchor - m) : min(len(distances), anchor + m)] = np.inf
         
     if not candidate_motifs: 
-        return {"status": "failed", "reason": "Not Found Motif", "metrics_score": 0.0}
+        return {"status": "failed", "reason": "Not Found Motif", "metrics_score": -9999.0}
         
     return candidate_motifs
 
@@ -100,8 +100,6 @@ def evaluate_and_build_fsm_md(
     tune_config: dict,
     common_config: dict
 ) -> dict:
-
-    base_score = 100.0
 
     if panel_df["sid"].dtype != pl.Binary:
         panel_df = panel_df.with_columns(pl.col("sid").cast(pl.Binary))
@@ -189,7 +187,7 @@ def evaluate_and_build_fsm_md(
     triggers = eval_df.filter(pl.col("distance") <= threshold_d)
     
     if triggers.height < 5:
-        return {"status": "failed", "reason": f"Matching Not enough (n={triggers.height})", "metrics_score": 0.0}
+        return {"status": "failed", "reason": f"Matching Not enough (n={triggers.height})", "metrics_score": -9999.0}
 
     # =======================================================================
     # 4. Markov Laplace 
@@ -231,20 +229,20 @@ def evaluate_and_build_fsm_md(
     uncond_rets = eval_df["fwd_ret_1"].drop_nulls().to_numpy() 
     
     if len(cond_rets) < 5 or np.std(cond_rets) < 1e-8:
-         return {"status": "failed", "reason": "ret Std 0 means supend or delist", "metrics_score": 0.0}
+         return {"status": "failed", "reason": "ret Std 0 means supend or delist", "metrics_score": -9999.0}
     
     try:
         u_stat, u_pval = stats.mannwhitneyu(cond_rets, uncond_rets, alternative=common_config["alternative"])
     except ValueError:
-        return {"status": "failed", "reason": "MW-U 检验数学越界", "metrics_score": 0.0}
+        return {"status": "failed", "reason": "MW-U 检验数学越界", "metrics_score": -9999.0}
 
     # =======================================================================
     # 6. Final Score
     # =======================================================================
     score = calculate_hpo_score(u_pval, len(cond_rets), cond_rets, uncond_rets, tune_config, common_config)
     
-    if score == 0.0:
-        return {"status": "failed", "reason": f"(P-val={u_pval:.4f})", "metrics_score": 0.0}
+    if score <= -9990.0:
+        return {"status": "failed", "reason": f"(P-val={u_pval:.4f})", "metrics_score": -9999.0}
 
     return {
         "status": "success",
@@ -274,14 +272,14 @@ def discover_fsm_pattern_md(
         return {
             "status": "failed", 
             "reason": "HPO Panel_df Zero after filter", 
-            "metrics_score": 0.0
+            "metrics_score": -9999.0
         }
         
     if panel_df.height <= m or m < 3:
         return {
             "status": "failed", 
             "reason": f"Not enough data (n={panel_df.height})", 
-            "metrics_score": 0.0
+            "metrics_score": -9999.0
         }
     
     # =========================================================================
@@ -314,7 +312,7 @@ def discover_fsm_pattern_md(
     # =========================================================================
     clean_curves = np.copy(sampled_curves)
     clean_curves[np.isinf(clean_curves)] = 0.0
-    
+
     flat_dims = []
     for d in range(D):
         dim_data = clean_curves[:, d, :] 
@@ -328,7 +326,7 @@ def discover_fsm_pattern_md(
     # =========================================================================
     # 5. Evaluate Motif and Build FSM
     # =========================================================================
-    best_result, highest_score = None, -1.0
+    best_result, highest_score = None, -9999.0
 
     for motif_md in candidate_motifs:
         result = evaluate_and_build_fsm_md(
@@ -337,4 +335,4 @@ def discover_fsm_pattern_md(
         if result["status"] == "success" and result["metrics_score"] > highest_score:
             highest_score, best_result = result["metrics_score"], result
             
-    return best_result if best_result else {"status": "failed", "reason": "(P-val > 0.1)", "metrics_score": 0.0}
+    return best_result if best_result else {"status": "failed", "reason": "(P-val > 0.1)", "metrics_score": -9999.0}

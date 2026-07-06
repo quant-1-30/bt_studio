@@ -144,5 +144,4 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
         .drop(["tick", "to_minutes"])
         .rename({"tick_dt": "tick"})
     )
-    
     return padded_df.lazy()

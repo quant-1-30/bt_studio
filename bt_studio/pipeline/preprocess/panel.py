@@ -85,14 +85,10 @@ def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, con
     # =========================================================================
     # crossover concat 
     # =========================================================================
-    # shift_exprs = [
-    #     pl.col("daily_curve").shift(i).over("sid").alias(f"lag_{i}") 
-    #     for i in reversed(range(config["cross_days"]))
-    # ]
+
     shift_exprs = [
-        # 💡 i == 0 alias
         pl.col("daily_curve").shift(i).over("sid").alias(f"lag_{i}") if i > 0 
-        else pl.col("daily_curve").alias(f"lag_{i}")
+        else pl.col("daily_curve").alias(f"lag_{i}") # i == 0 alias
         for i in reversed(range(config["cross_days"]))
     ]
 

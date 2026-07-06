@@ -57,5 +57,4 @@ def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, exceed=12
         .join(sample_lf, left_on=["sid", "month_id"], right_on=["sid", "trade_month_id"], how="inner")
         .filter((pl.col("volume") > 0) & (pl.col("high") > pl.col("low")))
     )
-    
     return filtered_uni_lf

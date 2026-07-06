@@ -140,8 +140,9 @@ def node_extract_feature_monthly(ymonths: list[int], sids: list[bytes], exp_conf
         
         # avoid offload of lazyframe
         processed_df = processed_lf.collect()
-        
+         
         if processed_df.height > 0:
+
             eager_dfs.append(processed_df)
         
     if not eager_dfs:
@@ -206,7 +207,6 @@ def node_check_decay_monthly(
     panel_df = panel_lf.collect(streaming=True)
     
     curves_2d = prepare_curves(panel_df, model_ckpt["config"], common_config)
-    
     result = evaluate_and_build_fsm_md(
         panel_df, curves_2d, model_ckpt["motif"], model_ckpt["config"], common_config
     )
@@ -239,7 +239,7 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
         })
     else:
         print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
-        tune.report({"metrics_score": -99999.0, "u_pval": 1.0})
+        tune.report({"metrics_score": -9999.0, "u_pval": 1.0})
 
     del panel_lf, hf_lf, dret_lf
     gc.collect()
@@ -307,13 +307,15 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     )
 
     tuner = tune.Tuner(
-        wrapped_trainable, param_space=search_space,   
+        wrapped_trainable, 
+        param_space=search_space,   
         tune_config=tune.TuneConfig(
             metric="metrics_score", 
             mode="max", 
             search_alg=search_alg, 
-            num_samples=search_config["num_trials"],            
-            scheduler=tune.schedulers.ASHAScheduler(grace_period=search_config["grace_period"], reduction_factor=search_config["reduction_factor"]),
+            num_samples=search_config["num_trials"],        
+            # # used for Iterative Training not for One-shot / Single-step Computation    
+            # scheduler=tune.schedulers.ASHAScheduler(grace_period=search_config["grace_period"], reduction_factor=search_config["reduction_factor"]),
             max_concurrent_trials=search_config["max_concurrent_trials"]
         ),
         run_config=tune.RunConfig(
@@ -332,9 +334,9 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     best_trial_result = results.get_best_result("metrics_score", "max")
     
     best_pval = best_trial_result.metrics.get("u_pval", 1.0)
-    best_score = best_trial_result.metrics.get("metrics_score", -99999.0)
+    best_score = best_trial_result.metrics.get("metrics_score", -9999.0)
  
-    if best_pval > 0.05 or best_score <= -99999.0:
+    if best_pval > 0.05 or best_score <= -9999.0:
         print(f"⚠️ [Failed] {model_id} P-val ({best_pval:.4f}) donot pass 5%")
         return False
 
@@ -534,13 +536,12 @@ if __name__ == "__main__":
         },
 
         "search_bounds": {
-            "downsample": [3, 5, 10], # downsample for DTW
-            "cross_days": [2, 3, 4], # concat cross_days of lagged curves to 2D array for DTW 
-            "motif_minutes": [30, 60, 120, 240], # used from motif length intraday
+            "downsample": [2, 3, 4, 5], # downsample for DTW
+            "cross_days": [1, 2, 3], # concat cross_days of lagged curves to 2D array for DTW 
+            "motif_minutes": [45, 60, 90, 120], # used from motif length intraday
             "threshold_r": [0.7, 0.90], 
-            "grace_period": 5, "reduction_factor": 4, 
             "num_trials": 100, 
-            "max_concurrent_trials": 4
+            "max_concurrent_trials": 6
         }
     }
 
