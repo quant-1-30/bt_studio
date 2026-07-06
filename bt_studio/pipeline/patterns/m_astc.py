@@ -1,8 +1,11 @@
 import stumpy
 import numpy as np
+
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="stumpy")
+
 from dtaidistance import dtw_ndim
 from numpy.lib.stride_tricks import sliding_window_view
-
 from bt_studio.pipeline.metrics import calculate_hpo_score
 
 
@@ -169,7 +172,7 @@ def evaluate_and_build_fsm_md(
     # =======================================================================
     m = tune_config["m"]
     threshold_d = tune_config["threshold_d"]
-    dtw_w = max(1, int(m * tune_config["dtw_window_frac"] * 0.1))
+    dtw_w = max(3, int(m * common_config["dtw_window_frac"]))
 
     # Motif Z-Score
     m_means = np.mean(motif_md, axis=1, keepdims=True)

@@ -211,7 +211,7 @@ def node_check_decay_monthly(
         panel_df, curves_2d, model_ckpt["motif"], model_ckpt["config"], common_config
     )
     
-    if result.get("status") == "success" and result["metrics_score"] > 0.0:
+    if result.get("status") == "success":
         print(f" {prev_model_id} on ({prev_oos_months[0]}-{prev_oos_months[-1]}) effective and (P-val: {result['u_pval']:.4f})")
         return False
         
@@ -232,14 +232,14 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     result = discover_fsm_pattern(panel_lf, config, common_config)
 
     if result["status"] == "success":
-        print(f"\n[Trail Success] Config: {config}\n")
+        print(f"\n[Trail Success] Score: {result['metrics_score']:.4f} ; Config: {config}\n")
         tune.report({
             "metrics_score": result["metrics_score"], "u_pval": result["u_pval"],
             "learned_motif": result["learned_motif"], "fsm_network": result["fsm_network"]
         })
     else:
         print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
-        tune.report({"metrics_score": 0.0, "u_pval": 1.0})
+        tune.report({"metrics_score": -99999.0, "u_pval": 1.0})
 
     del panel_lf, hf_lf, dret_lf
     gc.collect()
@@ -247,7 +247,7 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
 
 # @task(name="Node_Tune") 
 def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp_config: dict, prev_model_id:str) -> bool:
-    common_config, sb = exp_config["run_params"], exp_config["search_bounds"]
+    common_config, search_config = exp_config["run_params"], exp_config["search_bounds"]
 
     # =========================================================================
     # read_parquet and put arrow into Ray Plasma
@@ -268,11 +268,10 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     # =========================================================================
 
     search_space = {
-        "downsample": tune.choice(sb["downsample"]), 
-        "cross_days": tune.choice(sb["cross_days"]), 
-        "motif_minutes": tune.choice(sb["motif_minutes"]), 
-        "threshold_r": tune.uniform(*sb["threshold_r"]),
-        "dtw_window_frac": tune.uniform(*sb["dtw_window_frac"]), 
+        "downsample": tune.choice(search_config["downsample"]), 
+        "cross_days": tune.choice(search_config["cross_days"]), 
+        "motif_minutes": tune.choice(search_config["motif_minutes"]), 
+        "threshold_r": tune.uniform(*search_config["threshold_r"]),
     }
 
     points_to_evaluate = None
@@ -313,9 +312,9 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
             metric="metrics_score", 
             mode="max", 
             search_alg=search_alg, 
-            num_samples=sb["num_trials"],            
-            scheduler=tune.schedulers.ASHAScheduler(grace_period=sb["grace_period"], reduction_factor=sb["reduction_factor"]),
-            max_concurrent_trials=sb["max_concurrent_trials"]
+            num_samples=search_config["num_trials"],            
+            scheduler=tune.schedulers.ASHAScheduler(grace_period=search_config["grace_period"], reduction_factor=search_config["reduction_factor"]),
+            max_concurrent_trials=search_config["max_concurrent_trials"]
         ),
         run_config=tune.RunConfig(
             name=f"fsm_hpo_{model_id}", 
@@ -332,7 +331,11 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     df_results = results.get_dataframe()
     best_trial_result = results.get_best_result("metrics_score", "max")
     
-    if best_trial_result.metrics.get("metrics_score", 0.0) <= 0.0:
+    best_pval = best_trial_result.metrics.get("u_pval", 1.0)
+    best_score = best_trial_result.metrics.get("metrics_score", -99999.0)
+ 
+    if best_pval > 0.05 or best_score <= -99999.0:
+        print(f"⚠️ [Failed] {model_id} P-val ({best_pval:.4f}) donot pass 5%")
         return False
 
     # 1. fANOVA 
@@ -526,7 +529,8 @@ if __name__ == "__main__":
             "edge_ratio": 0.25, # ratio of macro state edge bins 
             "alternative": "greater", # stats 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
-            "prior_weight": 0.3 # 0.3 + 0.7 
+            "prior_weight": 0.3, # 0.3 + 0.7 
+            "dtw_window_frac": 0.1, # used for DTW offset 
         },
 
         "search_bounds": {
@@ -534,7 +538,6 @@ if __name__ == "__main__":
             "cross_days": [2, 3, 4], # concat cross_days of lagged curves to 2D array for DTW 
             "motif_minutes": [30, 60, 120, 240], # used from motif length intraday
             "threshold_r": [0.7, 0.90], 
-            "dtw_window_frac": [0.05, 0.10], # used for DTW offset 
             "grace_period": 5, "reduction_factor": 4, 
             "num_trials": 100, 
             "max_concurrent_trials": 4

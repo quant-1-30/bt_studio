@@ -1,8 +1,10 @@
 import polars as pl
 import numpy as np
 import stumpy
-import numpy as np
 import scipy.stats as stats
+
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="stumpy")
 
 from dtaidistance import dtw
 from typing import List, Dict, Any
@@ -181,7 +183,7 @@ def evaluate_and_build_fsm(
     # =================================================================
     m = tune_config["m"]
     threshold_d = tune_config["threshold_d"]
-    dtw_w = max(1, int(m * tune_config["dtw_window_frac"]))
+    dtw_w = max(3, int(m * common_config["dtw_window_frac"]))
 
     z_motif = np.ascontiguousarray((motif - np.mean(motif)) / (np.std(motif) + 1e-8), dtype=np.float64)
 

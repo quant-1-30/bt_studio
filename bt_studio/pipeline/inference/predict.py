@@ -12,7 +12,7 @@ class FSMPredictor:
         self.motif = np.array(model_ckpt["motif"])
         self.m = self.config["m"]
         self.threshold_d = self.config["threshold_d"]
-        self.dtw_w = max(1, int(self.m * self.config.get("dtw_window_frac", 0.1)))
+        self.dtw_w = max(1, int(self.m * self.config["dtw_window_frac"]))
         
         # FSM Numpy Matrix
         fsm_network = model_ckpt["fsm_network"]
