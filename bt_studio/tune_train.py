@@ -14,6 +14,8 @@ os.environ["RAYON_NUM_THREADS"] = "1"
 os.environ["NUMBA_NUM_THREADS"] = "1"
 os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
 
+os.environ["MLFLOW_TRACKING_URI"] = "http://127.0.0.1:5001"
+
 import multiprocessing
 import numpy as np
 import polars as pl
@@ -299,7 +301,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     )
 
     mlflow_callback = MLflowLoggerCallback(
-        tracking_uri=mlflow.get_tracking_uri(), # via env
+        tracking_uri=mlflow.get_tracking_uri(), # default 5000 and set by env
         experiment_name="FSM_Production_Models",
         save_artifact=True 
     )
@@ -392,7 +394,6 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     #     except Exception as e:
     #         print(f"upload failure: {e}")
 
-    gc.collect()
     return True
 
 
@@ -535,7 +536,7 @@ if __name__ == "__main__":
             "dtw_window_frac": [0.05, 0.10], # used for DTW offset 
             "grace_period": 5, "reduction_factor": 4, 
             "num_trials": 100, 
-            "max_concurrent_trials": 6
+            "max_concurrent_trials": 4
         }
     }
 

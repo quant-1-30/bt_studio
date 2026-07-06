@@ -192,10 +192,26 @@ def evaluate_and_build_fsm_md(
     trans_t1_t2 = np.ones((4, 4), dtype=np.float64) 
     trans_t2_t3 = np.ones((4, 4), dtype=np.float64) 
     
-    valid_chain = triggers.drop_nulls(subset=["macro_state"] + bin_cols)
+    select_cols = ["macro_state"] + bin_cols
+    valid_chain = triggers.drop_nulls(subset=select_cols)
+
     if valid_chain.height > 0:
-        for ms, b1, b2, b3 in valid_chain.select(["macro_state", "bin_1", "bin_2", "bin_3"]).rows():
-            trans_t1[ms, b1] += 1.0; trans_t1_t2[b1, b2] += 1.0; trans_t2_t3[b2, b3] += 1.0
+        # for ms, b1, b2, b3 in valid_chain.select(select_cols).rows():
+        #     trans_t1[ms, b1] += 1.0; trans_t1_t2[b1, b2] += 1.0; trans_t2_t3[b2, b3] += 1.0
+
+        for row in valid_chain.select(select_cols).iter_rows():
+                ms = row[0]
+                actual_bins = row[1:] 
+                
+                if len(actual_bins) >= 1:
+                    b1 = actual_bins[0]
+                    trans_t1[ms, b1] += 1.0
+                if len(actual_bins) >= 2:
+                    b2 = actual_bins[1]
+                    trans_t1_t2[b1, b2] += 1.0
+                if len(actual_bins) >= 3:
+                    b3 = actual_bins[2]
+                    trans_t2_t3[b2, b3] += 1.0
             
     trans_t1 = (trans_t1 / trans_t1.sum(axis=1, keepdims=True)).tolist()
     trans_t1_t2 = (trans_t1_t2 / trans_t1_t2.sum(axis=1, keepdims=True)).tolist()
