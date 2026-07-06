@@ -1,12 +1,17 @@
 import stumpy
 import numpy as np
+import polars as pl
+from scipy import stats
 
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="stumpy")
 
 from dtaidistance import dtw_ndim
+from typing import List, Dict, Any
 from numpy.lib.stride_tricks import sliding_window_view
+
 from bt_studio.pipeline.metrics import calculate_hpo_score
+from .tool import extract_fsm_matrix
 
 
 def prepare_mcurves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
@@ -98,7 +103,8 @@ def evaluate_and_build_fsm_md(
     curves_md: np.ndarray, # 💡 Shape: (N, D, L)
     motif_md: np.ndarray,  # 💡 Shape: (D, m)
     tune_config: dict,
-    common_config: dict
+    common_config: dict,
+    skip_stats: bool = False
 ) -> dict:
 
     if panel_df["sid"].dtype != pl.Binary:
@@ -193,34 +199,15 @@ def evaluate_and_build_fsm_md(
     # 4. Markov Laplace 
     # =======================================================================
 
-    trans_t1 = np.ones((3, 4), dtype=np.float64) 
-    trans_t1_t2 = np.ones((4, 4), dtype=np.float64) 
-    trans_t2_t3 = np.ones((4, 4), dtype=np.float64) 
-    
-    select_cols = ["macro_state"] + bin_cols
-    valid_chain = triggers.drop_nulls(subset=select_cols)
+    fsm_matrix = extract_fsm_matrix(triggers, bin_cols)
 
-    if valid_chain.height > 0:
-        # for ms, b1, b2, b3 in valid_chain.select(select_cols).rows():
-        #     trans_t1[ms, b1] += 1.0; trans_t1_t2[b1, b2] += 1.0; trans_t2_t3[b2, b3] += 1.0
-
-        for row in valid_chain.select(select_cols).iter_rows():
-                ms = row[0]
-                actual_bins = row[1:] 
-                
-                if len(actual_bins) >= 1:
-                    b1 = actual_bins[0]
-                    trans_t1[ms, b1] += 1.0
-                if len(actual_bins) >= 2:
-                    b2 = actual_bins[1]
-                    trans_t1_t2[b1, b2] += 1.0
-                if len(actual_bins) >= 3:
-                    b3 = actual_bins[2]
-                    trans_t2_t3[b2, b3] += 1.0
-            
-    trans_t1 = (trans_t1 / trans_t1.sum(axis=1, keepdims=True)).tolist()
-    trans_t1_t2 = (trans_t1_t2 / trans_t1_t2.sum(axis=1, keepdims=True)).tolist()
-    trans_t2_t3 = (trans_t2_t3 / trans_t2_t3.sum(axis=1, keepdims=True)).tolist()
+    if skip_stats:
+        return {
+            "status": "success",
+            "fsm_matrix": fsm_matrix,
+            "trigger_count": triggers.height,
+            "learned_motif": motif_md.tolist(),
+        }
 
     # =======================================================================
     # 5. Statistics Pval
@@ -246,9 +233,9 @@ def evaluate_and_build_fsm_md(
 
     return {
         "status": "success",
-        "fsm_network": {"P(T1|Macro)": trans_t1, "P(T2|T1)": trans_t1_t2, "P(T3|T2)": trans_t2_t3},
+        "fsm_matrix": fsm_matrix,
         "trigger_count": triggers.height,
-        "learned_motif": motif.tolist(),
+        "learned_motif": motif_md.tolist(),
         "metrics_score": score,
         "u_pval": float(u_pval)
     }

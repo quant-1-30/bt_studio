@@ -1,53 +1,39 @@
 import numpy as np
 import polars as pl
-from bt_studio.pipeline.patterns.astc import calc_min_subseq_dtw
+from bt_studio.pipeline.patterns.astc import calc_min_subseq_dtw, prepare_curves
+from bt_studio.pipeline.patterns.m_astc import calc_min_subseq_dtw_md, prepare_mcurves
 
 
 class FSMPredictor:
     """
-        Motif + FSM Network OSS
+        Motif + FSM Network OSS 1M/DM
     """
-    def __init__(self, model_ckpt: dict):
-        self.config = model_ckpt["config"]
+    
+    def __init__(self, model_ckpt: dict, common_config: dict):
+        self.tune_config = model_ckpt["config"]
         self.motif = np.array(model_ckpt["motif"])
-        self.m = self.config["m"]
-        self.threshold_d = self.config["threshold_d"]
-        self.dtw_w = max(1, int(self.m * self.config["dtw_window_frac"]))
+        self.common_config = common_config
         
-        # FSM Numpy Matrix
-        fsm_network = model_ckpt["fsm_network"]
-        self.p_t1_macro = np.array(fsm_network["P(T1|Macro)"]) # Shape: (3, 4)
-        self.p_t2_t1 = np.array(fsm_network["P(T2|T1)"])       # Shape: (4, 4)
-        self.p_t3_t2 = np.array(fsm_network["P(T3|T2)"])       # Shape: (4, 4)
-        
-        self.bin_weights = np.array([-1.0, -0.5, 0.5, 1.0]) #  # 0:大跌, 1:微跌, 2:微涨, 3:大涨
+        self.m = self.tune_config["m"]
+        self.threshold_d = self.tune_config["threshold_d"]
+        self.dtw_w = max(3, int(self.m * self.common_config["dtw_window_frac"]))
 
-    def predict(self, panel_lf: pl.LazyFrame) -> pl.DataFrame:
+        fsm_matrix = model_ckpt["fsm_matrix"]
+        self.p_t1_macro = np.array(fsm_matrix["P(T1|Macro)"]) 
+        self.p_t2_t1 = np.array(fsm_matrix["P(T2|T1)"])       
+        self.p_t3_t2 = np.array(fsm_matrix["P(T3|T2)"])       
+
+        self.bin_weights = np.array([-1.0, -0.5, 0.5, 1.0]) 
         
-        panel_df = panel_lf.collect()
-        if panel_df.height == 0:
-            return pl.DataFrame()
-            
-        cross_days = int(self.config["cross_days"])
-        lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
-        curves_2d = np.hstack([np.vstack(panel_df[col].to_list()) for col in lag_cols])
-        
-        z_motif = np.ascontiguousarray((self.motif - np.mean(self.motif)) / (np.std(self.motif) + 1e-8), dtype=np.float64)
-        
-        distances = [
-            calc_min_subseq_dtw(curve, z_motif, self.m, self.dtw_w, self.threshold_d) 
-            for curve in curves_2d 
-        ]
-        panel_df = panel_df.with_columns(pl.Series("distance", distances))
-         
-        # Macro State
-        daily_macro = (
-            # triggers.group_by(["day", "sid"])
-            panel_df.group_by(["day", "sid"])
-            .agg(pl.col("daily_curve").list.sum().alias("sid_ofi_sum"))
+    def _get_macro_state(self, panel_df: pl.DataFrame, macro_col: str) -> pl.DataFrame:
+        return (
+            panel_df.lazy()
+            # .select(["day", "sid", pl.col(macro_col).list.sum().alias("sid_ofi_sum")])
+            .group_by(["day", "sid"])
+            .agg(pl.col(macro_col).list.sum().alias("sid_ofi_sum")) # maybe >=1
             .group_by("day")
             .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
-            .sort("day") 
+            .sort("day")
             .with_columns([
                 pl.col("daily_ofi_mean").quantile(1/3).alias("p33"),
                 pl.col("daily_ofi_mean").quantile(2/3).alias("p67")
@@ -57,32 +43,23 @@ class FSMPredictor:
                 .when(pl.col("daily_ofi_mean") <= pl.col("p67")).then(1)
                 .otherwise(2).cast(pl.Int32).alias("macro_state")
             )
-            .with_columns(pl.col("macro_state").shift(1)) # avoid lookahead bias
+            .with_columns(pl.col("macro_state").shift(1)) 
             .drop(["p33", "p67", "daily_ofi_mean"])
             .drop_nulls()
+            .collect()
         )
-        
-        triggers = panel_df.filter(pl.col("distance") <= self.threshold_d)
-        if triggers.height == 0:
-            return pl.DataFrame()
 
-        triggers = triggers.join(daily_macro, on="day", how="left")
+    def _calculate_fsm_score(self, triggers: pl.DataFrame) -> pl.DataFrame:
         
-        # P(T_n | Macro)
         def calc_alpha_score(macro_state):
             if macro_state is None: return 0.0
-            p_t1 = self.p_t1_macro[macro_state] # P(T1) = P(T1|Macro)
-            p_t2 = p_t1 @ self.p_t2_t1          # P(T2) = P(T1) * P(T2|T1)
-            p_t3 = p_t2 @ self.p_t3_t2          # P(T3) = P(T2) * P(T3|T2)
+            p_t1 = self.p_t1_macro[macro_state] 
+            p_t2 = p_t1 @ self.p_t2_t1          
+            p_t3 = p_t2 @ self.p_t3_t2          
+            return float(np.dot(p_t1, self.bin_weights) * 0.5 + 
+                         np.dot(p_t2, self.bin_weights) * 0.3 + 
+                         np.dot(p_t3, self.bin_weights) * 0.2)
 
-            # hardcoding T+1、T+2、T+3 allocate wgt 
-            score = (
-                np.dot(p_t1, self.bin_weights) * 0.5 + 
-                np.dot(p_t2, self.bin_weights) * 0.3 + 
-                np.dot(p_t3, self.bin_weights) * 0.2
-            )
-            return float(score)
-            
         # macro_State 0, 1, 2
         score_map = {
             0: calc_alpha_score(0),
@@ -101,3 +78,47 @@ class FSMPredictor:
             .select(["day", "sid", "distance", "macro_state", "fsm_score"])
             .sort(["day", "fsm_score"], descending=[False, True])
         )
+
+    def predict_1d(self, panel_df: pl.DataFrame) -> pl.DataFrame:
+        curves_1d = prepare_curves(panel_df, self.tune_config, self.common_config)
+        if curves_1d.size == 0: return pl.DataFrame()
+
+        z_motif = np.ascontiguousarray((self.motif - np.mean(self.motif)) / (np.std(self.motif) + 1e-8), dtype=np.float64)
+        distances = [calc_min_subseq_dtw(curves_1d[i], z_motif, self.m, self.dtw_w, self.threshold_d) for i in range(curves_1d.shape[0])]
+        
+        panel_df = panel_df.with_columns(pl.Series("distance", distances))
+
+        triggers = panel_df.filter(pl.col("distance") <= self.threshold_d)
+        if triggers.height == 0:
+            return pl.DataFrame()
+
+        daily_macro = self._get_macro_state(panel_df, macro_col="lag_0")
+        return self._calculate_fsm_score(triggers.join(daily_macro, on="day", how="left"))
+
+    def predict_md(self, panel_df: pl.DataFrame) -> pl.DataFrame:
+        curves_md = prepare_mcurves(panel_df, self.common_config, self.config)
+        
+        m_means = np.mean(self.motif, axis=1, keepdims=True)
+        m_stds = np.std(self.motif, axis=1, keepdims=True) + 1e-8
+        z_motif_t = np.ascontiguousarray(((self.motif - m_means) / m_stds).T, dtype=np.float64)
+
+        distances = [calc_min_subseq_dtw_md(curves_md[i], z_motif_t, self.dtw_w, self.threshold_d) for i in range(curves_md.shape[0])]
+        
+        panel_df = panel_df.with_columns(pl.Series("distance", distances))
+
+        triggers = panel_df.filter(pl.col("distance") <= self.threshold_d)
+        if triggers.height == 0: 
+            return pl.DataFrame()
+
+        features = self.common_config.get("features", ["ofi_ratio"])
+        daily_macro = self._get_macro_state(panel_df, macro_col=f"lag_{features[0]}_0")
+        return self._calculate_fsm_score(triggers.join(daily_macro, on="day", how="left"))
+
+    def predict(self, panel_lf: pl.LazyFrame) -> pl.DataFrame:
+        panel_df = panel_lf.collect(streaming=True)
+        if panel_df.height == 0: return pl.DataFrame()
+        
+        if self.motif.ndim == 1:
+            return self.predict_1d(panel_df)
+        else:
+            return self.predict_md(panel_df)

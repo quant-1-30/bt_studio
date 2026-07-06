@@ -222,7 +222,7 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     if result["status"] == "success":
         tune.report({
             "metrics_score": result["metrics_score"], "u_pval": result["u_pval"],
-            "learned_motif": result["learned_motif"], "fsm_network": result["fsm_network"]
+            "learned_motif": result["learned_motif"], "fsm_matrix": result["fsm_matrix"]
         })
     else:
         print(f"\n[Worker Filtered] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
@@ -325,7 +325,7 @@ def node_tune(year: int, dret_path: str, train_paths: list, exp_config: dict):
     model_ckpt = {
         "config": best_trial.config, 
         "motif": np.array(best_trial.metrics.get("learned_motif", [])), 
-        "fsm_network": best_trial.metrics.get("fsm_network", {}),
+        "fsm_matrix": best_trial.metrics.get("fsm_matrix", {}),
         "valid_year": year
     }
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -495,4 +495,4 @@ if __name__ == "__main__":
 # * **为什么不滞后？**：因为我们用的是“滑动窗口（Rolling Window）”而不是“扩张窗口（Expanding Window）”。随着时间推移，2010 年上半年的数据被自动移出了窗口，它的“牛市记忆”被物理清除了，所以绝对不会有滞后性。
 
 # **💡 极简代码修正结论：**
-# 在 `evaluate_and_build_fsm_md` 中，**彻底删掉 `prior_fsm_network` 的贝叶斯融合代码**！完全信任当前滑动窗口（最近 12 个月）统计出来的客观概率。相信数据的自然演替，才是对抗市场漂移最好的方式。
+# 在 `evaluate_and_build_fsm_md` 中，**彻底删掉 `prior_fsm_matrix` 的贝叶斯融合代码**！完全信任当前滑动窗口（最近 12 个月）统计出来的客观概率。相信数据的自然演替，才是对抗市场漂移最好的方式。

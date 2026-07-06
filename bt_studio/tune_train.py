@@ -235,7 +235,7 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
         print(f"\n[Trail Success] Score: {result['metrics_score']:.4f} ; Config: {config}\n")
         tune.report({
             "metrics_score": result["metrics_score"], "u_pval": result["u_pval"],
-            "learned_motif": result["learned_motif"], "fsm_network": result["fsm_network"]
+            "learned_motif": result["learned_motif"], "fsm_matrix": result["fsm_matrix"]
         })
     else:
         print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
@@ -337,7 +337,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     best_score = best_trial_result.metrics.get("metrics_score", -9999.0)
  
     if best_pval > 0.05 or best_score <= -9999.0:
-        print(f"⚠️ [Failed] {model_id} P-val ({best_pval:.4f}) donot pass 5%")
+        print(f"⚠️ [Failed] {model_id} P-val ({best_pval:.4f}) > 5% and Score ({best_score:.4f})")
         return False
 
     # 1. fANOVA 
@@ -364,7 +364,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     model_ckpt = {
         "config": best_config, 
         "motif": np.array(best_model_dict.get("learned_motif", [])), 
-        "fsm_network": best_model_dict.get("fsm_network", {}),
+        "fsm_matrix": best_model_dict.get("fsm_matrix", {}),
         "valid_month": model_id 
     }
     
@@ -402,9 +402,41 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
 
     return True
 
+# ==============================================================================
+# Node 5: Update Fsm Matrix While Retain Motif
+# ==============================================================================
+
+def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, train_paths: list[str], exp_config: dict) -> bool:
+    common_config = exp_config["run_params"]
+    with open(f"{MODEL_DIR}/model_{prev_model_id}.pkl", "rb") as f:
+        pre_model_ckpt = pickle.load(f)
+        
+    prev_tune_config, prev_motif = pre_model_ckpt["config"], pre_model_ckpt["motif"]
+    hf_dfs = [pl.read_parquet(p) for p in train_paths if os.path.exists(p)]
+    if not hf_dfs: return False
+    
+    panel_df = build_fsm_panel(pl.concat(hf_dfs).lazy(), pl.scan_parquet(dret_path), prev_tune_config).collect(streaming=True)
+    
+    curves = prepare_curves(panel_df, prev_tune_config, common_config) # prepare_mcurves 
+    result = evaluate_and_build_fsm(panel_df, curves, prev_motif, prev_tune_config, common_config, skip_stats=True)
+    
+    if result["status"] != "success":
+        print(f"⚠️ {model_id} matrix update failed due to ({result.get('reason')})")
+        return False
+        
+    print(f"✅ {model_id} matrix has update by last 12month")
+    new_ckpt = {
+        "config": prev_tune_config, 
+        "motif": prev_motif, 
+        "fsm_matrix": result["fsm_matrix"], 
+        "valid_month": model_id
+    }
+    with open(f"{MODEL_DIR}/model_{model_id}.pkl", "wb") as f: 
+        pickle.dump(new_ckpt, f)
+
 
 # ==============================================================================
-# Node 5: OOS 
+# Node 6: OOS 
 # ==============================================================================
 
 # @task(name="Node_OOS_Inference") 
@@ -510,11 +542,10 @@ def wfo_pipeline(exp_config):
             last_available_model_id = model_id 
         else:
             print(f"🌲 Model {last_available_model_id} remains effective. Inheriting to {model_id}")
-            shutil.copy(f"{MODEL_DIR}/model_{last_available_model_id}.pkl", f"{MODEL_DIR}/model_{model_id}.pkl")
+            node_update_fsm_matrix(model_id, last_available_model_id, global_data["dret_path"], train_paths, exp_config)
             last_available_model_id = model_id 
             
         node_oos_inference_monthly(model_id, oos_months, global_data["dret_path"], oos_paths, exp_config)
-
 
 
 if __name__ == "__main__":
