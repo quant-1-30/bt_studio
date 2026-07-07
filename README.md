@@ -162,3 +162,32 @@ tests/                 # 测试目录（当前内容有限，见第 7 节）
 - `tests/test_prefect_fsm.py` 仅 7 行，引用了不存在的模块 `bt_studio.pipeline.dags.fsm`，且包含无效的配置占位符语法。
 - 无 `pytest.ini`、`[tool.pytest.ini_options]` 或 CI 配置。
 - 对 FSM 数学、DTW、OFI、ZMQ 插件等核心逻辑暂无单元测试。
+
+
+  # mlflow.set_experiment("FSM_Production_Models")
+    # with mlflow.start_run(run_name=f"FSM_{year}_v3"):
+    #     mlflow.log_params(best_trial.config)
+    #     mlflow.log_metric("train_score", best_trial.metrics["metrics_score"])
+
+    # # =========================================================================
+    # # Callback ---> MLflow Run ID
+    # # =========================================================================
+    # best_trial_id = best_trial_result.metrics.get("trial_id") 
+    # best_run_id = None
+    
+    # for trial_obj, run_id in mlflow_callback._trial_runs.items():
+    #     if trial_obj.trial_id == best_trial_id:
+    #         best_run_id = run_id
+    #         break
+
+    # # =========================================================================
+    # # MlflowClient Async .pkl upload Trial Artifacts 
+    # # =========================================================================
+    # if best_run_id:
+    #     try:
+    #         print(f"Link {pkl_path} to MLflow Run: {best_run_id}")
+    #         client = mlflow.tracking.MlflowClient()
+    #         client.log_artifact(best_run_id, pkl_path) # C Client and avoid start_run lock conflict
+    #         print("upload Trial to Artifacts ")
+    #     except Exception as e:
+    #         print(f"upload failure: {e}")

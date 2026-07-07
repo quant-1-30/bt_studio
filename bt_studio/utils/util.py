@@ -20,3 +20,7 @@ def robust_z_normalize(arr: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     stds = np.nanstd(arr, axis=1, keepdims=True)
     return (arr - means) / (stds + eps)
 
+def init_storage_dir(storage_dir: str):
+    """init storage dir"""
+    if not os.path.exists(storage_dir):
+        os.makedirs(storage_dir, exist_ok=True)

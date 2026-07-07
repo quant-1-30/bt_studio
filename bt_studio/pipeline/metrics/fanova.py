@@ -5,7 +5,7 @@ from optuna.importance import FanovaImportanceEvaluator
 
 
 def validate_parameter_plateau_fanova(df_results: pl.DataFrame, best_config: dict, best_score: float) -> bool:
-    """fANOVA estimate args and mearsure plain"""
+    """fANOVA estimate"""
     param_cols = [c for c in df_results.columns if c.startswith("config/")]
     valid_df = df_results.drop_nulls(subset=param_cols + ["metrics_score"])
     

@@ -39,7 +39,8 @@ def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict:
     
     # Alpha per Unit of Overfit Risk
     return (
-        pareto_df.with_columns((pl.col("metrics_score") / pl.col("complexity")).alias("efficiency"))
+        # pareto_df.with_columns((pl.col("metrics_score") / pl.col("complexity")).alias("efficiency"))
+        pareto_df.with_columns((pl.col("metrics_score") * pl.col("complexity")).alias("efficiency")) # metrics_score negative
         .sort("efficiency", descending=True)
         .row(0, named=True)
     )

@@ -43,17 +43,7 @@ from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_
 from bt_studio.pipeline.features import build_ofi
 from bt_studio.pipeline.patterns import evaluate_and_build_fsm, discover_fsm_pattern
 from bt_studio.pipeline.inference import FSMPredictor
-from bt_studio.pipeline.metrics import find_pareto_front, select_best_model_from_pareto
-
-BASE_DIR = "/Users/hengxinliu/startup/bt_studio/result/fsm"
-MODEL_DIR = f"{BASE_DIR}/models"
-FEATURE_DIR = f"{BASE_DIR}/features"  
-SCORE_DIR = f"{BASE_DIR}/scores"     
-
-os.makedirs(MODEL_DIR, exist_ok=True)
-os.makedirs(FEATURE_DIR, exist_ok=True)
-os.makedirs(SCORE_DIR, exist_ok=True)
-
+from bt_studio.pipeline.metrics import validate_parameter_plateau_fanova, find_pareto_front, select_best_model_from_pareto
 
 # ==============================================================================
 # Node 1 Macro and Universe
@@ -128,21 +118,15 @@ def node_extract_feature_monthly(ymonths: list[int], sids: list[bytes], exp_conf
     max_year, max_month = max_ym // 100, max_ym % 100
     _, last_day = calendar.monthrange(max_year, max_month)
     end_d = max_ym * 100 + last_day
-
     print(f"📥 [gRPC Batch] Fetching giant tick data from {start_d} to {end_d} for {len(missing_ymonths)} months...")
     
     snapshot_dict = prepare_tick(start_date=start_d, end_date=end_d, sids=sids)
-    
     eager_dfs = []
     print("🧮 Calculating features per security (Eager Evaluation)...")
     for sid_bytes, lf in snapshot_dict.items():
         processed_lf = build_ofi(lf)
-        
-        # avoid offload of lazyframe
         processed_df = processed_lf.collect()
-         
         if processed_df.height > 0:
-
             eager_dfs.append(processed_df)
         
     if not eager_dfs:
@@ -155,23 +139,18 @@ def node_extract_feature_monthly(ymonths: list[int], sids: list[bytes], exp_conf
     big_df = big_df.with_columns(
     (pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id")
     )
-    
     print("💾 Writing partitioned monthly parquets to disk...")
     for ym in missing_ymonths:
         out_path = f"{FEATURE_DIR}/hf_{ym}.parquet"
         
         month_df = big_df.filter(pl.col("month_id") == ym).drop("month_id")
-        # month_lf = big_lf.filter(pl.col("month_id") == ym).drop("month_id")
-        # month_lf.sink_parquet(out_path) # not supported with window func
-        # month_lf.collect(streaming=False).write_parquet(out_path)
-        
         if month_df.height > 0:
-            month_df.write_parquet(out_path)
+            month_df.write_parquet(out_path) # month_lf.collect(streaming=False).write_parquet(out_path)
+            # month_lf.sink_parquet(out_path) # not supported with window func
             paths.append(out_path)
             print(f"✅ Saved feature: {out_path}")
         else:
             print(f"ℹ️ Month {ym} has no record data, skipping save.")
-
     return sorted(list(set(paths)))
 
 
@@ -311,7 +290,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
         param_space=search_space,   
         tune_config=tune.TuneConfig(
             metric="metrics_score", 
-            mode="max", 
+            mode="max", # bic_store direction 
             search_alg=search_alg, 
             num_samples=search_config["num_trials"],        
             # # used for Iterative Training not for One-shot / Single-step Computation    
@@ -330,29 +309,44 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     # =========================================================================
 
     results = tuner.fit()
-    df_results = results.get_dataframe()
-    best_trial_result = results.get_best_result("metrics_score", "max")
+    print("\n[Ray Tune] All Trials Completed. Analyzing Results...\n")
+
+    # best_trial_result = results.get_best_result("metrics_score", "max")
+    # best_pval = best_trial_result.metrics.get("u_pval", 1.0)
+    # best_score = best_trial_result.metrics.get("metrics_score", -9999.0)
+
+    # =========================================================================
+    # filter by P-val and metrics_score
+    # =========================================================================
+    df_results = pl.from_pandas(results.get_dataframe())
+    valid_trials = df_results.filter(
+        (pl.col("u_pval") <= 0.05) & 
+        (pl.col("metrics_score") > -9990.0)
+    )
     
-    best_pval = best_trial_result.metrics.get("u_pval", 1.0)
-    best_score = best_trial_result.metrics.get("metrics_score", -9999.0)
- 
-    if best_pval > 0.05 or best_score <= -9999.0:
-        print(f"⚠️ [Failed] {model_id} P-val ({best_pval:.4f}) > 5% and Score ({best_score:.4f})")
+    if valid_trials.height == 0:
+        print(f"⚠️ [Failed] {model_id} satisfy P-val <= 0.05 and high score")
         return False
+        
+    # Best Trial
+    best_valid_row = valid_trials.sort("metrics_score", descending=True).row(0, named=True)
+    best_score = best_valid_row["metrics_score"]
+    best_config = {k.replace("config/", ""): v for k, v in best_valid_row.items() if k.startswith("config/")}
 
     # 1. fANOVA 
     is_plateau = validate_parameter_plateau_fanova(
-        df_results, best_trial_result.config, best_trial_result.metrics["metrics_score"]
+        df_results, best_config, best_score
     )
     if not is_plateau:
         print(f"❌ {model_id} isolated")
         return False
 
     # 2. pareto front
-    pareto_front_df = find_pareto_front(df_results)
+    pareto_front_df = find_pareto_front(valid_trials)
     best_model_dict = select_best_model_from_pareto(pareto_front_df)
     
-    if not best_model_dict: 
+    if not best_model_dict:
+        print(f"❌ NotFound best_model_dict for {model_id} from pareto front") 
         return False
         
     print(f"✅ {model_id} Score: {best_model_dict['metrics_score']:.1f}")
@@ -361,6 +355,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     # Model Save
     # =========================================================================
     best_config = {k.replace("config/", ""): v for k, v in best_model_dict.items() if k.startswith("config/")}
+    
     model_ckpt = {
         "config": best_config, 
         "motif": np.array(best_model_dict.get("learned_motif", [])), 
@@ -372,34 +367,6 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     with open(pkl_path, "wb") as f: 
         pickle.dump(model_ckpt, f)
     
-    # mlflow.set_experiment("FSM_Production_Models")
-    # with mlflow.start_run(run_name=f"FSM_{year}_v3"):
-    #     mlflow.log_params(best_trial.config)
-    #     mlflow.log_metric("train_score", best_trial.metrics["metrics_score"])
-
-    # # =========================================================================
-    # # Callback ---> MLflow Run ID
-    # # =========================================================================
-    # best_trial_id = best_trial_result.metrics.get("trial_id") 
-    # best_run_id = None
-    
-    # for trial_obj, run_id in mlflow_callback._trial_runs.items():
-    #     if trial_obj.trial_id == best_trial_id:
-    #         best_run_id = run_id
-    #         break
-
-    # # =========================================================================
-    # # MlflowClient Async .pkl upload Trial Artifacts 
-    # # =========================================================================
-    # if best_run_id:
-    #     try:
-    #         print(f"Link {pkl_path} to MLflow Run: {best_run_id}")
-    #         client = mlflow.tracking.MlflowClient()
-    #         client.log_artifact(best_run_id, pkl_path) # C Client and avoid start_run lock conflict
-    #         print("upload Trial to Artifacts ")
-    #     except Exception as e:
-    #         print(f"upload failure: {e}")
-
     return True
 
 # ==============================================================================
@@ -495,7 +462,7 @@ def wfo_pipeline(exp_config):
     )
     
     TRAIN_WINDOW = exp_config["run_params"]["train_window"]     
-    STEP = exp_config["run_params"]["update_freq"]          
+    STEP = exp_config["run_params"]["oss_step"]          
     
     last_available_model_id = None
 
@@ -552,17 +519,25 @@ if __name__ == "__main__":
 
     load_dotenv()
 
+    BASE_DIR = "/Users/hengxinliu/startup/bt_studio/result/fsm"
+    MODEL_DIR = f"{BASE_DIR}/models"
+    FEATURE_DIR = f"{BASE_DIR}/features"  
+    SCORE_DIR = f"{BASE_DIR}/scores"     
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(FEATURE_DIR, exist_ok=True)
+    os.makedirs(SCORE_DIR, exist_ok=True)
+
     exp_config = {
         "run_params": {
             "start_date": 20100101, "end_date": 20201231, "benchmark": "1A0001",
             "train_window": 12,
-            "update_freq": 6, 
+            "oss_step": 6, 
             "top_k_ratio": 0.25, # used for sample
             "exclude_bars": 10, # exclude last 10 bars means 14:50
             "edge_ratio": 0.25, # ratio of macro state edge bins 
             "alternative": "greater", # stats 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
-            "prior_weight": 0.3, # 0.3 + 0.7 
             "dtw_window_frac": 0.1, # used for DTW offset 
         },
 
