@@ -50,7 +50,11 @@ def calculate_hpo_score(
     common_config: dict
 ) -> float:
     alternative = common_config["alternative"]
-    excess_ret = np.mean(cond_rets) - np.mean(uncond_rets)
+    excess_ret = np.median(cond_rets) - np.median(uncond_rets) # median stable than median
+    
+    win_rate = np.mean(cond_rets > 0)
+    if win_rate <= common_config["win_rate"]:
+        return -9999.0
 
     # =========================================================================
     # A Long-Only 
@@ -74,7 +78,7 @@ def calculate_hpo_score(
     # =========================================================================
     # likehood
     safe_pval = max(u_pval, 1e-10)
-    ln_L = np.log(excess_factor) - np.log(safe_pval)
+    ln_L = np.log(excess_factor) + np.log(win_rate) - np.log(safe_pval)
     
     # complexity k 
     cross_days = float(tune_config["cross_days"])

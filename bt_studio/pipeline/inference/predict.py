@@ -26,28 +26,31 @@ class FSMPredictor:
         self.bin_weights = np.array([-1.0, -0.5, 0.5, 1.0]) 
         
     def _get_macro_state(self, panel_df: pl.DataFrame, macro_col: str) -> pl.DataFrame:
-        return (
+        daily_macro_lf = (
             panel_df.lazy()
-            # .select(["day", "sid", pl.col(macro_col).list.sum().alias("sid_ofi_sum")])
-            .group_by(["day", "sid"])
-            .agg(pl.col(macro_col).list.sum().alias("sid_ofi_sum")) # maybe >=1
+            .select(["day", "sid", pl.col(macro_col).list.sum().alias("sid_ofi_sum")])
             .group_by("day")
             .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
             .sort("day")
+            .with_columns(
+                pl.col("daily_ofi_mean").rolling_mean(window_size=self.common_config["macro_window"], min_periods=1).alias("smooth_macro")
+            )
             .with_columns([
-                pl.col("daily_ofi_mean").quantile(1/3).alias("p33"),
-                pl.col("daily_ofi_mean").quantile(2/3).alias("p67")
+                pl.col("smooth_macro").quantile(1/3).alias("p33"),
+                pl.col("smooth_macro").quantile(2/3).alias("p67"),
             ])
             .with_columns(
-                pl.when(pl.col("daily_ofi_mean") <= pl.col("p33")).then(0)
-                .when(pl.col("daily_ofi_mean") <= pl.col("p67")).then(1)
-                .otherwise(2).cast(pl.Int32).alias("macro_state")
+                pl.when(pl.col("smooth_macro") <= pl.col("p33")).then(0)
+                .when(pl.col("smooth_macro") <= pl.col("p67")).then(1)
+                .otherwise(2)
+                .cast(pl.Int32)
+                .alias("macro_state")
             )
             .with_columns(pl.col("macro_state").shift(1)) 
-            .drop(["p33", "p67", "daily_ofi_mean"])
+            .drop(["p33", "p67", "daily_ofi_mean", "smooth_macro"])
             .drop_nulls()
-            .collect()
-        )
+            )
+        return daily_macro_lf.collect()
 
     def _calculate_fsm_score(self, triggers: pl.DataFrame) -> pl.DataFrame:
         
@@ -110,8 +113,7 @@ class FSMPredictor:
         if triggers.height == 0: 
             return pl.DataFrame()
 
-        features = self.common_config.get("features", ["ofi_ratio"])
-        daily_macro = self._get_macro_state(panel_df, macro_col=f"lag_{features[0]}_0")
+        daily_macro = self._get_macro_state(panel_df, macro_col=f"lag_0")
         return self._calculate_fsm_score(triggers.join(daily_macro, on="day", how="left"))
 
     def predict(self, panel_lf: pl.LazyFrame) -> pl.DataFrame:

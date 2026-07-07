@@ -1,11 +1,11 @@
 import polars as pl
 
 
-def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, config: dict) -> pl.DataFrame:
+def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, tune_config: dict, common_config: dict) -> pl.DataFrame:
     # =========================================================================
     # config 
     # =========================================================================
-    ds = config["downsample"]
+    ds = tune_config["downsample"]
     bars_per_day = 240 // ds
 
     # =========================================================================
@@ -47,21 +47,28 @@ def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, con
     # =========================================================================
     # daily_ret and vol
     # =========================================================================
-    daily_ret_lf = (
-        daily_lf.sort(["sid", "day"])
-        .with_columns([
-            (pl.col("close") / pl.col("close").shift(1).over("sid") - 1.0).alias("daily_ret")
-        ])
-        .with_columns([
-            # pl.col("daily_ret").rolling_std(window_size=20, min_periods=5)
-            #   .over("sid").fill_null(strategy="forward")
-            #   .clip(lower_bound=0.005).alias("vol_20d"),
-            (pl.col("close").shift(-1).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_1"),
-            (pl.col("close").shift(-2).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_2"),
-            (pl.col("close").shift(-3).over("sid") / pl.col("close") - 1.0).alias("fwd_ret_3")
-        ])
+    entry_idx = 240 - common_config["exclude_bars"] # e.g 14:50 ---> 230 
+    entry_price_lf = (
+        all_feat_lf
+        .filter(pl.col("bar_idx") == entry_idx ) 
+        .select(["day", "sid", pl.col("close").alias("entry_price")])
     )
- 
+    
+    daily_ret_lf = (
+        daily_lf.join(entry_price_lf, on=["day", "sid"], how="left")
+        .sort(["sid", "day"])
+        # next close / today 14:50 - 1 
+        .with_columns([
+            (pl.col("close").shift(-1).over("sid") / pl.col("entry_price") - 1.0).alias("fwd_ret_1"),
+            (pl.col("close").shift(-2).over("sid") / pl.col("entry_price") - 1.0).alias("fwd_ret_2"),
+            (pl.col("close").shift(-3).over("sid") / pl.col("entry_price") - 1.0).alias("fwd_ret_3")
+        ])
+        #  not found today 14:50 ---> today close
+        .with_columns(
+            pl.col("fwd_ret_1").fill_null((pl.col("close").shift(-1).over("sid") / pl.col("close") - 1.0))
+        )
+    )
+
     # =========================================================================
     # downsample
     # =========================================================================
@@ -89,13 +96,13 @@ def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, con
     shift_exprs = [
         pl.col("daily_curve").shift(i).over("sid").alias(f"lag_{i}") if i > 0 
         else pl.col("daily_curve").alias(f"lag_{i}") # i == 0 alias
-        for i in reversed(range(config["cross_days"]))
+        for i in reversed(range(tune_config["cross_days"]))
     ]
 
     curve_lf = (
         curve_lf.sort(["sid", "day"])
         .with_columns(shift_exprs)
-        .drop_nulls(subset=[f"lag_{i}" for i in range(config["cross_days"])]) 
+        .drop_nulls(subset=[f"lag_{i}" for i in range(tune_config["cross_days"])]) 
     )
 
     panel_lf = curve_lf.join(

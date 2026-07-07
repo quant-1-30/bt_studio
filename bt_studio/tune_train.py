@@ -182,7 +182,7 @@ def node_check_decay_monthly(
     if not aligned_lfs:
         return True 
         
-    panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"])
+    panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"], common_config)
     panel_df = panel_lf.collect(streaming=True)
     
     curves_2d = prepare_curves(panel_df, model_ckpt["config"], common_config)
@@ -207,7 +207,7 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     hf_lf = pl.from_arrow(hf_pa).clone().lazy() # 
     dret_lf = pl.from_arrow(dret_pa).clone().lazy()
 
-    panel_lf = build_fsm_panel(hf_lf, dret_lf, config)
+    panel_lf = build_fsm_panel(hf_lf, dret_lf, config, common_config)
     result = discover_fsm_pattern(panel_lf, config, common_config)
 
     if result["status"] == "success":
@@ -382,7 +382,7 @@ def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, tr
     hf_dfs = [pl.read_parquet(p) for p in train_paths if os.path.exists(p)]
     if not hf_dfs: return False
     
-    panel_df = build_fsm_panel(pl.concat(hf_dfs).lazy(), pl.scan_parquet(dret_path), prev_tune_config).collect(streaming=True)
+    panel_df = build_fsm_panel(pl.concat(hf_dfs).lazy(), pl.scan_parquet(dret_path), prev_tune_config, common_config).collect(streaming=True)
     
     curves = prepare_curves(panel_df, prev_tune_config, common_config) # prepare_mcurves 
     result = evaluate_and_build_fsm(panel_df, curves, prev_motif, prev_tune_config, common_config, skip_stats=True)
@@ -408,6 +408,8 @@ def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, tr
 
 # @task(name="Node_OOS_Inference") 
 def node_oos_inference_monthly(model_id: int, oos_months: list[int], dret_path: str, oos_paths: list[str], exp_config: dict):
+    common_config = exp_config["run_params"]
+
     model_path = f"{MODEL_DIR}/model_{model_id}.pkl"
     if not os.path.exists(model_path):
         print(f"⚠️ {model_id} NotFound and Skip OOS Inference")
@@ -421,7 +423,7 @@ def node_oos_inference_monthly(model_id: int, oos_months: list[int], dret_path: 
         return
     
     # fsm predict
-    panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"])
+    panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"], common_config)
     scored_df = FSMPredictor(model_ckpt).predict(panel_lf)
     
     if scored_df.height > 0:
@@ -536,9 +538,11 @@ if __name__ == "__main__":
             "top_k_ratio": 0.25, # used for sample
             "exclude_bars": 10, # exclude last 10 bars means 14:50
             "edge_ratio": 0.25, # ratio of macro state edge bins 
-            "alternative": "greater", # stats 
+            "alternative": "greater", # stats
+            "win_rate": 0.5, # used to calculate hpo score 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
-            "dtw_window_frac": 0.1, # used for DTW offset 
+            "dtw_window_frac": 0.1, # used for DTW offset
+            "macro_window": 5 # used to calculate macro_state based on ofi 
         },
 
         "search_bounds": {
