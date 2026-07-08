@@ -1,7 +1,7 @@
 import polars as pl
 
 
-def build_ofi(aligned_lf: pl.LazyFrame) -> pl.LazyFrame:
+def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     ofi_expr = (
         ((pl.col("close") * 2 - pl.col("high") - pl.col("low")) / 
          (pl.col("high") - pl.col("low") + 1e-8)) * pl.col("amount")
@@ -29,7 +29,7 @@ def build_ofi(aligned_lf: pl.LazyFrame) -> pl.LazyFrame:
     return feat_lf
 
 
-def build_ofi_vol(aligned_lf: pl.LazyFrame) -> pl.LazyFrame:
+def build_ofi_vol(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     ofi_expr = (
         ((pl.col("close") * 2 - pl.col("high") - pl.col("low")) / 
          (pl.col("high") - pl.col("low") + 1e-8)) * pl.col("amount")
@@ -42,13 +42,13 @@ def build_ofi_vol(aligned_lf: pl.LazyFrame) -> pl.LazyFrame:
         .with_columns([
             pl.col("minute_idx").alias("bar_idx"),
             ofi_expr.alias("raw_ofi"),
-            vol_expr.alias("raw_tr")
+            vol_expr.alias("raw_vol")
         ])
         .group_by(["day", "sid", "bar_idx"])
         .agg([
             pl.col("raw_ofi").sum().alias("agg_ofi"),
             pl.col("amount").sum().alias("agg_amount"),
-            pl.col("raw_tr").sum().alias("volatility"), 
+            pl.col("raw_vol").sum().alias("volatility"), 
             pl.col("close").last().alias("close") 
         ])
         .sort(["day", "sid", "bar_idx"])

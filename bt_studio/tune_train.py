@@ -89,7 +89,7 @@ def node_prepare_macro(common_config: dict, warm=10000):
 # ==============================================================================
 
 # @task(name="Node_Extract_feature") 
-def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, exp_config: dict) -> list[str]:
+def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, common_config: dict) -> list[str]:
     """
     - ymonths: [200912, 201001, ...]
     - universe_sids: dict(month_id -> list[sids])
@@ -124,7 +124,7 @@ def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, exp_co
     
     eager_dfs = []
     for sid_bytes, lf in snapshot_dict.items():
-        processed_df = build_ofi(lf).collect()
+        processed_df = build_ofi(lf, common_config).collect()
         if processed_df.height > 0:
             eager_dfs.append(processed_df)
         
@@ -228,8 +228,8 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
 
 
 # @task(name="Node_Tune") 
-def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp_config: dict, prev_model_id:str) -> bool:
-    common_config, search_config = exp_config["run_params"], exp_config["search_bounds"]
+def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_paths: list[str], exp_config: dict) -> bool:
+    common_config, search_config = exp_config["common_params"], exp_config["search_bounds"]
 
     # =========================================================================
     # read_parquet and put arrow into Ray Plasma
@@ -408,26 +408,46 @@ def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, tr
 # ==============================================================================
 
 # @task(name="Node_OOS_Inference") 
-def node_oos_inference_monthly(model_id: int, oos_months: list[int], dret_path: str, oos_paths: list[str], exp_config: dict):
-    common_config = exp_config["run_params"]
-
+def node_oos_inference_monthly(
+    model_id: int, 
+    dret_path: str, 
+    oos_months: list[int], 
+    oos_paths: list[str], 
+    warmup_paths: list[str], # add warm month
+    common_config: dict
+):
     model_path = f"{MODEL_DIR}/model_{model_id}.pkl"
     if not os.path.exists(model_path):
         print(f"⚠️ {model_id} NotFound and Skip OOS Inference")
         return
+        
     with open(model_path, "rb") as f:
         model_ckpt = pickle.load(f)
         
-    aligned_lfs = [pl.scan_parquet(p) for p in oos_paths if os.path.exists(p)]
-    if not aligned_lfs: 
-        return
+    # ensure rolling_quantile avoid nan
+    all_paths = warmup_paths + oos_paths
+    aligned_lfs = [pl.scan_parquet(p) for p in all_paths if os.path.exists(p)]
+    if not aligned_lfs: return
     
     panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"], common_config)
     scored_df = FSMPredictor(model_ckpt, common_config).predict(panel_lf)
+    
     if scored_df.height > 0:
-        out_path = f"{SCORE_DIR}/scores_{model_id}.parquet"
-        scored_df.write_parquet(out_path)
-        print(f"✅ {model_id} {oos_months[0]} between {oos_months[-1]} Oss: {scored_df.height} ")
+        # extract warm ym and filter
+        match = re.search(r"hf_(\d{6})", warmup_paths[0])
+        if match:
+            warmup_ym = int(match.group(1)) # group(0) ---> hf201206 / group(1) --> \d{6}
+        else:
+            raise ValueError(f"无法从路径中解析合法的月度特征 YYYYMM 格式: {warmup_paths[0]}")
+        
+        scored_df = scored_df.filter(
+            (pl.col("day").dt.year() * 100 + pl.col("day").dt.month()) != warmup_ym
+        )
+        
+        if scored_df.height > 0:
+            out_path = f"{SCORE_DIR}/scores_{model_id}.parquet"
+            scored_df.write_parquet(out_path)
+            print(f"✅ {model_id} {oos_months[0]} between {oos_months[-1]} Oss: {scored_df.height} ")
 
 # ==============================================================================
 # DAG (Walk-Forward)
@@ -435,8 +455,7 @@ def node_oos_inference_monthly(model_id: int, oos_months: list[int], dret_path: 
 
 # @flow(name="WFO_FSM_Pipeline")
 def wfo_pipeline(exp_config):
-    # initialize config
-    common_config = exp_config["run_params"]     
+    common_config = exp_config["common_params"]     
 
     # setup ray
     runtime_env = {
@@ -471,8 +490,9 @@ def wfo_pipeline(exp_config):
 
     for idx in range(TRAIN_WINDOW, len(all_months), STEP):
 
-        oos_months = all_months[idx : min(idx + STEP, len(all_months))]
         train_months = all_months[idx - TRAIN_WINDOW : idx]            
+        oos_months = all_months[idx : min(idx + STEP, len(all_months))]
+        warmup_month = [train_months[-1]] # used for oss cold start 
         
         model_id = oos_months[0]           
         
@@ -480,22 +500,23 @@ def wfo_pipeline(exp_config):
         print(f"📅 WFO | OOS : {model_id} | Train Month: {train_months[0]}-{train_months[-1]} ")
         print(f"============================================================================\n")
         
-        train_paths = node_extract_feature_monthly(train_months, global_data["universe_sids"], exp_config)
-        oos_paths = node_extract_feature_monthly(oos_months, global_data["universe_sids"], exp_config)
+        train_paths = node_extract_feature_monthly(train_months, global_data["universe_sids"], common_config)
+        oos_paths = node_extract_feature_monthly(oos_months, global_data["universe_sids"], common_config)
+        warmup_paths = node_extract_feature_monthly(warmup_month, global_data["universe_sids"], common_config)
 
         if last_available_model_id is None:
             is_decayed = True
             print("🚀 First run (Cold Start), forcing HPO Training...")
         else:
             prev_oos_months = train_months[-STEP:] 
-            prev_oos_paths = node_extract_feature_monthly(prev_oos_months, sids_train, exp_config)
+            prev_oos_paths = node_extract_feature_monthly(prev_oos_months, sids_train, common_config)
             
             is_decayed = node_check_decay_monthly(
-                last_available_model_id, prev_oos_months, global_data["dret_path"], prev_oos_paths, exp_config["run_params"]
+                last_available_model_id, prev_oos_months, global_data["dret_path"], prev_oos_paths, common_config
             )
         if is_decayed:
             print(f"🔄 Model decayed or First Run. Tuning Model for {model_id}...")
-            success = node_tune_monthly(model_id, global_data["dret_path"], train_paths, exp_config, last_available_model_id)
+            success = node_tune_monthly(last_available_model_id, model_id, global_data["dret_path"], train_paths, exp_config)
             if not success:
                 print(f"⚠️ {model_id} HPO Failed. Skipping this window.")
                 continue
@@ -507,25 +528,17 @@ def wfo_pipeline(exp_config):
                 print(f"Update Matrix Failure and Direct inherit pre model_ckpt...")
                 shutil.copy(f"{MODEL_DIR}/model_{last_available_model_id}.pkl", f"{MODEL_DIR}/model_{model_id}.pkl")
  
-            last_available_model_id = model_id 
-        node_oos_inference_monthly(model_id, oos_months, global_data["dret_path"], oos_paths, exp_config)
+            last_available_model_id = model_id
+
+        node_oos_inference_monthly(model_id, global_data["dret_path"], oos_months, oos_paths, warmup_paths, common_config)
 
 
 if __name__ == "__main__":
 
     load_dotenv()
 
-    BASE_DIR = "/Users/hengxinliu/startup/bt_studio/result/fsm"
-    MODEL_DIR = f"{BASE_DIR}/models"
-    FEATURE_DIR = f"{BASE_DIR}/features"  
-    SCORE_DIR = f"{BASE_DIR}/scores"     
-
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    os.makedirs(FEATURE_DIR, exist_ok=True)
-    os.makedirs(SCORE_DIR, exist_ok=True)
-
     exp_config = {
-        "run_params": {
+        "common_params": {
             "start_date": 20100101, "end_date": 20201231, "benchmark": "1A0001",
 
             # sample sids from universe
@@ -561,5 +574,15 @@ if __name__ == "__main__":
             "max_concurrent_trials": 6
         }
     }
+
+    # Setup Dir
+    BASE_DIR = "/Users/hengxinliu/startup/bt_studio/result/fsm"
+    MODEL_DIR = f"{BASE_DIR}/models"
+    FEATURE_DIR = f"{BASE_DIR}/features"  
+    SCORE_DIR = f"{BASE_DIR}/scores"     
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(FEATURE_DIR, exist_ok=True)
+    os.makedirs(SCORE_DIR, exist_ok=True)
 
     wfo_pipeline(exp_config)
