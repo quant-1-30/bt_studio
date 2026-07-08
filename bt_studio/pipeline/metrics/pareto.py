@@ -2,7 +2,7 @@ import polars as pl
 import numpy as np
 
 
-def find_pareto_front(df_results: pl.DataFrame) -> pl.DataFrame:
+def find_pareto_front(df_results: pl.DataFrame, common_config: dict) -> pl.DataFrame:
     """
         帕累托支配核心定义
             a. 在所有指标上都不比对方差
@@ -16,7 +16,8 @@ def find_pareto_front(df_results: pl.DataFrame) -> pl.DataFrame:
     valid_df = valid_df.with_columns([
         (
             pl.col("config/cross_days") * 
-            ((pl.col("config/motif_minutes") / pl.col("config/downsample")) * pl.col("config/dtw_window_frac")) * 
+            # ((pl.col("config/motif_minutes") / pl.col("config/downsample")) * pl.col("config/dtw_window_frac")) * 
+            ((pl.col("config/motif_minutes") / pl.col("config/downsample")) * common_config["dtw_window_frac"]) * 
             (1.0 - pl.col("config/threshold_r"))
         ).alias("complexity")
     ])

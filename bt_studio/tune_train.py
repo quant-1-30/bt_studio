@@ -342,7 +342,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
         return False
 
     # 2. pareto front
-    pareto_front_df = find_pareto_front(valid_trials)
+    pareto_front_df = find_pareto_front(valid_trials, common_config)
     best_model_dict = select_best_model_from_pareto(pareto_front_df)
     
     if not best_model_dict:
