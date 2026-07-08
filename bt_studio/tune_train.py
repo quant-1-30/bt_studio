@@ -50,8 +50,7 @@ from bt_studio.pipeline.metrics import validate_parameter_plateau_fanova, find_p
 # ==============================================================================
 
 # @task(name="Node_Prepare_Macro")
-def node_prepare_macro(exp_config: dict, warm=10000):
-    common_config = exp_config["run_params"]
+def node_prepare_macro(common_config: dict, warm=10000):
     os.makedirs(BASE_DIR, exist_ok=True)
     dret_path = f"{BASE_DIR}/global_daily.parquet"
 
@@ -64,24 +63,25 @@ def node_prepare_macro(exp_config: dict, warm=10000):
             end_date=common_config["end_date"], 
             benchmark=common_config["benchmark"].encode()
         )
-        filtered_uni_lf = universe_sample(universe_lf, daily_lf, exceed=120, topk=common_config["top_k_ratio"])
-        filtered_uni_lf.sink_parquet(dret_path) # engine=streaming  
+        filtered_uni_lf = universe_sample(universe_lf, daily_lf, common_config)
+        filtered_uni_lf.sink_parquet(dret_path) 
         
-    final_scan_lf = pl.scan_parquet(dret_path) # lazy operation than read_parquet() for small parquet files 
+    final_scan_lf = pl.scan_parquet(dret_path) 
 
-    dynamic_sids_by_year = dict(
+    # =========================================================================
+    # Groupby Month ID avoid lookahead
+    # =========================================================================
+    dynamic_sids_by_month = dict(
         final_scan_lf.select([
-            # pl.col("day").dt.year().alias("year"),
-            # pl.col("day").from_epoch(time_unit="s").dt.year().alias("year"),
-            pl.col("day").cast(pl.String).str.to_date("%Y%m%d").dt.year().alias("year"),
+            (pl.col("date").dt.year() * 100 + pl.col("date").dt.month()).alias("month_id"),
             pl.col("sid")
         ])
-        .group_by("year")
+        .group_by("month_id")
         .agg(pl.col("sid").unique())
         .collect(engine="streaming")  
-        .iter_rows() # yield (year, [sids]) 
+        .iter_rows() # (month_id, [sids])
     )
-    return {"dret_path": dret_path, "universe_sids": dynamic_sids_by_year}
+    return {"dret_path": dret_path, "universe_sids": dynamic_sids_by_month}
 
 
 # ==============================================================================
@@ -89,15 +89,14 @@ def node_prepare_macro(exp_config: dict, warm=10000):
 # ==============================================================================
 
 # @task(name="Node_Extract_feature") 
-def node_extract_feature_monthly(ymonths: list[int], sids: list[bytes], exp_config: dict) -> list[str]:
+def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, exp_config: dict) -> list[str]:
     """
-    - ymonths: [200912, 201001, 201002, ...]
+    - ymonths: [200912, 201001, ...]
+    - universe_sids: dict(month_id -> list[sids])
     """
-    if not ymonths:
-        return []
+    if not ymonths: return []
 
-    paths = []
-    missing_ymonths = []
+    paths, missing_ymonths = [], []
     for ym in ymonths:
         out_path = f"{FEATURE_DIR}/hf_{ym}.parquet"
         if os.path.exists(out_path):
@@ -105,52 +104,56 @@ def node_extract_feature_monthly(ymonths: list[int], sids: list[bytes], exp_conf
         else:
             missing_ymonths.append(ym)
             
-    if not missing_ymonths:
-        return sorted(paths)
-
+    if not missing_ymonths: return sorted(paths)
     missing_ymonths = sorted(missing_ymonths)
 
-    # calculate rpc intervals 
-    min_ym = missing_ymonths[0]
+    # MDAPI Only Once 
+    # union_sids = list({sid for ym in missing_ymonths for sid in universe_sids.get(ym, [])})
+    month_sids_list = [universe_sids.get(ym, []) for ym in missing_ymonths]
+    union_sids = list(set().union(*month_sids_list))
+    if not union_sids: return sorted(paths)
+
+    min_ym, max_ym = missing_ymonths[0], missing_ymonths[-1]
     start_d = min_ym * 100 + 1
-    
-    max_ym = missing_ymonths[-1]
     max_year, max_month = max_ym // 100, max_ym % 100
     _, last_day = calendar.monthrange(max_year, max_month)
     end_d = max_ym * 100 + last_day
-    print(f"📥 [gRPC Batch] Fetching giant tick data from {start_d} to {end_d} for {len(missing_ymonths)} months...")
+
+    print(f"📥 [gRPC Batch] Fetching tick data from {start_d} to {end_d}...")
+    snapshot_dict = prepare_tick(start_date=start_d, end_date=end_d, sids=union_sids)
     
-    snapshot_dict = prepare_tick(start_date=start_d, end_date=end_d, sids=sids)
     eager_dfs = []
-    print("🧮 Calculating features per security (Eager Evaluation)...")
     for sid_bytes, lf in snapshot_dict.items():
-        processed_lf = build_ofi(lf)
-        processed_df = processed_lf.collect()
+        processed_df = build_ofi(lf).collect()
         if processed_df.height > 0:
             eager_dfs.append(processed_df)
         
-    if not eager_dfs:
-        print("⚠️ [Warning] No data found in this period.")
-        return sorted(paths)
+    if not eager_dfs: return sorted(paths)
 
-    print("🥞 Merging securities into a unified DataFrame...")
     big_df = pl.concat(eager_dfs)
-    # big_df = big_df.with_columns((pl.col("day") // 100).alias("month_id"))
-    big_df = big_df.with_columns(
-    (pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id")
-    )
-    print("💾 Writing partitioned monthly parquets to disk...")
+    big_df = big_df.with_columns((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
+    
+    print("💾 Writing partitioned PIT monthly parquets to disk...")
     for ym in missing_ymonths:
         out_path = f"{FEATURE_DIR}/hf_{ym}.parquet"
+        valid_sids_for_month = universe_sids.get(ym, [])
         
-        month_df = big_df.filter(pl.col("month_id") == ym).drop("month_id")
+        if not valid_sids_for_month:
+            print(f"{ym} no legal sids")
+            continue
+            
+        month_df = big_df.filter(
+            (pl.col("month_id") == ym) & 
+            (pl.col("sid").is_in(valid_sids_for_month)) 
+        ).drop("month_id")
+        
         if month_df.height > 0:
-            month_df.write_parquet(out_path) # month_lf.collect(streaming=False).write_parquet(out_path)
+            month_df.write_parquet(out_path)
+            # month_lf.collect(streaming=False).write_parquet(out_path)
             # month_lf.sink_parquet(out_path) # not supported with window func
             paths.append(out_path)
-            print(f"✅ Saved feature: {out_path}")
-        else:
-            print(f"ℹ️ Month {ym} has no record data, skipping save.")
+            print(f"Saved Strict PIT feature: {out_path}")
+
     return sorted(list(set(paths)))
 
 
@@ -307,13 +310,9 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     # =========================================================================
     # Ray Tune Fit and Optuna.importance
     # =========================================================================
-
-    results = tuner.fit()
-    print("\n[Ray Tune] All Trials Completed. Analyzing Results...\n")
-
+    results = tuner.fit() 
     # best_trial_result = results.get_best_result("metrics_score", "max")
-    # best_pval = best_trial_result.metrics.get("u_pval", 1.0)
-    # best_score = best_trial_result.metrics.get("metrics_score", -9999.0)
+    print("\n[Ray Tune] All Trials Completed. Analyzing Results...\n")
 
     # =========================================================================
     # filter by P-val and metrics_score
@@ -333,7 +332,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     best_score = best_valid_row["metrics_score"]
     best_config = {k.replace("config/", ""): v for k, v in best_valid_row.items() if k.startswith("config/")}
 
-    # 1. fANOVA 
+    # fANOVA 
     is_plateau = validate_parameter_plateau_fanova(
         df_results, best_config, best_score
     )
@@ -341,7 +340,7 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
         print(f"❌ {model_id} isolated")
         return False
 
-    # 2. pareto front
+    # pareto front
     pareto_front_df = find_pareto_front(valid_trials, common_config)
     best_model_dict = select_best_model_from_pareto(pareto_front_df)
     
@@ -366,27 +365,29 @@ def node_tune_monthly(model_id: int, dret_path: str, train_paths: list[str], exp
     pkl_path = f"{MODEL_DIR}/model_{model_id}.pkl"
     with open(pkl_path, "wb") as f: 
         pickle.dump(model_ckpt, f)
-    
     return True
 
 # ==============================================================================
 # Node 5: Update Fsm Matrix While Retain Motif
 # ==============================================================================
 
-def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, train_paths: list[str], exp_config: dict) -> bool:
-    common_config = exp_config["run_params"]
-    with open(f"{MODEL_DIR}/model_{prev_model_id}.pkl", "rb") as f:
-        pre_model_ckpt = pickle.load(f)
+def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, train_paths: list[str], common_config: dict) -> bool:
+    prev_model_path = f"{MODEL_DIR}/model_{prev_model_id}.pkl"
+
+    if not os.path.exists(prev_model_path):
+        return False
         
+    with open(prev_model_path, "rb") as f:
+        pre_model_ckpt = pickle.load(f)
+
     prev_tune_config, prev_motif = pre_model_ckpt["config"], pre_model_ckpt["motif"]
     hf_dfs = [pl.read_parquet(p) for p in train_paths if os.path.exists(p)]
     if not hf_dfs: return False
     
     panel_df = build_fsm_panel(pl.concat(hf_dfs).lazy(), pl.scan_parquet(dret_path), prev_tune_config, common_config).collect(streaming=True)
-    
-    curves = prepare_curves(panel_df, prev_tune_config, common_config) # prepare_mcurves 
+    curves = prepare_curves(panel_df, prev_tune_config, common_config) # prepare_mcurves
+
     result = evaluate_and_build_fsm(panel_df, curves, prev_motif, prev_tune_config, common_config, skip_stats=True)
-    
     if result["status"] != "success":
         print(f"⚠️ {model_id} matrix update failed due to ({result.get('reason')})")
         return False
@@ -400,7 +401,7 @@ def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, tr
     }
     with open(f"{MODEL_DIR}/model_{model_id}.pkl", "wb") as f: 
         pickle.dump(new_ckpt, f)
-
+    return True
 
 # ==============================================================================
 # Node 6: OOS 
@@ -414,7 +415,6 @@ def node_oos_inference_monthly(model_id: int, oos_months: list[int], dret_path: 
     if not os.path.exists(model_path):
         print(f"⚠️ {model_id} NotFound and Skip OOS Inference")
         return
-        
     with open(model_path, "rb") as f:
         model_ckpt = pickle.load(f)
         
@@ -422,15 +422,12 @@ def node_oos_inference_monthly(model_id: int, oos_months: list[int], dret_path: 
     if not aligned_lfs: 
         return
     
-    # fsm predict
     panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"], common_config)
-    scored_df = FSMPredictor(model_ckpt).predict(panel_lf)
-    
+    scored_df = FSMPredictor(model_ckpt, common_config).predict(panel_lf)
     if scored_df.height > 0:
         out_path = f"{SCORE_DIR}/scores_{model_id}.parquet"
         scored_df.write_parquet(out_path)
         print(f"✅ {model_id} {oos_months[0]} between {oos_months[-1]} Oss: {scored_df.height} ")
-
 
 # ==============================================================================
 # DAG (Walk-Forward)
@@ -438,7 +435,10 @@ def node_oos_inference_monthly(model_id: int, oos_months: list[int], dret_path: 
 
 # @flow(name="WFO_FSM_Pipeline")
 def wfo_pipeline(exp_config):
-    # avoid parallel thread and system hangup
+    # initialize config
+    common_config = exp_config["run_params"]     
+
+    # setup ray
     runtime_env = {
         "env_vars": {
             "POLARS_MAX_THREADS": "1",
@@ -454,42 +454,34 @@ def wfo_pipeline(exp_config):
     }
     ray.init(num_cpus=6, runtime_env=runtime_env, ignore_reinit_error=True)
 
-    global_data = node_prepare_macro(exp_config)
-    
+    # Setup Macro
+    global_data = node_prepare_macro(common_config)
     daily_df = pl.read_parquet(global_data["dret_path"], columns=["day"])
+
     all_months = (
         # daily_df.select((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
         daily_df.select((pl.col("day") // 100).cast(pl.Int32).alias("month_id"))
         .unique().sort("month_id")["month_id"].to_list()
     )
     
-    TRAIN_WINDOW = exp_config["run_params"]["train_window"]     
-    STEP = exp_config["run_params"]["oss_step"]          
-    
+    # Setup Walkforward
+    TRAIN_WINDOW = common_config["train_window"]     
+    STEP = common_config["oss_step"]     
     last_available_model_id = None
 
     for idx in range(TRAIN_WINDOW, len(all_months), STEP):
+
         oos_months = all_months[idx : min(idx + STEP, len(all_months))]
         train_months = all_months[idx - TRAIN_WINDOW : idx]            
         
         model_id = oos_months[0]           
         
-        sids_train = []
-        for m in train_months:
-            sids_train.extend(global_data["universe_sids"].get(m // 100, []))
-        sids_train = list(set(sids_train))
+        print(f"\n===========================================================================")
+        print(f"📅 WFO | OOS : {model_id} | Train Month: {train_months[0]}-{train_months[-1]} ")
+        print(f"============================================================================\n")
         
-        sids_oos = list(set(global_data["universe_sids"].get(model_id // 100, [])))
-        
-        if not sids_train or not sids_oos: 
-            continue
-            
-        print(f"\n==========================================================================")
-        print(f"📅 WFO  | OOS : {model_id} | Train Sids: {len(sids_train)} | OOS Sids: {len(sids_oos)}")
-        print(f"==========================================================================\n")
-        
-        train_paths = node_extract_feature_monthly(train_months, sids_train, exp_config)
-        oos_paths = node_extract_feature_monthly(oos_months, sids_oos, exp_config)
+        train_paths = node_extract_feature_monthly(train_months, global_data["universe_sids"], exp_config)
+        oos_paths = node_extract_feature_monthly(oos_months, global_data["universe_sids"], exp_config)
 
         if last_available_model_id is None:
             is_decayed = True
@@ -501,7 +493,6 @@ def wfo_pipeline(exp_config):
             is_decayed = node_check_decay_monthly(
                 last_available_model_id, prev_oos_months, global_data["dret_path"], prev_oos_paths, exp_config["run_params"]
             )
-        
         if is_decayed:
             print(f"🔄 Model decayed or First Run. Tuning Model for {model_id}...")
             success = node_tune_monthly(model_id, global_data["dret_path"], train_paths, exp_config, last_available_model_id)
@@ -511,9 +502,12 @@ def wfo_pipeline(exp_config):
             last_available_model_id = model_id 
         else:
             print(f"🌲 Model {last_available_model_id} remains effective. Inheriting to {model_id}")
-            node_update_fsm_matrix(model_id, last_available_model_id, global_data["dret_path"], train_paths, exp_config)
+            success = node_update_fsm_matrix(model_id, last_available_model_id, global_data["dret_path"], train_paths, common_config)
+            if not success:
+                print(f"Update Matrix Failure and Direct inherit pre model_ckpt...")
+                shutil.copy(f"{MODEL_DIR}/model_{last_available_model_id}.pkl", f"{MODEL_DIR}/model_{model_id}.pkl")
+ 
             last_available_model_id = model_id 
-            
         node_oos_inference_monthly(model_id, oos_months, global_data["dret_path"], oos_paths, exp_config)
 
 
@@ -533,16 +527,29 @@ if __name__ == "__main__":
     exp_config = {
         "run_params": {
             "start_date": 20100101, "end_date": 20201231, "benchmark": "1A0001",
+
+            # sample sids from universe
+            "top_k_ratio": 0.25, # used for sample
+            "days_since_ipo": 120, # days since ipo
+
+            # train / oss 
             "train_window": 12,
             "oss_step": 6, 
-            "top_k_ratio": 0.25, # used for sample
-            "exclude_bars": 10, # exclude last 10 bars means 14:50
-            "edge_ratio": 0.25, # ratio of macro state edge bins 
-            "alternative": "greater", # stats
-            "win_rate": 0.5, # used to calculate hpo score 
+
+            # stumpy curves and overlap for stumpy  
+            "exclude_bars": 10, # 14:50
+            "dtw_window_frac": 0.1, 
+
+            # macro ranking state and fut_ret rank state
+            "ranking_window": 5, # rolling macro_state 
+            "ranking_ratio": 0.25, # ranking
+
+            # stats 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
-            "dtw_window_frac": 0.1, # used for DTW offset
-            "macro_window": 5 # used to calculate macro_state based on ofi 
+            "alternative": "greater", # stats
+
+            # hpo scores
+            "win_rate": 0.5, # used to calculate hpo score 
         },
 
         "search_bounds": {

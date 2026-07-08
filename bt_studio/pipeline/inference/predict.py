@@ -25,31 +25,34 @@ class FSMPredictor:
 
         self.bin_weights = np.array([-1.0, -0.5, 0.5, 1.0]) 
         
-    def _get_macro_state(self, panel_df: pl.DataFrame, macro_col: str) -> pl.DataFrame:
+    def _get_macro_state(self, panel_df: pl.DataFrame) -> pl.DataFrame:
+        rank_window = self.common_config["ranking_window"]
+
         daily_macro_lf = (
             panel_df.lazy()
-            .select(["day", "sid", pl.col(macro_col).list.sum().alias("sid_ofi_sum")])
+            .select(["day", "sid", pl.col("lag_0").list.sum().alias("sid_ofi_sum")])
             .group_by("day")
             .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
-            .sort("day")
-            .with_columns(
-                pl.col("daily_ofi_mean").rolling_mean(window_size=self.common_config["macro_window"], min_periods=1).alias("smooth_macro")
-            )
+            .sort("day") 
             .with_columns([
-                pl.col("smooth_macro").quantile(1/3).alias("p33"),
-                pl.col("smooth_macro").quantile(2/3).alias("p67"),
+                pl.col("daily_ofi_mean")
+                .rolling_quantile(quantile=0.33, window_size=rank_window, min_periods=5)
+                .alias("p33"),
+                pl.col("daily_ofi_mean")
+                .rolling_quantile(quantile=0.67, window_size=rank_window, min_periods=5)
+                .alias("p67")
             ])
             .with_columns(
-                pl.when(pl.col("smooth_macro") <= pl.col("p33")).then(0)
-                .when(pl.col("smooth_macro") <= pl.col("p67")).then(1)
+                pl.when(pl.col("daily_ofi_mean") <= pl.col("p33")).then(0)
+                .when(pl.col("daily_ofi_mean") <= pl.col("p67")).then(1)
                 .otherwise(2)
                 .cast(pl.Int32)
                 .alias("macro_state")
             )
-            .with_columns(pl.col("macro_state").shift(1)) 
-            .drop(["p33", "p67", "daily_ofi_mean", "smooth_macro"])
+            .with_columns(pl.col("macro_state").shift(1))  # avoid loopahead
+            .drop(["p33", "p67", "daily_ofi_mean"])
             .drop_nulls()
-            )
+        )
         return daily_macro_lf.collect()
 
     def _calculate_fsm_score(self, triggers: pl.DataFrame) -> pl.DataFrame:
@@ -95,7 +98,7 @@ class FSMPredictor:
         if triggers.height == 0:
             return pl.DataFrame()
 
-        daily_macro = self._get_macro_state(panel_df, macro_col="lag_0")
+        daily_macro = self._get_macro_state(panel_df)
         return self._calculate_fsm_score(triggers.join(daily_macro, on="day", how="left"))
 
     def predict_md(self, panel_df: pl.DataFrame) -> pl.DataFrame:
@@ -113,7 +116,7 @@ class FSMPredictor:
         if triggers.height == 0: 
             return pl.DataFrame()
 
-        daily_macro = self._get_macro_state(panel_df, macro_col=f"lag_0")
+        daily_macro = self._get_macro_state(panel_df)
         return self._calculate_fsm_score(triggers.join(daily_macro, on="day", how="left"))
 
     def predict(self, panel_lf: pl.LazyFrame) -> pl.DataFrame:

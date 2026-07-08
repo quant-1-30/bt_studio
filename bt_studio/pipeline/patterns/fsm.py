@@ -45,38 +45,33 @@ def evaluate_and_build_fsm(
     if panel_df["sid"].dtype != pl.Binary:
         panel_df = panel_df.with_columns(pl.col("sid").cast(pl.Binary))
     
-    # =====================================================================
-    # 1. Macro States) & Return Bins 0(flow in ) / 1(vibrate) / 2(flow out) 
-    # =====================================================================
+    # ==================================================================================
+    # 1. Macro States Rolling Rank & Return Bins 0(flow in ) / 1(vibrate) / 2(flow out) 
+    # ==================================================================================
+    rank_window = common_config["ranking_window"]
     daily_macro_lf = (
         panel_df.lazy()
-        .select([
-            "day", 
-            "sid", 
-            pl.col("lag_0").list.sum().alias("sid_ofi_sum")
-        ])
+        .select(["day", "sid", pl.col("lag_0").list.sum().alias("sid_ofi_sum")])
         .group_by("day")
-        .agg(
-            pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean")
-        )
-        .sort("day")
-        # window mean replace daily
-        .with_columns(
-            pl.col("daily_ofi_mean").rolling_mean(window_size=common_config["macro_window"], min_periods=1).alias("smooth_macro")
-        )
+        .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
+        .sort("day") 
         .with_columns([
-            pl.col("smooth_macro").quantile(1/3).alias("p33"),
-            pl.col("smooth_macro").quantile(2/3).alias("p67"),
+            pl.col("daily_ofi_mean")
+              .rolling_quantile(quantile=0.33, window_size=rank_window, min_periods=5)
+              .alias("p33"),
+            pl.col("daily_ofi_mean")
+              .rolling_quantile(quantile=0.67, window_size=rank_window, min_periods=5)
+              .alias("p67")
         ])
         .with_columns(
-            pl.when(pl.col("smooth_macro") <= pl.col("p33")).then(0)
-            .when(pl.col("smooth_macro") <= pl.col("p67")).then(1)
+            pl.when(pl.col("daily_ofi_mean") <= pl.col("p33")).then(0)
+            .when(pl.col("daily_ofi_mean") <= pl.col("p67")).then(1)
             .otherwise(2)
             .cast(pl.Int32)
             .alias("macro_state")
         )
-        .with_columns(pl.col("macro_state").shift(1)) # avoid loopahead
-        .drop(["p33", "p67", "daily_ofi_mean", "smooth_macro"])
+        .with_columns(pl.col("macro_state").shift(1))
+        .drop(["p33", "p67", "daily_ofi_mean"])
         .drop_nulls()
     )
 
@@ -87,7 +82,7 @@ def evaluate_and_build_fsm(
     # =================================================================
     # 2. Time-Adjusted Zero-Anchored Bins Based on Rank not std
     # =================================================================
-    edge_ratio = common_config["edge_ratio"]
+    ranking_ratio = common_config["ranking_ratio"]
     bin_cols = [] 
 
     for fw in common_config["stats_windows"]:
@@ -99,9 +94,9 @@ def evaluate_and_build_fsm(
             # (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
             (pl.col(col).rank(method="average") / pl.len()).over("day").alias(f"rank_{fw}") # # average solve same ranke and normalize to [0,1]
         ]).with_columns([
-            pl.when(pl.col(f"rank_{fw}") <= edge_ratio).then(0)                
+            pl.when(pl.col(f"rank_{fw}") <= ranking_ratio).then(0)                
             .when(pl.col(f"rank_{fw}") <= 0.50).then(1)                       
-            .when(pl.col(f"rank_{fw}") <= (1.0 - edge_ratio)).then(2)         
+            .when(pl.col(f"rank_{fw}") <= (1.0 - ranking_ratio)).then(2)         
             .otherwise(3).cast(pl.Int32).alias(f"bin_{fw}")                    
         ]).drop(f"rank_{fw}") 
 
@@ -188,35 +183,30 @@ def evaluate_and_build_fsm_md(
     # ======================================================================
     # 1. Macro States) & Return Bins 0(flow in ) / 1(vibrate) / 2(flow out) 
     # ======================================================================
+    rank_window = common_config["ranking_window"]
     daily_macro_lf = (
         panel_df.lazy()
-        .select([
-            "day", 
-            "sid", 
-            pl.col("lag_0").list.sum().alias("sid_ofi_sum")
-        ])
+        .select(["day", "sid", pl.col("lag_0").list.sum().alias("sid_ofi_sum")])
         .group_by("day")
-        .agg(
-            pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean")
-        )
-        .sort("day")
-        # window mean replace daily
-        .with_columns(
-            pl.col("daily_ofi_mean").rolling_mean(window_size=common_config["macro_window"], min_periods=1).alias("smooth_macro")
-        )
+        .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
+        .sort("day") 
         .with_columns([
-            pl.col("smooth_macro").quantile(1/3).alias("p33"),
-            pl.col("smooth_macro").quantile(2/3).alias("p67"),
+            pl.col("daily_ofi_mean")
+              .rolling_quantile(quantile=0.33, window_size=rank_window, min_periods=5)
+              .alias("p33"),
+            pl.col("daily_ofi_mean")
+              .rolling_quantile(quantile=0.67, window_size=rank_window, min_periods=5)
+              .alias("p67")
         ])
         .with_columns(
-            pl.when(pl.col("smooth_macro") <= pl.col("p33")).then(0)
-            .when(pl.col("smooth_macro") <= pl.col("p67")).then(1)
+            pl.when(pl.col("daily_ofi_mean") <= pl.col("p33")).then(0)
+            .when(pl.col("daily_ofi_mean") <= pl.col("p67")).then(1)
             .otherwise(2)
             .cast(pl.Int32)
             .alias("macro_state")
         )
-        .with_columns(pl.col("macro_state").shift(1)) # avoid loopahead
-        .drop(["p33", "p67", "daily_ofi_mean", "smooth_macro"])
+        .with_columns(pl.col("macro_state").shift(1))  # avoid loopahead
+        .drop(["p33", "p67", "daily_ofi_mean"])
         .drop_nulls()
     )
 
@@ -228,7 +218,7 @@ def evaluate_and_build_fsm_md(
     # 2. Time-Adjusted Zero-Anchored Bins Based on Rank not std
     # =======================================================================
 
-    edge_ratio = common_config["edge_ratio"]
+    ranking_ratio = common_config["ranking_ratio"]
     bin_cols = [] 
 
     for fw in common_config["stats_windows"]:
@@ -240,9 +230,9 @@ def evaluate_and_build_fsm_md(
             # (pl.col(col) / (pl.col("vol_20d") * np.sqrt(fw))).alias(f"z_abs_{fw}")
             (pl.col(col).rank(method="average") / pl.len()).over("day").alias(f"rank_{fw}") # # # average solve same ranke and normalize to [0,1]
         ]).with_columns([
-            pl.when(pl.col(f"rank_{fw}") <= edge_ratio).then(0)                
+            pl.when(pl.col(f"rank_{fw}") <= ranking_ratio).then(0)                
             .when(pl.col(f"rank_{fw}") <= 0.50).then(1)                       
-            .when(pl.col(f"rank_{fw}") <= (1.0 - edge_ratio)).then(2)         
+            .when(pl.col(f"rank_{fw}") <= (1.0 - ranking_ratio)).then(2)         
             .otherwise(3).cast(pl.Int32).alias(f"bin_{fw}")                    
         ]).drop(f"rank_{fw}") 
 
