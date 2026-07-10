@@ -1,6 +1,5 @@
 
 import os
-
 # ==============================================================================
 # C++ / OpenMP Ray Worker Polars/NumPy CEngine DeadLock Prevention
 # ==============================================================================
@@ -107,8 +106,7 @@ def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, common
     if not missing_ymonths: return sorted(paths)
     missing_ymonths = sorted(missing_ymonths)
 
-    # MDAPI Only Once 
-    # union_sids = list({sid for ym in missing_ymonths for sid in universe_sids.get(ym, [])})
+    # MDAPI Api 
     month_sids_list = [universe_sids.get(ym, []) for ym in missing_ymonths]
     union_sids = list(set().union(*month_sids_list))
     if not union_sids: return sorted(paths)
@@ -271,7 +269,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     )
 
     # =========================================================================
-    # Ray Tune and Initialize MLflowLoggerCallback
+    # Ray Tune and Initialize MLflowLoggerCallback (default 5000)
     # =========================================================================
     wrapped_trainable = tune.with_resources(
         tune.with_parameters(
@@ -283,7 +281,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     )
 
     mlflow_callback = MLflowLoggerCallback(
-        tracking_uri=mlflow.get_tracking_uri(), # default 5000 and set by env
+        tracking_uri=mlflow.get_tracking_uri(), 
         experiment_name="FSM_Production_Models",
         save_artifact=True 
     )
@@ -385,7 +383,7 @@ def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, tr
     if not hf_dfs: return False
     
     panel_df = build_fsm_panel(pl.concat(hf_dfs).lazy(), pl.scan_parquet(dret_path), prev_tune_config, common_config).collect(streaming=True)
-    curves = prepare_curves(panel_df, prev_tune_config, common_config) # prepare_mcurves
+    curves = prepare_curves(panel_df, prev_tune_config, common_config) 
 
     result = evaluate_and_build_fsm(panel_df, curves, prev_motif, prev_tune_config, common_config, skip_stats=True)
     if result["status"] != "success":
@@ -429,7 +427,7 @@ def node_oos_inference_monthly(
     aligned_lfs = [pl.scan_parquet(p) for p in all_paths if os.path.exists(p)]
     if not aligned_lfs: return
     
-    panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"], common_config)
+    panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"], common_config, is_train=False)
     scored_df = FSMPredictor(model_ckpt, common_config).predict(panel_lf)
     
     if scored_df.height > 0:
@@ -556,6 +554,7 @@ if __name__ == "__main__":
             # macro ranking state and fut_ret rank state
             "ranking_window": 5, # rolling macro_state 
             "ranking_ratio": 0.25, # ranking
+            "decay": 1.0, # used for T+1 -> T+3 compress
 
             # stats 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret

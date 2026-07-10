@@ -96,3 +96,13 @@ def _collect_stream_sync(observable) -> Dict[bytes, pl.DataFrame]:
         tables.append(msg)
     data_df = _merge2DataFrame(tables)
     return data_df
+
+
+def calculate_decay_weights(stats_windows: list[int], half_life: float = 1.0) -> dict[int, float]:
+    """
+    - half_life: default 1.0 (means day)
+    """
+    decay_const = np.log(2) / half_life
+    raw_weights = [np.exp(-decay_const * (t - 1)) for t in stats_windows]
+    sum_w = sum(raw_weights)
+    return {t: float(w / sum_w) for t, w in zip(stats_windows, raw_weights)}

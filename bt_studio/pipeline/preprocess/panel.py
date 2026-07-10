@@ -1,10 +1,19 @@
 import polars as pl
 
 
-def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, tune_config: dict, common_config: dict) -> pl.DataFrame:
+def build_fsm_panel(
+    all_feat_lf: list[pl.LazyFrame], 
+    daily_lf: pl.LazyFrame, 
+    tune_config: dict, 
+    common_config: dict,
+    is_train: bool = True
+    ) -> pl.DataFrame:
     # =========================================================================
     # config 
     # =========================================================================
+    # train inner / oss left 
+    join_how = "inner" if is_train else "left"
+
     ds = tune_config["downsample"]
     bars_per_day = 240 // ds
 
@@ -68,7 +77,6 @@ def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, tun
             pl.col("fwd_ret_1").fill_null((pl.col("close").shift(-1).over("sid") / pl.col("close") - 1.0))
         )
     )
-
     # =========================================================================
     # downsample
     # =========================================================================
@@ -107,6 +115,7 @@ def build_fsm_panel(all_feat_lf: list[pl.LazyFrame], daily_lf: pl.LazyFrame, tun
 
     panel_lf = curve_lf.join(
         daily_ret_lf.select(["day", "sid", "fwd_ret_1", "fwd_ret_2", "fwd_ret_3"]),
-        on=["day", "sid"], how="inner"
+        on=["day", "sid"], 
+        how=join_how
     )
     return panel_lf
