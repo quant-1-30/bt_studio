@@ -101,7 +101,7 @@ def discover_fsm_pattern(
     N, L = curves_2d.shape
 
     if curves_2d.size == 0:
-        return np.array([])
+        return {"status": "failed", "reason": "Curves_2d Empty", "metrics_score": -9999.0}
 
     # =========================================================================
     # 3. Volatility-Driven Sampling for stumpy

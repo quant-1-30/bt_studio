@@ -195,7 +195,7 @@ def node_check_decay_monthly(
         print(f" {prev_model_id} on ({prev_oos_months[0]}-{prev_oos_months[-1]}) effective and (P-val: {result['u_pval']:.4f})")
         return False
         
-    print(f"🔄 last {prev_model_id} decay (P-val: {result.get('u_pval', 1.0):.4f}) trigger retune")
+    print(f"🔄 last {prev_model_id} decay (P-val: {result['u_pval']:.4f}) trigger retune")
     return True
 
 
@@ -219,7 +219,7 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
         })
     else:
         print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
-        tune.report({"metrics_score": -9999.0, "u_pval": 1.0})
+        tune.report({"metrics_score": -9999.0, "reason": result["reason"]})
 
     del panel_lf, hf_lf, dret_lf
     gc.collect()
@@ -568,7 +568,7 @@ if __name__ == "__main__":
             "downsample": [2, 3, 4, 5], # downsample for DTW
             "cross_days": [1, 2, 3], # concat cross_days of lagged curves to 2D array for DTW 
             "motif_minutes": [45, 60, 90, 120], # used from motif length intraday
-            "threshold_r": [0.7, 0.90], 
+            "threshold_r": [0.65, 0.85], 
             "num_trials": 100, 
             "max_concurrent_trials": 6
         }

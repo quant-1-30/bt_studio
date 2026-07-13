@@ -31,7 +31,6 @@ def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
     
         obs = mdapi.subscribe(body, RpcTopic.Daily) 
         raw = _collect_stream_sync(obs)
-
         lazy_frames = []
         for sid, df in raw.items():
             if df.height > 0:

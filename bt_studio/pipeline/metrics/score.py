@@ -49,6 +49,10 @@ def calculate_hpo_score(
     tune_config: dict,
     common_config: dict
 ) -> float:
+
+    if u_pval >= 0.10: #  Optuna [0.01 ~ 0.15] to Seek Grad
+            return -9999.0
+
     alternative = common_config["alternative"]
     excess_ret = np.median(cond_rets) - np.median(uncond_rets) # median stable than median
     
@@ -68,7 +72,7 @@ def calculate_hpo_score(
     else: 
         excess_factor = abs(excess_ret)
         
-    if excess_factor <= 1e-6:
+    if excess_factor <= 1e-3: # avoid Friction
         return -9999.0
 
     # =========================================================================

@@ -176,9 +176,15 @@ def evaluate_and_build_fsm(
         trigger_map = {row[0]: row[1] for row in trigger_grouped.iter_rows()}
         
         # mix global and trigger
-        bin_weights[fw] = [trigger_map.get(b, prior_map.get(b, 0.0)) for b in unique_bins]
+        raw_weights = [trigger_map.get(b, prior_map.get(b, 0.0)) for b in unique_bins]
+        bin_weights[fw] = np.round(raw_weights, 6).tolist()
 
     fsm_matrix = extract_fsm_matrix(triggers, bin_cols)
+    # np.round 2D np.array clip
+    for k in ["P(T1|Macro)", "P(T2|T1)", "P(T3|T2)"]:
+        if k in fsm_matrix:
+            fsm_matrix[k] = np.round(fsm_matrix[k], 6).tolist()
+    
     fsm_matrix["bin_weights"] = bin_weights
 
     if skip_stats:
@@ -186,7 +192,7 @@ def evaluate_and_build_fsm(
             "status": "success",
             "fsm_matrix": fsm_matrix,
             "trigger_count": triggers.height,
-            "learned_motif": motif.tolist(),
+            "learned_motif": np.round(motif, 6).tolist()
         }
 
     # =================================================================
@@ -221,7 +227,7 @@ def evaluate_and_build_fsm(
         "status": "success",
         "fsm_matrix": fsm_matrix,
         "trigger_count": triggers.height,
-        "learned_motif": motif.tolist(),
-        "metrics_score": score,
-        "u_pval": float(u_pval)
+        "learned_motif": np.round(motif, 6).tolist(),
+        "metrics_score": round(score, 6),             
+        "u_pval": round(float(u_pval), 6)            
     }
