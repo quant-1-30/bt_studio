@@ -214,12 +214,20 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     if result["status"] == "success":
         print(f"\n[Trail Success] Score: {result['metrics_score']:.4f} ; Config: {config}\n")
         tune.report({
-            "metrics_score": result["metrics_score"], "u_pval": result["u_pval"],
-            "learned_motif": result["learned_motif"], "fsm_matrix": result["fsm_matrix"]
+            "metrics_score": result["metrics_score"], 
+            "u_pval": result["u_pval"],
+            "learned_motif": result["learned_motif"], 
+            "fsm_matrix": result["fsm_matrix"]
         })
     else:
         print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
-        tune.report({"metrics_score": -9999.0, "reason": result["reason"]})
+        tune.report({
+            "metrics_score": result["metrics_score"], 
+            "u_pval": 1.0, 
+            "learned_motif": [], 
+            "fsm_matrix": {},
+            "reason": result.get("reason", "Unknown")
+        })
 
     del panel_lf, hf_lf, dret_lf
     gc.collect()
@@ -316,9 +324,13 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # filter by P-val and metrics_score
     # =========================================================================
     df_results = pl.from_pandas(results.get_dataframe())
+    # if "u_pval" not in df_results.columns or "metrics_score" not in df_results.columns:
+    #     print(f"⚠️ [Failed] to generate p_val and metrics_socre in {model_id}")
+    #     return False
+
     valid_trials = df_results.filter(
         (pl.col("u_pval") <= 0.05) & 
-        (pl.col("metrics_score") > -9990.0)
+        (pl.col("metrics_score") > -9999.0)
     )
     
     if valid_trials.height == 0:

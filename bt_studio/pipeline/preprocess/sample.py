@@ -42,9 +42,7 @@ def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, common_co
         ])
         .filter(
             (pl.col("days_since_ipo") >= common_config["days_since_ipo"]) 
-            #  **交易灾难**：频繁停牌（或长期停牌刚刚复牌）的股票是极度危险 OFI 曲线完全扭曲
-            # **业内标准：当月停牌天数超过 10%（即交易活跃天数比例 < 90%）的股票 无条件剔除出池
-            & (pl.col("active_ratio") >= 0.90) 
+            & (pl.col("active_ratio") >= 0.90) # suspend excess 10% by month ---> ofi total distorted
         ) 
         .with_columns(
             # rank by board
