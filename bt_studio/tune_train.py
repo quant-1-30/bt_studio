@@ -26,12 +26,13 @@ try:
 except RuntimeError:
     pass 
 
+import gc
+import re
+import pickle
+import shutil
 import ray
 import optuna
 import mlflow
-import pickle
-import shutil
-import gc
 import calendar
 from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
@@ -40,7 +41,7 @@ from ray.air.integrations.mlflow import MLflowLoggerCallback
 
 from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample, build_fsm_panel
 from bt_studio.pipeline.features import build_ofi
-from bt_studio.pipeline.patterns import evaluate_and_build_fsm, discover_fsm_pattern
+from bt_studio.pipeline.patterns import prepare_curves, evaluate_and_build_fsm, discover_fsm_pattern
 from bt_studio.pipeline.inference import FSMPredictor
 from bt_studio.pipeline.metrics import validate_parameter_plateau_fanova, find_pareto_front, select_best_model_from_pareto
 
@@ -187,7 +188,7 @@ def node_check_decay_monthly(
     panel_df = panel_lf.collect(streaming=True)
     
     curves_2d = prepare_curves(panel_df, model_ckpt["config"], common_config)
-    result = evaluate_and_build_fsm_md(
+    result = evaluate_and_build_fsm(
         panel_df, curves_2d, model_ckpt["motif"], model_ckpt["config"], common_config
     )
     
@@ -263,8 +264,9 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     }
 
     points_to_evaluate = None
-    if os.path.exists(f"{MODEL_DIR}/model_{prev_model_id}.pkl"):
-        print(f"NotFound{prev_model_id} or First force to retune...")
+    prev_model_path = f"{MODEL_DIR}/model_{prev_model_id}.pkl"  # 提前定义
+    if os.path.exists(prev_model_path):
+        print(f"Prior model found, using as point to evaluate...")
         with open(prev_model_path, "rb") as f:
             prior_cfg = pickle.load(f)["config"]
             points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}]
@@ -339,12 +341,12 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
         
     # Best Trial
     best_valid_row = valid_trials.sort("metrics_score", descending=True).row(0, named=True)
-    best_score = best_valid_row["metrics_score"]
-    best_config = {k.replace("config/", ""): v for k, v in best_valid_row.items() if k.startswith("config/")}
+    best_valid_score = best_valid_row["metrics_score"]
+    best_valid_config = {k.replace("config/", ""): v for k, v in best_valid_row.items() if k.startswith("config/")}
 
     # fANOVA 
     is_plateau = validate_parameter_plateau_fanova(
-        df_results, best_config, best_score
+        df_results, best_valid_config, best_valid_score
     )
     if not is_plateau:
         print(f"❌ {model_id} isolated")
@@ -364,11 +366,16 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # Model Save
     # =========================================================================
     best_config = {k.replace("config/", ""): v for k, v in best_model_dict.items() if k.startswith("config/")}
+    # FSMPredictor / build_fsm_panel ----> m and threshold_d
+    if "m" not in best_config:
+        best_config["m"] = int(best_config["motif_minutes"] // best_config["downsample"])
+    if "threshold_d" not in best_config:
+        best_config["threshold_d"] = float(np.sqrt(2 * best_config["m"] * (1.0 - best_config["threshold_r"])))
     
     model_ckpt = {
         "config": best_config, 
-        "motif": np.array(best_model_dict.get("learned_motif", [])), 
-        "fsm_matrix": best_model_dict.get("fsm_matrix", {}),
+        "motif": np.array(best_model_dict["learned_motif"]), 
+        "fsm_matrix": best_model_dict["fsm_matrix"],
         "valid_month": model_id 
     }
     
@@ -436,6 +443,9 @@ def node_oos_inference_monthly(
         
     # ensure rolling_quantile avoid nan
     all_paths = warmup_paths + oos_paths
+    if not all_paths:
+        print(f"⚠️ {model_id} 没有可用的 warmup/oos 特征，跳过 OOS")
+        return
     aligned_lfs = [pl.scan_parquet(p) for p in all_paths if os.path.exists(p)]
     if not aligned_lfs: return
     
@@ -519,7 +529,7 @@ def wfo_pipeline(exp_config):
             print("🚀 First run (Cold Start), forcing HPO Training...")
         else:
             prev_oos_months = train_months[-STEP:] 
-            prev_oos_paths = node_extract_feature_monthly(prev_oos_months, sids_train, common_config)
+            prev_oos_paths = node_extract_feature_monthly(prev_oos_months, global_data["universe_sids"], common_config)
             
             is_decayed = node_check_decay_monthly(
                 last_available_model_id, prev_oos_months, global_data["dret_path"], prev_oos_paths, common_config
@@ -580,7 +590,7 @@ if __name__ == "__main__":
             "downsample": [2, 3, 4, 5], # downsample for DTW
             "cross_days": [1, 2, 3], # concat cross_days of lagged curves to 2D array for DTW 
             "motif_minutes": [45, 60, 90, 120], # used from motif length intraday
-            "threshold_r": [0.65, 0.85], 
+            "threshold_r": [0.3, 0.85], 
             "num_trials": 100, 
             "max_concurrent_trials": 6
         }

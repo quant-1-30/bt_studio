@@ -70,8 +70,7 @@ def discover_fsm_pattern(
 ) -> Dict[str, Any]: 
 
     m = int(tune_config["motif_minutes"] // tune_config["downsample"])
-    cross_days = int(tune_config["cross_days"])
-    threshold_d = float(np.sqrt(2 * m * (1.0 - tune_config.get("threshold_r", 0.85))))
+    threshold_d = float(np.sqrt(2 * m * (1.0 - tune_config["threshold_r"])))
 
     # =========================================================================
     # 1. Filter Panel DataFrame

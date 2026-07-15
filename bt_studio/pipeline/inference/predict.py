@@ -1,6 +1,7 @@
 import numpy as np
 import polars as pl
 from bt_studio.pipeline.patterns.astc import calc_min_subseq_dtw, prepare_curves
+from bt_studio.utils.common import calculate_decay_weights
 
 
 class FSMPredictor:
@@ -22,7 +23,7 @@ class FSMPredictor:
         self.p_t2_t1 = np.array(fsm_matrix["P(T2|T1)"])       
         self.p_t3_t2 = np.array(fsm_matrix["P(T3|T2)"])       
 
-        self.bin_weights = np.array(fsm_matrix["bin_weights"])
+        self.bin_weights = fsm_matrix["bin_weights"]
         self.traj_weights = calculate_decay_weights(common_config["stats_windows"], half_life=common_config["decay"]) 
         
     def _get_macro_state(self, panel_df: pl.DataFrame) -> pl.DataFrame:
@@ -54,47 +55,6 @@ class FSMPredictor:
             .drop_nulls()
         )
         return daily_macro_lf.collect()
-
-    def _calculate_fsm_score(self, triggers: pl.DataFrame) -> pl.DataFrame:
-        # =========================================================================
-        # Precompute Look-up Array
-        # =========================================================================
-        state_scores = np.zeros(3, dtype=np.float64)
-        
-        for macro_state in [0, 1, 2]:
-            p_curr = self.p_t1_macro[macro_state] 
-            expected_scores = []
-            
-            # T+1
-            expected_scores.append(np.dot(p_curr, self.bin_weights))
-            
-            # T+2
-            if len(stats_windows) >= 2:
-                p_curr = p_curr @ self.p_t2_t1
-                expected_scores.append(np.dot(p_curr, self.bin_weights))
-                
-            # T+3
-            if len(stats_windows) >= 3:
-                p_curr = p_curr @ self.p_t3_t2
-                expected_scores.append(np.dot(p_curr, self.bin_weights))
-                
-            final_score = 0.0
-            for idx, fw in enumerate(stats_windows):
-                w = self.traj_weights[fw]
-                final_score += expected_scores[idx] * w
-                
-            state_scores[macro_state] = float(final_score)
-
-        # =========================================================================
-        # Polars / Zero Python Loop
-        # =========================================================================
-        return triggers.with_columns(
-            pl.when(pl.col("macro_state") == 0).then(state_scores[0])
-            .when(pl.col("macro_state") == 1).then(state_scores[1])
-            .when(pl.col("macro_state") == 2).then(state_scores[2])
-            .otherwise(0.0)
-            .alias("fsm_score")
-        )
 
     def _calculate_fsm_score(self, triggers: pl.DataFrame) -> pl.DataFrame:
         # =========================================================================

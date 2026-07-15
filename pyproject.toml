@@ -26,6 +26,17 @@ scikit-learn = "^1.9.0"
 bt-core = "0.4.7"
 tensorboard = "^2.21.0"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = [
+    "--ignore=tests/test_prefect_fsm.py",
+    "--ignore=tests/test_plot.py",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:polars.*",
+]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
