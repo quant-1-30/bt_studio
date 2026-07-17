@@ -50,7 +50,7 @@ def calculate_hpo_score(
     common_config: dict
 ) -> float:
 
-    if u_pval >= 0.10: #  Optuna [0.01 ~ 0.15] to Seek Grad
+    if u_pval >= common_config["pval"]: #  Optuna [0.01 ~ 0.15] to Seek Grad
             return -9999.0
 
     alternative = common_config["alternative"]

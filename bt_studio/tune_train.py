@@ -13,8 +13,6 @@ os.environ["RAYON_NUM_THREADS"] = "1"
 os.environ["NUMBA_NUM_THREADS"] = "1"
 os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
 
-os.environ["MLFLOW_TRACKING_URI"] = "http://127.0.0.1:5001"
-
 import multiprocessing
 import numpy as np
 import polars as pl
@@ -182,11 +180,11 @@ def node_check_decay_monthly(
         
     aligned_lfs = [pl.scan_parquet(p) for p in prev_oos_paths if os.path.exists(p)]
     if not aligned_lfs:
-        return True 
+        return True
         
     panel_lf = build_fsm_panel(pl.concat(aligned_lfs), pl.scan_parquet(dret_path), model_ckpt["config"], common_config)
     panel_df = panel_lf.collect(streaming=True)
-    
+
     curves_2d = prepare_curves(panel_df, model_ckpt["config"], common_config)
     result = evaluate_and_build_fsm(
         panel_df, curves_2d, model_ckpt["motif"], model_ckpt["config"], common_config
@@ -210,8 +208,8 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     dret_lf = pl.from_arrow(dret_pa).clone().lazy()
 
     panel_lf = build_fsm_panel(hf_lf, dret_lf, config, common_config)
-    result = discover_fsm_pattern(panel_lf, config, common_config)
 
+    result = discover_fsm_pattern(panel_lf, config, common_config)
     if result["status"] == "success":
         print(f"\n[Trail Success] Score: {result['metrics_score']:.4f} ; Config: {config}\n")
         tune.report({
@@ -239,19 +237,35 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     common_config, search_config = exp_config["common_params"], exp_config["search_bounds"]
 
     # =========================================================================
-    # read_parquet and put arrow into Ray Plasma
+    # scan_parquet replace read_parquet / Projection Pushdown
     # =========================================================================
+    lazy_frames = [
+        pl.scan_parquet(p) # .select(required_cols)
+        for p in train_paths
+        if os.path.exists(p)
+    ]
 
-    hf_dfs = [pl.read_parquet(p) for p in train_paths if os.path.exists(p)] 
-    if not hf_dfs: 
+    if not lazy_frames:
+        print(f"⚠️ {model_id} HPO Failed: No valid training parquet files found.")
         return False
-    
-    hf_pa = pl.concat(hf_dfs).to_arrow()
-    dret_pa = pl.read_parquet(dret_path, columns=["day", "sid", "close"]).to_arrow()
 
-    hf_ref = ray.put(hf_pa)
-    dret_ref = ray.put(dret_pa)
-    
+    hf_lazy = pl.concat(lazy_frames)
+    dret_lazy = pl.scan_parquet(dret_path).select(["day", "sid", "close"])
+
+    # =========================================================================
+    # Ray Plasma 
+    # =========================================================================
+    try:
+        hf_pa = hf_lazy.collect().to_arrow()
+        dret_pa = dret_lazy.collect().to_arrow()
+
+        hf_ref = ray.put(hf_pa)
+        dret_ref = ray.put(dret_pa)
+
+    except Exception as e:
+        print(f"💥 OOM or Engine Error during Polars collect: {str(e)}")
+        return False
+
     # =========================================================================
     # Ray search and Opt algo
     # =========================================================================
@@ -326,12 +340,9 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # filter by P-val and metrics_score
     # =========================================================================
     df_results = pl.from_pandas(results.get_dataframe())
-    # if "u_pval" not in df_results.columns or "metrics_score" not in df_results.columns:
-    #     print(f"⚠️ [Failed] to generate p_val and metrics_socre in {model_id}")
-    #     return False
 
     valid_trials = df_results.filter(
-        (pl.col("u_pval") <= 0.05) & 
+        (pl.col("u_pval") <= common_config["pval"]) & 
         (pl.col("metrics_score") > -9999.0)
     )
     
@@ -398,10 +409,10 @@ def node_update_fsm_matrix(model_id: int, prev_model_id: int, dret_path: str, tr
         pre_model_ckpt = pickle.load(f)
 
     prev_tune_config, prev_motif = pre_model_ckpt["config"], pre_model_ckpt["motif"]
-    hf_dfs = [pl.read_parquet(p) for p in train_paths if os.path.exists(p)]
-    if not hf_dfs: return False
+    hf_lfs = [pl.scan_parquet(p) for p in train_paths if os.path.exists(p)]
+    if not hf_lfs: return False
     
-    panel_df = build_fsm_panel(pl.concat(hf_dfs).lazy(), pl.scan_parquet(dret_path), prev_tune_config, common_config).collect(streaming=True)
+    panel_df = build_fsm_panel(pl.concat(hf_lfs), pl.scan_parquet(dret_path), prev_tune_config, common_config).collect(streaming=True)
     curves = prepare_curves(panel_df, prev_tune_config, common_config) 
 
     result = evaluate_and_build_fsm(panel_df, curves, prev_motif, prev_tune_config, common_config, skip_stats=True)
@@ -495,14 +506,20 @@ def wfo_pipeline(exp_config):
 
     # Setup Macro
     global_data = node_prepare_macro(common_config)
-    daily_df = pl.read_parquet(global_data["dret_path"], columns=["day"])
+    # daily_df = pl.read_parquet(global_data["dret_path"], columns=["day"])
+    daily_lazy = pl.scan_parquet(global_data["dret_path"]).select(["day"])
+    month_id_expr = (pl.col("day") // 100).cast(pl.Int32).alias("month_id")
 
     all_months = (
-        # daily_df.select((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
-        daily_df.select((pl.col("day") // 100).cast(pl.Int32).alias("month_id"))
-        .unique().sort("month_id")["month_id"].to_list()
+        daily_lazy
+        .select(month_id_expr)
+        .unique()                  # stream hash unique
+        .sort("month_id")          
+        .collect()                 
+        .get_column("month_id")    
+        .to_list()
     )
-    
+
     # Setup Walkforward
     TRAIN_WINDOW = common_config["train_window"]     
     STEP = common_config["oss_step"]     
@@ -555,6 +572,8 @@ def wfo_pipeline(exp_config):
 
 if __name__ == "__main__":
 
+    os.environ["MLFLOW_TRACKING_URI"] = "http://127.0.0.1:5000"
+
     load_dotenv()
 
     exp_config = {
@@ -581,6 +600,7 @@ if __name__ == "__main__":
             # stats 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
             "alternative": "greater", # stats
+            "pval": 0.1, # 0.05 too strict and least
 
             # hpo scores
             "win_rate": 0.5, # used to calculate hpo score 
@@ -590,8 +610,8 @@ if __name__ == "__main__":
             "downsample": [2, 3, 4, 5], # downsample for DTW
             "cross_days": [1, 2, 3], # concat cross_days of lagged curves to 2D array for DTW 
             "motif_minutes": [45, 60, 90, 120], # used from motif length intraday
-            "threshold_r": [0.3, 0.85], 
-            "num_trials": 100, 
+            "threshold_r": [0.65, 0.85], 
+            "num_trials": 300, 
             "max_concurrent_trials": 6
         }
     }

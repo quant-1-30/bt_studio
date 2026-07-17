@@ -1,131 +1,194 @@
 import polars as pl
+import numpy as np
+
+
+# def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
+#     # downsample_m = common_config.get("downsample_m", 1)
+
+#     ofi_expr = (
+#         (pl.col("close") * 2 - pl.col("high") - pl.col("low")) / 
+#         (pl.col("high") - pl.col("low") + 1e-8)
+#     ) * pl.col("amount")
+    
+#     feat_lf = (
+#         aligned_lf
+#         .with_columns([
+#             ofi_expr.alias("raw_ofi")
+#         ])
+#         .with_columns([
+#             pl.col("raw_ofi").cum_sum().over(["day", "sid"]).alias("cum_ofi"),
+#             pl.col("amount").cum_sum().over(["day", "sid"]).alias("cum_amount"),
+#             # ((pl.col("minute_idx") - 1) // downsample_m).cast(pl.Int32).alias("bar_idx")
+#             pl.col("minute_idx").alias("bar_idx")
+#         ])
+#         .with_columns([
+#             (pl.col("cum_ofi") / (pl.col("cum_amount") + 1e-8)).alias("ofi_ratio")
+#         ])
+#         .group_by(["day", "sid", "bar_idx"])
+#         .agg([
+#             pl.col("raw_ofi").sum().alias("agg_ofi"),
+#             pl.col("amount").sum().alias("agg_amount"),
+#             pl.col("close").last().alias("close"),
+#             pl.col("ofi_ratio").last().alias("ofi_ratio") 
+#         ])
+#         .sort(["day", "sid", "bar_idx"])
+#     )
+#     return feat_lf
 
 
 def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
-    # downsample_m = common_config.get("downsample_m", 1)
-
-    ofi_expr = (
-        (pl.col("close") * 2 - pl.col("high") - pl.col("low")) / 
-        (pl.col("high") - pl.col("low") + 1e-8)
-    ) * pl.col("amount")
+    eps = 1e-4 # 1 bp
+    min_w = common_config.get("min_factor_weight", 0.05)       
     
-    feat_lf = (
-        aligned_lf
+    sorted_lf = aligned_lf.sort(["day", "sid", "minute_idx"])
+    
+    step1_lf = (
+        sorted_lf
         .with_columns([
-            ofi_expr.alias("raw_ofi")
+            # over and shift(1)
+            (pl.col("close") - pl.col("close").over(["day", "sid"]).shift(1)).alias("close_diff"),
+            ((pl.col("high") - pl.col("low")) / (pl.col("close") + eps)).alias("pct")
         ])
         .with_columns([
-            pl.col("raw_ofi").cum_sum().over(["day", "sid"]).alias("cum_ofi"),
+            pl.col("close_diff").fill_null(
+                (pl.col("close") - pl.col("open")) # if alpha else pl.lit(0.0)
+            )
+        ])
+        .with_columns([
+            pl.col("close_diff").sign().cast(pl.Int8).alias("raw_dir")
+        ])
+        .with_columns([
+            (
+                pl.when(pl.col("raw_dir") != 0)
+                .then(pl.col("raw_dir"))
+                .otherwise(None)
+            )
+            .forward_fill()
+            .over(["day", "sid"])
+            .fill_null(0) 
+            .alias("direction")
+        ])
+    )
+    
+    step2_lf = (
+        step1_lf
+        .with_columns([
+            # Signed Amount (SA)
+            (pl.col("direction") * pl.col("amount")).alias("sa_step"),
+            
+            # Impact (IMP) 
+            (pl.col("direction") * pl.col("amount").sqrt()).alias("impact_step"),
+            pl.col("amount").sqrt().alias("sqrt_amount"),
+            
+            # Liquidity (LIQ) 
+            (pl.col("direction") * pl.col("amount") / (pl.col("pct") + eps)).alias("liquidity_step"),
+            (pl.col("amount") / (pl.col("pct") + eps)).alias("liquidity_scale")
+        ])
+    )
+    
+    step3_lf = (
+        step2_lf
+        .with_columns([
+            pl.col("sa_step").cum_sum().over(["day", "sid"]).alias("cum_sa"),
             pl.col("amount").cum_sum().over(["day", "sid"]).alias("cum_amount"),
-            # ((pl.col("minute_idx") - 1) // downsample_m).cast(pl.Int32).alias("bar_idx")
-            pl.col("minute_idx").alias("bar_idx")
+            
+            pl.col("impact_step").cum_sum().over(["day", "sid"]).alias("cum_impact"),
+            pl.col("sqrt_amount").cum_sum().over(["day", "sid"]).alias("cum_sqrt_amount"),
+            
+            pl.col("liquidity_step").cum_sum().over(["day", "sid"]).alias("cum_liquidity"),
+            pl.col("liquidity_scale").cum_sum().over(["day", "sid"]).alias("cum_liquidity_scale")
+        ])
+    )
+    
+    # 5. scale to [-1, 1]
+    step4_lf = (
+        step3_lf
+        .with_columns([
+            (pl.col("cum_sa") / (pl.col("cum_amount") + eps)).alias("sa_ratio"),
+            (pl.col("cum_impact") / (pl.col("cum_sqrt_amount") + eps)).alias("impact_ratio"),
+            (pl.col("cum_liquidity") / (pl.col("cum_liquidity_scale") + eps)).alias("liquidity_ratio")
+        ])
+    )
+    
+    # MAD Normalize
+    def robust_zscore_expr(col_name: str) -> pl.Expr:
+        median = pl.col(col_name).median().over(["day", "minute_idx"])
+        mad = (pl.col(col_name) - median).abs().median().over(["day", "minute_idx"])
+        robust_scale = 1.4826 * mad + 1e-6
+        return (pl.col(col_name) - median) / robust_scale
+
+    # MDP
+    step5_lf = (
+        step4_lf
+        .with_columns([
+            robust_zscore_expr("sa_ratio").alias("sa_z_tmp"),
+            robust_zscore_expr("impact_ratio").alias("imp_z_tmp"),
+            robust_zscore_expr("liquidity_ratio").alias("liq_z_tmp")
         ])
         .with_columns([
-            (pl.col("cum_ofi") / (pl.col("cum_amount") + 1e-8)).alias("ofi_ratio")
+            # E(X)=0, E(Y)=0,Cov(X,Y) = E(XY)
+            (pl.col("sa_z_tmp") * pl.col("imp_z_tmp")).mean().over(["day", "minute_idx"]).alias("rho_sa_imp"),
+            (pl.col("sa_z_tmp") * pl.col("liq_z_tmp")).mean().over(["day", "minute_idx"]).alias("rho_sa_liq"),
+            (pl.col("imp_z_tmp") * pl.col("liq_z_tmp")).mean().over(["day", "minute_idx"]).alias("rho_imp_liq")
         ])
-        .group_by(["day", "sid", "bar_idx"])
-        .agg([
-            pl.col("raw_ofi").sum().alias("agg_ofi"),
-            pl.col("amount").sum().alias("agg_amount"),
-            pl.col("close").last().alias("close"),
-            pl.col("ofi_ratio").last().alias("ofi_ratio") 
+        .with_columns([
+            (
+                1.0 - pl.col("rho_imp_liq")**2 - pl.col("rho_sa_imp") - pl.col("rho_sa_liq") + 
+                pl.col("rho_sa_imp") * pl.col("rho_imp_liq") + pl.col("rho_sa_liq") * pl.col("rho_imp_liq")
+            ).alias("w_sa_raw"),
+            
+            (
+                1.0 - pl.col("rho_sa_liq")**2 - pl.col("rho_sa_imp") - pl.col("rho_imp_liq") + 
+                pl.col("rho_sa_imp") * pl.col("rho_sa_liq") + pl.col("rho_sa_liq") * pl.col("rho_imp_liq")
+            ).alias("w_imp_raw"),
+            
+            (
+                1.0 - pl.col("rho_sa_imp")**2 - pl.col("rho_sa_liq") - pl.col("rho_imp_liq") + 
+                pl.col("rho_sa_imp") * pl.col("rho_sa_liq") + pl.col("rho_sa_imp") * pl.col("rho_imp_liq")
+            ).alias("w_liq_raw")
         ])
+        .with_columns([
+            pl.max_horizontal(pl.col("w_sa_raw"), min_w).alias("w_sa_pos"),
+            pl.max_horizontal(pl.col("w_imp_raw"), min_w).alias("w_imp_pos"),
+            pl.max_horizontal(pl.col("w_liq_raw"), min_w).alias("w_liq_pos")
+        ])
+        .with_columns([
+            (pl.col("w_sa_pos") + pl.col("w_imp_pos") + pl.col("w_liq_pos")).alias("w_sum")
+        ])
+        .with_columns([
+            (pl.col("w_sa_pos") / pl.col("w_sum")).alias("w_sa"),
+            (pl.col("w_imp_pos") / pl.col("w_sum")).alias("w_imp"),
+            (pl.col("w_liq_pos") / pl.col("w_sum")).alias("w_liq")
+        ])
+        .with_columns([
+            # 利用动态权重将多维特征凝聚为单一的一维合成得分
+            (
+                pl.col("w_sa") * pl.col("sa_z_tmp") + 
+                pl.col("w_imp") * pl.col("imp_z_tmp") + 
+                pl.col("w_liq") * pl.col("liq_z_tmp")
+            ).alias("raw_synthetic_score")
+        ])
+        .select(["day", "sid", "minute_idx", "close", "raw_synthetic_score"])
+    )
+
+    def expr_tanh(expr: pl.Expr) -> pl.Expr: # tannh transform
+        return ( (2 * expr).exp() - 1 ) / ( (2 * expr).exp() + 1 )
+
+    def numpy_tanh(s: pl.Series) -> pl.Series:
+        return pl.Series(np.tanh(s.to_numpy()))
+
+    final_lf = (
+        step5_lf
+        .with_columns([
+            robust_zscore_expr("raw_synthetic_score").alias("z_score_tmp")
+        ])
+        .with_columns([
+        expr_tanh(pl.col("z_score_tmp")).alias("ofi_ratio") # -1, 1
+        # pl.col("z_score_tmp").map_batches(numpy_tanh).alias("ofi_ratio")
+        ])
+        .rename({"minute_idx": "bar_idx"})
+        .select(["day", "sid", "bar_idx", "close", "ofi_ratio"])
         .sort(["day", "sid", "bar_idx"])
     )
-    return feat_lf
-
-
-# def build_impact_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
-#     return (
-#         aligned_lf.sort(["day", "sid", "minute_idx"])
-#         .with_columns([
-#             pl.col("minute_idx").alias("bar_idx"),
-#             pl.col("close").shift(1).over(["day", "sid"]).alias("prev_close")
-#         ])
-#         .with_columns(pl.col("prev_close").fill_null(pl.col("open")))
-#         .with_columns([
-#             (pl.col("close") - pl.col("prev_close")).sign().alias("direction"),
-#             pl.col("amount").sqrt().alias("sqrt_amount")
-#         ])
-#         .with_columns([
-#             (pl.col("direction") * pl.col("sqrt_amount")).alias("impact_step")
-#         ])
-#         .with_columns([
-#             (
-#                 pl.col("impact_step").cum_sum().over(["day", "sid"]) / 
-#                 (pl.col("sqrt_amount").sum().over(["day", "sid"]) + 1e-8)
-#             ).alias("daily_curve")
-#         ])
-#         .group_by(["day", "sid", "bar_idx"])
-#         .agg([pl.col("daily_curve").last(), pl.col("close").last()])
-#     )
-
-
-# def build_liquidity_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
-#     """行为金融学：流动性吸收与羊群耗竭曲线"""
-#     return (
-#         aligned_lf.sort(["day", "sid", "minute_idx"])
-#         .with_columns([
-#             pl.col("minute_idx").alias("bar_idx"),
-#             pl.col("close").shift(1).over(["day", "sid"]).alias("prev_close")
-#         ])
-#         .with_columns(pl.col("prev_close").fill_null(pl.col("open")))
-#         .with_columns([
-#             # 1. 真实日内波动幅度 (True Range percentage)
-#             (
-#                 pl.max_horizontal(pl.col("high"), pl.col("prev_close")) - 
-#                 pl.min_horizontal(pl.col("low"), pl.col("prev_close"))
-#             ) / (pl.col("prev_close") + 1e-8).alias("true_range_pct"),
-#             # 2. 资金偏向：收盘价高于开盘价视为主动买盘承接
-#             (pl.col("close") - pl.col("open")).sign().alias("absorption_dir")
-#         ])
-#         .with_columns([
-#             # 3. 行为金融学核弹：高斯平滑惩罚 (Gaussian Volatility Penalty)
-#             # 假设波动率超过 1% (0.01) 时，exp(-100 * 0.01) = 0.36，权重衰减；
-#             # 若波动率为 0.1%，exp(-0.1) = 0.90，权重极大保留！
-#             (
-#                 pl.col("amount").log() * 
-#                 (-100.0 * pl.col("true_range_pct")).exp() * 
-#                 pl.col("absorption_dir")
-#             ).alias("absorption_step")
-#         ])
-#         .with_columns([
-#             # 4. 积分成 1D 曲线
-#             pl.col("absorption_step").cum_sum().over(["day", "sid"]).alias("daily_curve")
-#         ])
-#         .group_by(["day", "sid", "bar_idx"])
-#         .agg([pl.col("daily_curve").last(), pl.col("close").last()])
-#     )
-
-
-# def build_divergence_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
-#     """信息论：量价背离与动量点火曲线"""
-#     return (
-#         aligned_lf.sort(["day", "sid", "minute_idx"])
-#         .with_columns([
-#             pl.col("minute_idx").alias("bar_idx"),
-#             # 1. 价格走势的累计收益率 (Price Trajectory)
-#             (pl.col("close") / pl.col("open").first().over(["day", "sid"]) - 1.0).alias("cum_ret")
-#         ])
-#         .with_columns([
-#             # 2. 对价格和成交量分别在当天进行横向 Z-Score 归一化 (提取相对强弱)
-#             ((pl.col("cum_ret") - pl.col("cum_ret").mean().over(["day", "sid"])) / 
-#              (pl.col("cum_ret").std().over(["day", "sid"]) + 1e-8)).alias("z_price"),
-             
-#             ((pl.col("amount") - pl.col("amount").mean().over(["day", "sid"])) / 
-#              (pl.col("amount").std().over(["day", "sid"]) + 1e-8)).alias("z_volume")
-#         ])
-#         .with_columns([
-#             # 3. 1D 坍缩：量价背离动量
-#             # 价格 Z-score 与 成交量 Z-score 的乘积。
-#             # 价量齐升为正，价跌量缩为正（健康趋势）；价升量缩为负（诱多背离）
-#             (pl.col("z_price") * pl.col("z_volume")).alias("divergence_step")
-#         ])
-#         .with_columns([
-#             # 4. 积分成曲线
-#             pl.col("divergence_step").cum_sum().over(["day", "sid"]).alias("daily_curve")
-#         ])
-#         .group_by(["day", "sid", "bar_idx"])
-#         .agg([pl.col("daily_curve").last(), pl.col("close").last()])
-#     )
-
+    
+    return final_lf
