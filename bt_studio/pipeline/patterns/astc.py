@@ -10,20 +10,45 @@ from typing import List, Dict, Any
 from numpy.lib.stride_tricks import sliding_window_view
 
 
+# def prepare_curves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
+#     """DataFrame (N, L) tensor and NaN boarder"""
+#     cross_days = int(tune_config["cross_days"])
+
+#     lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
+#     lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
+    
+#     # lag_0 today eg 14:55  np.nan！
+#     execlude_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
+#     if execlude_bars > 0:
+#         lag_arrays[-1][:, -execlude_bars:] = np.nan
+
+#     curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
+#     return curves_2d    # Shape: (N, L)
+
+
 def prepare_curves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
-    """DataFrame (N, L) tensor and NaN boarder"""
+    """DataFrame to (N, L) tensor with Lookahead prevention and NaN Masking"""
     cross_days = int(tune_config["cross_days"])
+    bars_per_day = 240 // int(tune_config["downsample"])
 
     lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
-    lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
+
+    # np.nan list --> None 
+    nan_pad = np.full(bars_per_day, np.nan, dtype=np.float64)
     
-    # lag_0 today eg 14:55  np.nan！
+    lag_arrays = []
+    for col in lag_cols:
+        # Polars  None (Null) ---> nan_pad
+        raw_list = panel_df[col].to_list()
+        filled_list = [nan_pad if x is None else x for x in raw_list]
+        lag_arrays.append(np.vstack(filled_list))
+        
     execlude_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
     if execlude_bars > 0:
         lag_arrays[-1][:, -execlude_bars:] = np.nan
 
     curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
-    return curves_2d    # Shape: (N, L)
+    return curves_2d    
 
 
 def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) -> List[np.ndarray]:
@@ -77,28 +102,29 @@ def calc_min_subseq_dtw(
     if L < motif_len:
         return np.inf
 
-    # 1. Shape: (window, motif_len)
+    # 1. Shape: (window, motif_len) and Zero_copy
     windows = sliding_window_view(row_curve, window_shape=motif_len)
     
-    # 2. vector mask
+    # 2. mask
     is_valid_window = ~np.isnan(windows).any(axis=-1)
+    valid_windows = windows[is_valid_window]
+    
+    if len(valid_windows) == 0:
+        return np.inf
+        
+    # 3. Z-Score Vectorize
+    means = np.mean(valid_windows, axis=1, keepdims=True)
+    stds = np.std(valid_windows, axis=1, keepdims=True) + 1e-8
+    z_windows = (valid_windows - means) / stds
+    
+    # row continous
+    z_windows = np.ascontiguousarray(z_windows, dtype=np.float64)
     
     min_dist = np.inf
-    # 3. loop over valid windows
-    for i in range(len(windows)):
-        if not is_valid_window[i]:
-            continue
-            
-        sub_seq = windows[i]
-        
-        std = np.std(sub_seq) + 1e-8
-        z_sub = (sub_seq - np.mean(sub_seq)) / std
-        
-        z_sub = np.ascontiguousarray(z_sub, dtype=np.float64)
-        
-        d = dtw.distance_fast(z_sub, z_motif, window=dtw_w, max_dist=min(min_dist, threshold_d))
+    
+    for i in range(len(z_windows)):
+        d = dtw.distance_fast(z_windows[i], z_motif, window=dtw_w, max_dist=min(min_dist, threshold_d))
         if d < min_dist:
             min_dist = d
             
-    return min_dist 
-
+    return float(min_dist)
