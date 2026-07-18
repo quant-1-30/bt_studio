@@ -10,7 +10,7 @@ def validate_parameter_plateau_fanova(df_results: pl.DataFrame, best_config: dic
     valid_df = df_results.drop_nulls(subset=param_cols + ["metrics_score"])
     
     if valid_df.height < 20: 
-        return True 
+        return False
 
     # param distribution
     distributions = {}

@@ -196,7 +196,7 @@ def evaluate_and_build_fsm(
         }
 
     # =================================================================
-    # 6. Rank and Ret Statistics Pval
+    # 6. Rank and Ret Statistics u_pval
     # =================================================================
 
     cond_ranks = triggers["rank_trajectory"].drop_nulls().to_numpy()

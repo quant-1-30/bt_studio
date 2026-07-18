@@ -115,7 +115,7 @@ def evaluate_and_build_fsm_md(
         }
 
     # =======================================================================
-    # 5. Ranking Statistics Pval
+    # 5. Ranking Statistics u_pval
     # =======================================================================
     cond_ranks = triggers["rank_1"].drop_nulls().to_numpy()
     uncond_ranks = eval_df["rank_1"].drop_nulls().to_numpy() 

@@ -97,8 +97,8 @@ class Plot_OldSync(with_metaclass(MetaParams, object)):
     params = (('scheme', PlotScheme()),)
 
     def __init__(self, **kwargs):
-        for pname, pvalue in kwargs.items():
-            setattr(self.p.scheme, pname, pvalue)
+        for pname, u_pvalue in kwargs.items():
+            setattr(self.p.scheme, pname, u_pvalue)
         if not hasattr(self.p.scheme, 'locbg'):
             setattr(self.p.scheme, 'locbg', 'white')
             setattr(self.p.scheme, 'locbgother', 'white')

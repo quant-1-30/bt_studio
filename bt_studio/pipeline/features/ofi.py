@@ -2,40 +2,6 @@ import polars as pl
 import numpy as np
 
 
-# def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
-#     # downsample_m = common_config.get("downsample_m", 1)
-
-#     ofi_expr = (
-#         (pl.col("close") * 2 - pl.col("high") - pl.col("low")) / 
-#         (pl.col("high") - pl.col("low") + 1e-8)
-#     ) * pl.col("amount")
-    
-#     feat_lf = (
-#         aligned_lf
-#         .with_columns([
-#             ofi_expr.alias("raw_ofi")
-#         ])
-#         .with_columns([
-#             pl.col("raw_ofi").cum_sum().over(["day", "sid"]).alias("cum_ofi"),
-#             pl.col("amount").cum_sum().over(["day", "sid"]).alias("cum_amount"),
-#             # ((pl.col("minute_idx") - 1) // downsample_m).cast(pl.Int32).alias("bar_idx")
-#             pl.col("minute_idx").alias("bar_idx")
-#         ])
-#         .with_columns([
-#             (pl.col("cum_ofi") / (pl.col("cum_amount") + 1e-8)).alias("ofi_ratio")
-#         ])
-#         .group_by(["day", "sid", "bar_idx"])
-#         .agg([
-#             pl.col("raw_ofi").sum().alias("agg_ofi"),
-#             pl.col("amount").sum().alias("agg_amount"),
-#             pl.col("close").last().alias("close"),
-#             pl.col("ofi_ratio").last().alias("ofi_ratio") 
-#         ])
-#         .sort(["day", "sid", "bar_idx"])
-#     )
-#     return feat_lf
-
-
 def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     eps = 1e-4 # 1 bp
     min_w = common_config.get("min_factor_weight", 0.05)       

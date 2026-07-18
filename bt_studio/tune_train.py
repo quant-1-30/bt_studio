@@ -222,7 +222,7 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
         print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
         tune.report({
             "metrics_score": result["metrics_score"], 
-            "u_pval": 1.0, 
+            "u_pval": result.get("u_pval", 1.0), 
             "learned_motif": [], 
             "fsm_matrix": {},
             "reason": result.get("reason", "Unknown")
@@ -339,10 +339,10 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # =========================================================================
     # filter by P-val and metrics_score
     # =========================================================================
-    df_results = pl.from_pandas(results.get_dataframe())
+    df_results = pl.from_pandas(results.get_dataframe()) # abandon dict fsm_matrix
 
     valid_trials = df_results.filter(
-        (pl.col("u_pval") <= common_config["pval"]) & 
+        (pl.col("u_pval") <= common_config["u_pval"]) & 
         (pl.col("metrics_score") > -9999.0)
     )
     
@@ -376,8 +376,23 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # =========================================================================
     # Model Save
     # =========================================================================
+    # Ray ResultGrid ---> Result
+    best_trial_id = best_model_dict["trial_id"]
+    best_ray_result = None
+    for r in results:
+        if r.trial_id == best_trial_id:
+            best_ray_result = r
+            break
+            
+    if best_ray_result is None:
+        raise KeyError(f"Failed to locate original Ray Result for trial_id: {best_trial_id}")
+    
+    # retrieve Python object from Ray
+    actual_fsm_matrix = best_ray_result.metrics.get("fsm_matrix", {})
+    actual_learned_motif = best_ray_result.metrics.get("learned_motif", [])
+
+    # trial config
     best_config = {k.replace("config/", ""): v for k, v in best_model_dict.items() if k.startswith("config/")}
-    # FSMPredictor / build_fsm_panel ----> m and threshold_d
     if "m" not in best_config:
         best_config["m"] = int(best_config["motif_minutes"] // best_config["downsample"])
     if "threshold_d" not in best_config:
@@ -385,8 +400,8 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     
     model_ckpt = {
         "config": best_config, 
-        "motif": np.array(best_model_dict["learned_motif"]), 
-        "fsm_matrix": best_model_dict["fsm_matrix"],
+        "motif": np.array(actual_learned_motif),       
+        "fsm_matrix": actual_fsm_matrix,               
         "valid_month": model_id 
     }
     
@@ -600,7 +615,7 @@ if __name__ == "__main__":
             # stats 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
             "alternative": "greater", # stats
-            "pval": 0.1, # 0.05 too strict and least
+            "u_pval": 0.2, # 0.05 too strict and least
 
             # hpo scores
             "win_rate": 0.5, # used to calculate hpo score 
@@ -610,9 +625,9 @@ if __name__ == "__main__":
             "downsample": [2, 3, 4, 5], # downsample for DTW
             "cross_days": [1, 2, 3], # concat cross_days of lagged curves to 2D array for DTW 
             "motif_minutes": [45, 60, 90, 120], # used from motif length intraday
-            "threshold_r": [0.65, 0.85], 
-            "num_trials": 300, 
-            "max_concurrent_trials": 6
+            "threshold_r": [0.60, 0.85], 
+            "num_trials": 400, 
+            "max_concurrent_trials": 8
         }
     }
 
