@@ -13,18 +13,19 @@ def calculate_hpo_score(
     
     excess_ret = np.median(cond_rets) - np.median(uncond_rets) 
     win_rate = np.mean(cond_rets > 0)
+    eps = common_config["eps"]
     
     alternative = common_config["alternative"]
     # avoid log 0
     if alternative == "greater":
-        excess_factor = max(excess_ret, 1e-4) 
+        excess_factor = max(excess_ret, eps) 
     elif alternative == "less":
-        excess_factor = max(-excess_ret, 1e-4)
+        excess_factor = max(-excess_ret, eps)
     else: 
-        excess_factor = max(abs(excess_ret), 1e-4)
+        excess_factor = max(abs(excess_ret), eps)
         
-    safe_u_pval = max(u_pval, 1e-4)
-    safe_win_rate = max(win_rate, 1e-4)
+    safe_u_pval = max(u_pval, eps)
+    safe_win_rate = max(win_rate, eps)
     
     # ln(L) penalty high p-val and low win_rate
     ln_L = np.log(excess_factor) + np.log(safe_win_rate) - np.log(safe_u_pval)

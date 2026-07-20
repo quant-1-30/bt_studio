@@ -35,45 +35,53 @@ def prepare_curves(panel_df: pl.DataFrame, tune_config: dict, common_config: dic
     return curves_2d    
 
 
-def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) -> List[np.ndarray]:
-    if len(raw_array) == 0:
+def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dict) -> List[np.ndarray]:
+    m = config["m"]
+    if raw_array.size < m or m < 3:
         return []
 
-    m = config["m"]
     threshold_d = config["threshold_d"]
     
     try:
         mp = stumpy.stump(raw_array, m=m)
-    except Exception as e:
-        print(f"Stumpy failed to process array: {e}")
+    except Exception:
         return []
 
-    distances = np.copy(mp[:, 0])
-    # mp two different dtype --> object --> float64
-    distances = np.copy(mp[:, 0]).astype(np.float64)
-    distances[distances <= 1e-5] = np.inf
+    distances = np.ascontiguousarray(mp[:, 0], dtype=np.float64)
+    
+    shape = (raw_array.size - m + 1, m)
+    strides = (raw_array.strides[0], raw_array.strides[0])
+    windows = np.lib.stride_tricks.as_strided(raw_array, shape=shape, strides=strides) # row --> next row 8byte
+    
+    has_nan = np.any(np.isnan(windows), axis=1)
+    
+    # np.std  ---> np.nanstd and np.errstate supress NaN RuntimeWarning
+    with np.errstate(invalid='ignore'):
+        std_vals = np.std(windows, axis=1)
+        is_even = std_vals < common_config["eps"]
+        
+    bad_mask = has_nan | is_even
+    
+    distances[bad_mask[:distances.size]] = np.inf
+    distances[np.isnan(distances) | np.isinf(distances)] = np.inf
 
     if np.all(np.isinf(distances)):
         return []
 
     candidates = []
-    for _ in range(top_k):
-        anchor_idx = int(np.nanargmin(distances)) # argmin
+    
+    for _ in range(common_config["topk"]):
+        anchor_idx = int(np.argmin(distances)) 
         v_d = distances[anchor_idx]
         
         if v_d > threshold_d or np.isinf(v_d):
             break
             
-        candidate_motif = raw_array[anchor_idx : anchor_idx + m]
-        if np.isnan(candidate_motif).any():
-            distances[anchor_idx] = np.inf
-            continue
-
-        candidates.append(candidate_motif)
+        candidates.append(raw_array[anchor_idx : anchor_idx + m])
         
-        # --- Exclusion Zone --- anchor around m keep isolate
+        # --- Exclusion Zone ---
         exclude_start = max(0, anchor_idx - m)
-        exclude_end = min(len(distances), anchor_idx + m)
+        exclude_end = min(distances.size, anchor_idx + m)
         distances[exclude_start:exclude_end] = np.inf
     return candidates
 

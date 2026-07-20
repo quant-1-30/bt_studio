@@ -622,20 +622,20 @@ if __name__ == "__main__":
             "ranking_ratio": 0.25, # ranking
             "decay": 1.0, # used for T+1 -> T+3 compress
 
+            "trigger": 20, # dtw distance
+            "topk": 5, # candidate
+
             # stats 
             "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
             "alternative": "greater", # stats
             "u_pval": 0.2, # 0.05 too strict and least
-
-            # hpo scores
-            "win_rate": 0.5, # used to calculate hpo score 
         },
 
         "search_bounds": {
-            "downsample": [2, 3, 4, 5], # downsample for DTW
-            "cross_days": [1, 2, 3], # concat cross_days of lagged curves to 2D array for DTW 
-            "motif_minutes": [45, 60, 90, 120], # used from motif length intraday
-            "threshold_r": [0.60, 0.85], 
+            "downsample": [3, 4, 5], # downsample for DTW
+            "cross_days": [1, 2], # concat cross_days of lagged curves to 2D array for DTW 
+            "motif_minutes": [45, 60, 90], # used from motif length intraday
+            "threshold_r": [0.55, 0.80], 
             "num_trials": 400, 
             "max_concurrent_trials": 8
         }

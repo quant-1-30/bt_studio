@@ -108,15 +108,17 @@ def discover_fsm_pattern(
     nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
     stumpy_1d_array = np.hstack([clean_curves, nan_buffer]).flatten()[:-m] # abundan last m np.nan
 
-    candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, top_k=5)
+    candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, common_config)
     
     if not candidate_motifs: 
         return {"status": "failed", "reason": "Not Found Motif", "metrics_score": -9999.0}
     
     best_result, highest_score = None, -9999.0
+    eps = common_config["eps"]
+
     for motif in candidate_motifs:
 
-        if np.nanstd(motif) < 1e-4: 
+        if np.nanstd(motif) < eps: 
             continue
 
         result = evaluate_and_build_fsm(

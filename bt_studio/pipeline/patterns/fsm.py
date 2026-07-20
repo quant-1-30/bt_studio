@@ -30,6 +30,7 @@ def extract_fsm_matrix(
     windows = [col.split("_")[-1] for col in bin_cols]
     num_windows = len(windows)
     
+    # Laplace Smoothing ---> np.ones
     trans_macro_t0 = np.ones((n_macro_states, n_ret_states), dtype=np.float64) 
     # 2. T_{i} -> T_{i+1}
     trans_t_t = [np.ones((n_ret_states, n_ret_states), dtype=np.float64) for _ in range(num_windows - 1)]
@@ -175,7 +176,7 @@ def evaluate_and_build_fsm(
     triggers = eval_df.filter(pl.col("distance") <= threshold_d)
     complementary_df = eval_df.filter(pl.col("distance") > threshold_d)
     
-    if triggers.height < 5:
+    if triggers.height < common_config["trigger"]:
         return {"status": "failed", "reason": f"DTW (n={triggers.height}) not enough", "metrics_score": -9999.0}
     
     # =====================================================================================================================
@@ -241,9 +242,12 @@ def evaluate_and_build_fsm(
     cond_ranks = triggers["rank_trajectory"].drop_nulls().to_numpy()
     uncond_ranks = complementary_df["rank_trajectory"].drop_nulls().to_numpy() 
     
-    n_triggers = len(cond_ranks)
-    if n_triggers < 10 or np.std(cond_ranks) < 1e-8 or len(uncond_ranks) == 0:
-         return {"status": "failed", "reason": f" Rank_trajectory trigger ({n_triggers}) <= 10", "metrics_score": -9999.0}
+    # U Test at least >= 10
+    min_test_samples = max(10, common_config["triggers"] // 3)
+    stats_triggers = len(cond_ranks)
+
+    if stats_triggers < min_test_samples or np.std(cond_ranks) < 1e-8 or len(uncond_ranks) == 0:
+         return {"status": "failed", "reason": f" Rank_trajectory trigger ({stats_triggers}) <= 10", "metrics_score": -9999.0}
     
     try:
         u_stat, u_pval = stats.mannwhitneyu(cond_ranks, uncond_ranks, alternative=common_config["alternative"])
