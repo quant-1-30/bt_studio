@@ -10,22 +10,6 @@ from typing import List, Dict, Any
 from numpy.lib.stride_tricks import sliding_window_view
 
 
-# def prepare_curves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
-#     """DataFrame (N, L) tensor and NaN boarder"""
-#     cross_days = int(tune_config["cross_days"])
-
-#     lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
-#     lag_arrays = [np.vstack(panel_df[col].to_list()) for col in lag_cols]
-    
-#     # lag_0 today eg 14:55  np.nan！
-#     execlude_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
-#     if execlude_bars > 0:
-#         lag_arrays[-1][:, -execlude_bars:] = np.nan
-
-#     curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
-#     return curves_2d    # Shape: (N, L)
-
-
 def prepare_curves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
     """DataFrame to (N, L) tensor with Lookahead prevention and NaN Masking"""
     cross_days = int(tune_config["cross_days"])
@@ -81,6 +65,10 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, top_k: int = 5) ->
             break
             
         candidate_motif = raw_array[anchor_idx : anchor_idx + m]
+        if np.isnan(candidate_motif).any():
+            distances[anchor_idx] = np.inf
+            continue
+
         candidates.append(candidate_motif)
         
         # --- Exclusion Zone --- anchor around m keep isolate
@@ -117,14 +105,20 @@ def calc_min_subseq_dtw(
     stds = np.std(valid_windows, axis=1, keepdims=True) + 1e-8
     z_windows = (valid_windows - means) / stds
     
-    # row continous
-    z_windows = np.ascontiguousarray(z_windows, dtype=np.float64)
-    
     min_dist = np.inf
     
     for i in range(len(z_windows)):
-        d = dtw.distance_fast(z_windows[i], z_motif, window=dtw_w, max_dist=min(min_dist, threshold_d))
+        z_sub = np.ascontiguousarray(z_windows[i], dtype=np.float64) # row contiguous
+
+        d = dtw.distance_fast(
+            z_sub, 
+            z_motif, 
+            window=dtw_w, 
+            max_dist=min(min_dist, threshold_d)
+        )
         if d < min_dist:
             min_dist = d
-            
+            if min_dist <= 1e-6:
+                return float(min_dist)
+
     return float(min_dist)

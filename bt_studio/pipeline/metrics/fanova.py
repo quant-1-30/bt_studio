@@ -77,10 +77,11 @@ def validate_parameter_plateau_fanova(df_results: pl.DataFrame, best_config: dic
         (pl.col(f"config/{top2_name}").is_between(b2_min, b2_max))
     )
     
-    if nearby_trials.height > 1:
+    score_std = valid_df["metrics_score"].std()
+    if nearby_trials.height > 0 and score_std > 0:
         nearby_mean = nearby_trials["metrics_score"].mean()
-        if nearby_mean < best_score * 0.30:
-            print(f"❌ fANOVA {top1_name} in isolated peak and near score {nearby_mean:.1f} (Best: {best_score:.1f})")
+        if nearby_mean < best_score - 1.5 * score_std:
+            print(f"❌ fANOVA isolated peak detected. Score dropped heavily.")
             return False
             
     print(f"pass plate and fANOVA topk core: {top1_name}({top1_imp:.1%}), {top2_name}({top2_imp:.1%})")

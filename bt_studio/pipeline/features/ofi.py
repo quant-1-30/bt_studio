@@ -3,22 +3,22 @@ import numpy as np
 
 
 def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
-    eps = 1e-4 # 1 bp
-    min_w = common_config.get("min_factor_weight", 0.05)       
+    eps = common_config["eps"]
+    min_w = common_config["min_factor_weight"]   
     
     sorted_lf = aligned_lf.sort(["day", "sid", "minute_idx"])
     
     step1_lf = (
-        sorted_lf
+        aligned_lf.sort(["day", "sid", "minute_idx"])
         .with_columns([
-            # over and shift(1)
-            (pl.col("close") - pl.col("close").over(["day", "sid"]).shift(1)).alias("close_diff"),
+            # (pl.col("close") - pl.col("close").over(["day", "sid"]).shift(1)).alias("close_diff"), 
+            (pl.col("close") - pl.col("close").shift(1).over(["day", "sid"])).alias("close_diff"),
             ((pl.col("high") - pl.col("low")) / (pl.col("close") + eps)).alias("pct")
         ])
         .with_columns([
             pl.col("close_diff").fill_null(
-                (pl.col("close") - pl.col("open")) # if alpha else pl.lit(0.0)
-            )
+                pl.col("close") - pl.col("open") # # if alpha else pl.lit(0.0)
+            ) 
         ])
         .with_columns([
             pl.col("close_diff").sign().cast(pl.Int8).alias("raw_dir")
@@ -29,12 +29,12 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
                 .then(pl.col("raw_dir"))
                 .otherwise(None)
             )
-            .forward_fill()
-            .over(["day", "sid"])
+            .forward_fill().over(["day", "sid"]) 
             .fill_null(0) 
             .alias("direction")
         ])
     )
+
     
     step2_lf = (
         step1_lf
@@ -137,24 +137,17 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
         .select(["day", "sid", "minute_idx", "close", "raw_synthetic_score"])
     )
 
-    def expr_tanh(expr: pl.Expr) -> pl.Expr: # tannh transform
-        return ( (2 * expr).exp() - 1 ) / ( (2 * expr).exp() + 1 )
-
-    def numpy_tanh(s: pl.Series) -> pl.Series:
-        return pl.Series(np.tanh(s.to_numpy()))
-
     final_lf = (
         step5_lf
         .with_columns([
             robust_zscore_expr("raw_synthetic_score").alias("z_score_tmp")
         ])
         .with_columns([
-        expr_tanh(pl.col("z_score_tmp")).alias("ofi_ratio") # -1, 1
-        # pl.col("z_score_tmp").map_batches(numpy_tanh).alias("ofi_ratio")
+            pl.col("z_score_tmp").tanh().alias("ofi_ratio") 
         ])
         .rename({"minute_idx": "bar_idx"})
         .select(["day", "sid", "bar_idx", "close", "ofi_ratio"])
         .sort(["day", "sid", "bar_idx"])
     )
-    
     return final_lf
+    

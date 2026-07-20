@@ -21,18 +21,31 @@ def find_pareto_front(df_results: pl.DataFrame, common_config: dict) -> pl.DataF
         ).alias("complexity")
     ])
     
-    scores = valid_df["metrics_score"].to_numpy()
-    complexities = valid_df["complexity"].to_numpy()
+    # scores = valid_df["metrics_score"].to_numpy()
+    # complexities = valid_df["complexity"].to_numpy()
+    min_score = valid_df["metrics_score"].min()
+    valid_df = valid_df.with_columns(
+        ((pl.col("metrics_score") - min_score + 1.0) / pl.col("complexity")).alias("efficiency")
+    )
     
-    # broadcast ---> row control by column
-    S_diff = scores[None, :] - scores[:, None] # eg [[10, 20]] - [[10], [20]]
-    C_diff = complexities[None, :] - complexities[:, None] 
+    efficiency = valid_df["efficiency"].to_numpy()
+    density = valid_df["valid_sample_ratio"].to_numpy() 
+    autocorr = valid_df["autocorr"].to_numpy()          
     
-    dominates = (S_diff >= 0) & (C_diff <= 0) & ((S_diff > 0) | (C_diff < 0))
+    # row control by column ---> colj - rowi
+    Eff_diff = eff[None, :] - eff[:, None] 
+    Den_diff = density[None, :] - density[:, None]
+    Auto_diff = autocorr[None, :] - autocorr[:, None]
+    
+    dominates = (
+        (Eff_diff >= 0) & (Den_diff >= 0) & (Auto_diff >= 0) & 
+        ((Eff_diff > 0) | (Den_diff > 0) | (Auto_diff > 0))
+    )
+    
     is_dominated = dominates.any(axis=1)
     
     return valid_df.filter(~is_dominated)
-
+    
 
 def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict: # Shift-and-Divide Utility
     if pareto_df.height == 0: 
@@ -48,3 +61,33 @@ def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict: # Shift-and-
         .sort("efficiency", descending=True)
         .row(0, named=True)
     )
+
+
+def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict | None:
+    if pareto_df.height == 0: 
+        return None
+    
+    # =========================================================================
+    # avoid score stuck in zero or negative
+    # =========================================================================
+    AUTOCORR_SHIFT = 1.1        # [-1, 1] ---> [0.1, 2.1]
+    SAMPLE_RATIO_FLOOR = 0.1    # [0, 1] ---> [0.1, 1.1]
+    
+    utility_lf = (
+        pareto_df.lazy()
+        .with_columns(
+            (
+                pl.col("efficiency") * 
+                (pl.col("autocorr") + AUTOCORR_SHIFT) * 
+                (pl.col("valid_sample_ratio") + SAMPLE_RATIO_FLOOR)
+            ).alias("final_utility")
+        )
+        .sort("final_utility", descending=True)
+        .limit(1) # heap
+    )
+    
+    final_best_df = utility_lf.collect()
+    if final_best_df.height == 0:
+        return None
+        
+    return final_best_df.to_dicts()[0] # .row(n, named=True) heavy ops

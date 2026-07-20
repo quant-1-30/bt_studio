@@ -341,17 +341,23 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # =========================================================================
     df_results = pl.from_pandas(results.get_dataframe()) # abandon dict fsm_matrix
 
-    valid_trials = df_results.filter(
-        (pl.col("u_pval") <= common_config["u_pval"]) & 
-        (pl.col("metrics_score") > -9999.0)
-    )
-    
+    valid_trials = df_results.filter(pl.col("metrics_score") > -9990.0)
     if valid_trials.height == 0:
-        print(f"⚠️ [Failed] {model_id} satisfy P-val <= 0.05 and high score")
+        print(f"⚠️ [Failed] {model_id} all trival score -9999.0")
         return False
-        
-    # Best Trial
-    best_valid_row = valid_trials.sort("metrics_score", descending=True).row(0, named=True)
+
+    max_pval = common_config.get("u_pval", 0.2)
+    min_triggers = common_config.get("min_triggers", 30)
+    
+    stats_valid_trials = math_valid_trials.filter(
+        (pl.col("u_pval") <= max_pval) & 
+        (pl.col("trigger_count") >= min_triggers)
+    )
+    if stats_valid_trials.height == 0:
+        print(f"⚠️ [Failed] {model_id} found P-val <= {max_pval} and reach bottom triggers")
+        return False
+
+    best_valid_row = stats_valid_trials.sort("metrics_score", descending=True).row(0, named=True)
     best_valid_score = best_valid_row["metrics_score"]
     best_valid_config = {k.replace("config/", ""): v for k, v in best_valid_row.items() if k.startswith("config/")}
 
@@ -601,7 +607,11 @@ if __name__ == "__main__":
 
             # train / oss 
             "train_window": 12,
-            "oss_step": 6, 
+            "oss_step": 6,
+
+            # ofi
+            "eps": 1e-4,
+            "min_factor_weight": 0.05,      
 
             # stumpy curves and overlap for stumpy  
             "exclude_bars": 10, # 14:50

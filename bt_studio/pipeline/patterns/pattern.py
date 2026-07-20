@@ -49,10 +49,8 @@ def get_balanced_samples(curves: np.ndarray, max_points: int = 20000) -> np.ndar
 
     # 1. sort by score and return idx
     sorted_idx = np.argsort(mutation_scores)
-    
     # 2. Top Half 
     top_active_idx = sorted_idx[-half_size:]
-    
     # 3. Random
     remaining_idx = sorted_idx[:-half_size] # avoid np.setdiff1d(np.arange(N), top_active_idx)
     
@@ -76,14 +74,7 @@ def discover_fsm_pattern(
     # 1. Filter Panel DataFrame
     # =========================================================================
     panel_df = panel_lf.collect(engine="streaming")
-    if panel_df.height == 0:
-        return {
-            "status": "failed", 
-            "reason": "HPO Panel_df Zero after filter", 
-            "metrics_score": -9999.0
-        }
-        
-    if panel_df.height <= m or m < 3:
+    if panel_df.height == 0 or m < 3:
         return {
             "status": "failed", 
             "reason": f"Not enough data (n={panel_df.height})", 
@@ -125,8 +116,12 @@ def discover_fsm_pattern(
     best_result, highest_score = None, -9999.0
     for motif in candidate_motifs:
 
+        if np.nanstd(motif) < 1e-4: 
+            continue
+
         result = evaluate_and_build_fsm(
             panel_df, curves_2d, motif, tune_config, common_config)
+
         if result["status"] == "success" and result["metrics_score"] > highest_score:
             highest_score = result["metrics_score"]
             best_result = result
