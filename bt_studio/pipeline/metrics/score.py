@@ -8,12 +8,14 @@ def calculate_hpo_score(
     cond_rets: np.ndarray, 
     uncond_rets: np.ndarray,
     cond_z_gaps: np.ndarray, 
+    cond_intra: np.ndarray,
     tune_config: dict,
     common_config: dict
 ) -> float:
     
     excess_ret = np.median(cond_rets) - np.median(uncond_rets) 
     win_rate = np.mean(cond_rets > 0)
+    intra_win_rate = np.mean(cond_intra > 0)
     eps = common_config["eps"]
     
     alternative = common_config["alternative"]
@@ -27,9 +29,10 @@ def calculate_hpo_score(
         
     safe_u_pval = max(u_pval, eps)
     safe_win_rate = max(win_rate, eps)
+    safe_intra_rate = max(intra_win_rate, eps)
     
     # ln(L) penalty high p-val and low win_rate
-    ln_L = np.log(excess_factor) + np.log(safe_win_rate) - np.log(safe_u_pval)
+    ln_L = np.log(excess_factor) + np.log(safe_win_rate) + np.log(safe_intra_rate) - np.log(safe_u_pval)
     
     # complexity k 
     targets = common_config.get("T1_rets", {})

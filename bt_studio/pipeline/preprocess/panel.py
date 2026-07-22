@@ -76,15 +76,30 @@ def build_fsm_panel(
     )
 
     # =========================================================================
-    # T and T+1
+    # T and T+1 ---> Gap / PnL / Momeum
     # =========================================================================
     target_lf = t_base_lf.join(t1_lf, on=["t1_day", "sid"], how="left")
-
     target_names = list(targets_rets.keys())
+
+    # Gap
     target_lf = target_lf.with_columns([
-        (pl.col("t1_open_price") / pl.col("t_close") - 1.0).alias("raw_gap")
+        pl.when(pl.col("t_close") > 1e-4)
+        .then(pl.col("t1_open_price") / pl.col("t_close") - 1.0)
+        .otherwise(None) 
+        .alias("raw_gap")
     ] + [
-        (pl.col(f"t1_price_{name}") / pl.col("entry_price") - 1.0).alias(f"raw_{name}")
+        # PnL T 14:50 ---> T+1 
+        pl.when(pl.col("entry_price") > 1e-4)
+        .then(pl.col(f"t1_price_{name}") / pl.col("entry_price") - 1.0)
+        .otherwise(None)
+        .alias(f"raw_{name}")
+        for name in target_names
+    ] + [
+        # T +1 Momeum
+        pl.when(pl.col("t1_open_price") > 1e-4)
+        .then(pl.col(f"t1_price_{name}") / pl.col("t1_open_price") - 1.0)
+        .otherwise(None)
+        .alias(f"intra_{name}")
         for name in target_names
     ])
 

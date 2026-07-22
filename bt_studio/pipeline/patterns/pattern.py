@@ -79,10 +79,10 @@ def discover_fsm_pattern(
     # 1. Filter Panel DataFrame
     # =========================================================================
     panel_df = panel_lf.collect(engine="streaming")
-    if panel_df.height == 0 or m < 3:
+    if panel_df.height == 0:
         return {
             "status": "failed", 
-            "reason": f"Not enough data (n={panel_df.height})", 
+            "reason": f"Panel_df height 0", 
             "metrics_score": -9999.0
         }
 
@@ -95,7 +95,11 @@ def discover_fsm_pattern(
     curves_2d = prepare_curves(panel_df, tune_config, common_config)
 
     if curves_2d.size == 0:
-        return {"status": "failed", "reason": "Curves_2d Empty", "metrics_score": -9999.0}
+        return {
+            "status": "failed", 
+            "reason": "Curves_2d Empty", 
+            "metrics_score": -9999.0
+        }
 
     # =========================================================================
     # 3. Volatility-Driven Sampling for stumpy
@@ -115,7 +119,11 @@ def discover_fsm_pattern(
     candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, common_config)
     
     if not candidate_motifs: 
-        return {"status": "failed", "reason": "Not Found Motif", "metrics_score": -9999.0}
+        return {
+            "status": "failed", 
+            "reason": "Not Found Motif", 
+            "metrics_score": -9999.0
+        }
     
     best_result, highest_score = None, -9999.0
     eps = common_config["eps"]

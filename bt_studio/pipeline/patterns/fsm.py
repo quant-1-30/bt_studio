@@ -35,22 +35,24 @@ def extract_fsm_matrix(
     # 2. T_{i} -> T_{i+1}
     trans_t_t = [np.ones((n_ret_states, n_ret_states), dtype=np.float64) for _ in range(num_windows - 1)]
 
-    for row in valid_chain.select(select_cols).iter_rows():
-        ms = row[0]
-        bins = row[1:] 
-        
-        if len(bins) >= 1: 
+    matrix_data = valid_chain.select(select_cols).to_numpy()
+    for row in matrix_data:
+        ms = int(row[0])
+        bins = row[1:].astype(int)
+
+        if len(bins) >= 1 and 0 <= ms < n_macro_states and 0 <= bins[0] < n_ret_states:
             trans_macro_t0[ms, bins[0]] += 1.0
-            
+
         for i in range(len(bins) - 1):
-            trans_t_t[i][bins[i], bins[i+1]] += 1.0
+            if 0 <= bins[i] < n_ret_states and 0 <= bins[i + 1] < n_ret_states:
+                trans_t_t[i][bins[i], bins[i + 1]] += 1.0 
             
-    key_macro = f"P(T{windows[0]}|Macro)"
+    key_macro = f"P({windows[0]}|Macro)"
     fsm_dict[key_macro] = np.round(trans_macro_t0 / trans_macro_t0.sum(axis=1, keepdims=True), 6).tolist()
     
     # num_windows
     for i in range(num_windows - 1):
-        key = f"P(T{windows[i+1]}|T{windows[i]})"
+        key = f"P({windows[i+1]}|{windows[i]})"
         mat = trans_t_t[i]
         fsm_dict[key] = np.round(mat / mat.sum(axis=1, keepdims=True), 6).tolist()
             
@@ -120,8 +122,8 @@ def evaluate_and_build_fsm(
             continue
 
         state_col = f"state_{target_name}"
-        rank_col = f"rank_{target_name}"
         target_state_cols.append(state_col) 
+        rank_col = f"rank_{target_name}"
         
         eval_df = (
             eval_df
@@ -129,33 +131,38 @@ def evaluate_and_build_fsm(
                 (pl.col(z_score_col).rank(method="average") / pl.len()).over("day").alias(rank_col)
             ])
             .with_columns([
-                pl.when(pl.col(rank_col) <= ranking_ratio).then(0)                
-                .when(pl.col(rank_col) <= 0.50).then(1)                        
-                .when(pl.col(rank_col) <= (1.0 - ranking_ratio)).then(2)         
-                .otherwise(3).cast(pl.Int32).alias(state_col)                    
+                pl.when(pl.col(rank_col) <= ranking_ratio)
+                .then(0)                
+                .when(pl.col(rank_col) <= 0.50)
+                .then(1)                        
+                .when(pl.col(rank_col) <= (1.0 - ranking_ratio))
+                .then(2)         
+                .otherwise(3).
+                cast(pl.Int32).alias(state_col)                    
             ])
         )
-
-    if not target_state_cols:
-        return {"status": "failed", "reason": "未找到 Z-Score 收益列进行状态切分", "metrics_score": -9999.0}
 
     # =====================================================================================================================
     # 3. Route Rank And Route Ret Polars Expr
     # =====================================================================================================================
-    traj_weights = calculate_decay_weights(rets_window, half_life=common_config["decay"]) 
+    traj_weights = calculate_decay_weights(rets_window, half_life_minutes=common_config["decay_minutes"]) 
     
-    traj_rank_expr = pl.lit(0.0)
-    traj_ret_expr = pl.lit(0.0)
+    traj_rank_expr, traj_ret_expr, traj_intra_expr = pl.lit(0.0), pl.lit(0.0), pl.lit(0.0)
     total_weight = 0.0
     
     for fw in rets_window:
         w = traj_weights[fw]
         ret_col = f"fwd_z_{fw}"  
         rank_col = f"rank_{fw}"
-        
-        if rank_col in eval_df.columns:
+        intra_col = f"intra_{fw}"
+
+        if rank_col in eval_df.columns and ret_col in eval_df.columns:
             traj_rank_expr = traj_rank_expr + pl.col(rank_col) * w
             traj_ret_expr = traj_ret_expr + pl.col(ret_col) * w
+
+            if intra_col in eval_df.columns:
+                traj_intra_expr = traj_intra_expr + pl.col(intra_col) * w
+
             total_weight += w
             
     traj_rank_expr = traj_rank_expr / total_weight
@@ -163,7 +170,8 @@ def evaluate_and_build_fsm(
 
     eval_df = eval_df.with_columns([
         traj_rank_expr.alias("rank_trajectory"),
-        traj_ret_expr.alias("ret_trajectory") 
+        traj_ret_expr.alias("ret_trajectory"),
+        (traj_intra_expr / total_weight).alias("intra_trajectory") 
     ])
 
     # =====================================================================================================================
@@ -185,10 +193,14 @@ def evaluate_and_build_fsm(
     complementary_df = eval_df.filter(pl.col("distance") > threshold_d)
     
     if triggers.height < common_config["trigger"]:
-        return {"status": "failed", "reason": f"DTW (n={triggers.height}) not enough", "metrics_score": -9999.0}
+        return {
+            "status": "failed", 
+            "reason": f"DTW (n={triggers.height}) < trigger", 
+            "metrics_score": -9999.0
+        }
     
     # =====================================================================================================================
-    # 5. Valid Ratio and AutoCorr
+    # 5. Autocorrelation
     # =====================================================================================================================
 
     valid_sample_ratio = triggers.height / max(eval_df.height, 1)
@@ -211,9 +223,9 @@ def evaluate_and_build_fsm(
     )
 
     # =====================================================================================================================
-    # 5. State ---> Ret Vector
+    # 6. State Value Vectors for Predictor
     # =====================================================================================================================
-    state_return_vectors = {} # e.g. { "open_15m": [状态0收益, 状态1收益, 状态2收益, 状态3收益]}
+    state_return_vectors = {} 
     expected_states = [0, 1, 2, 3]
 
     for target_name in target_names:
@@ -244,7 +256,7 @@ def evaluate_and_build_fsm(
         state_return_vectors[target_name] = np.round(value_vector, 6).tolist()
     
     # =====================================================================================================================
-    # 6. Markov Laplace 
+    # 7. Markov Laplace Matrix
     # =====================================================================================================================
 
     fsm_matrix = extract_fsm_matrix(triggers, target_state_cols)
@@ -264,41 +276,48 @@ def evaluate_and_build_fsm(
         }
 
     # =====================================================================================================================
-    # 6. Rank and Ret Statistics u_pval
+    # 8. Mann-Whitney U Test
     # =====================================================================================================================
     cond_ranks = triggers["rank_trajectory"].drop_nulls().to_numpy()
     uncond_ranks = complementary_df["rank_trajectory"].drop_nulls().to_numpy() 
     
     # U Test at least >= 10
     min_test_samples = max(10, common_config["trigger"] // 3)
-    stats_triggers = len(cond_ranks)
+    n_triggers = len(cond_ranks)
 
-    if stats_triggers < min_test_samples or np.std(cond_ranks) < 1e-8 or len(uncond_ranks) == 0:
-         return {"status": "failed", "reason": f" Rank_trajectory trigger ({stats_triggers}) <= 10", "metrics_score": -9999.0}
+    if n_triggers < min_test_samples or np.std(cond_ranks) < 1e-8 or len(uncond_ranks) == 0:
+         return {
+            "status": "failed", 
+            "reason": f" Rank_trajectory trigger ({n_triggers}) <= {min_test_samples}", 
+            "metrics_score": -9999.0
+        }
     
     try:
-        u_stat, u_pval = stats.mannwhitneyu(cond_ranks, uncond_ranks, alternative=common_config["alternative"])
+        _, u_pval = stats.mannwhitneyu(cond_ranks, uncond_ranks, alternative=common_config["alternative"])
     except ValueError:
-        return {"status": "failed", "reason": "MW-U stats ValueError", "metrics_score": -9999.0}  
+        print("MW-U stats ValueError")
+        u_pval = 1 
     
     # =====================================================================================================================
-    # 7. Calculate Hpo Score 
+    # 9. Calculate Hpo Score 
     # =====================================================================================================================
-    cond_data = triggers.select(["ret_trajectory", "z_gap"]).drop_nulls().to_numpy()
-    if len(cond_data) == 0:
-        return {"status": "failed", "reason": "No valid returns after mask", "metrics_score": -9999.0}
+    cond_data = triggers.select(["ret_trajectory", "z_gap", "intra_trajectory"]).drop_nulls().to_numpy()
+    if len(cond_data) <= 2:
+        return {
+            "status": "failed", 
+            "reason": "cond_data height 0", 
+            "metrics_score": -9999.0
+        }
         
     cond_rets = cond_data[:, 0]
     cond_z_gaps = cond_data[:, 1]
+    cond_intra = cond_data[:, 2]
     uncond_rets = complementary_df["ret_trajectory"].drop_nulls().to_numpy()
 
     score = calculate_hpo_score(
-        u_pval, len(cond_rets), cond_rets, uncond_rets, cond_z_gaps, tune_config, common_config
+        u_pval, len(cond_rets), cond_rets, uncond_rets, cond_z_gaps, cond_intra, tune_config, common_config
     )
     
-    if score <= -9990.0:
-        return {"status": "failed", "reason": f"HPO Score Reach -9999.0 ", "metrics_score": -9999.0}
-
     return {
         "status": "success",
         "fsm_matrix": fsm_matrix,

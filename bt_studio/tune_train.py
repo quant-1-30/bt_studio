@@ -340,9 +340,8 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # =========================================================================
     df_results = pl.from_pandas(results.get_dataframe()) # abandon dict fsm_matrix
 
-    valid_trials = df_results.filter(pl.col("metrics_score") > -9990.0)
     if valid_trials.height == 0:
-        print(f"⚠️ [Failed] {model_id} all trival score -9999.0")
+        print(f"⚠️ [Failed] {model_id} valid_trials height 0")
         return False
 
     max_pval = common_config.get("u_pval", 0.2)
@@ -619,7 +618,7 @@ if __name__ == "__main__":
                 "open_15m": 15,  
                 "open_30m": 30,  
             },
-            "decay": 15, # minute calculate weight
+            "decay_minutes": 15, # minute calculate weight
             
             # ofi
             "eps": 1e-4,
@@ -633,7 +632,7 @@ if __name__ == "__main__":
             "ranking_window": 5, # rolling macro_state 
             "ranking_ratio": 0.25, # ranking
 
-            "trigger": 20, # dtw distance
+            "trigger": 5, # dtw distance
             "topk": 5, # candidate
 
              # stats
