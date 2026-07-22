@@ -272,7 +272,6 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
 
     search_space = {
         "downsample": tune.choice(search_config["downsample"]), 
-        "cross_days": tune.choice(search_config["cross_days"]), 
         "motif_minutes": tune.choice(search_config["motif_minutes"]), 
         "threshold_r": tune.uniform(*search_config["threshold_r"]),
     }
@@ -609,6 +608,19 @@ if __name__ == "__main__":
             "train_window": 12,
             "oss_step": 6,
 
+            # indicator
+            "regime_filter": {
+                "ma_window": 20
+            },
+
+            # fut_ret T+1
+            "T1_rets": {
+                "open_5m":  5,   
+                "open_15m": 15,  
+                "open_30m": 30,  
+            },
+            "decay": 15, # minute calculate weight
+            
             # ofi
             "eps": 1e-4,
             "min_factor_weight": 0.05,      
@@ -620,20 +632,17 @@ if __name__ == "__main__":
             # macro ranking state and fut_ret rank state
             "ranking_window": 5, # rolling macro_state 
             "ranking_ratio": 0.25, # ranking
-            "decay": 1.0, # used for T+1 -> T+3 compress
 
             "trigger": 20, # dtw distance
             "topk": 5, # candidate
 
-            # stats 
-            "stats_windows": [1,2,3], # T+1 ---> T+3 Fut Ret
-            "alternative": "greater", # stats
+             # stats
+            "alternative": "greater",
             "u_pval": 0.2, # 0.05 too strict and least
         },
 
         "search_bounds": {
             "downsample": [3, 4, 5], # downsample for DTW
-            "cross_days": [1, 2], # concat cross_days of lagged curves to 2D array for DTW 
             "motif_minutes": [45, 60, 90], # used from motif length intraday
             "threshold_r": [0.55, 0.80], 
             "num_trials": 400, 

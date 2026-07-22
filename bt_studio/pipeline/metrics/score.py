@@ -6,7 +6,8 @@ def calculate_hpo_score(
     u_pval: float, 
     trigger_count: int, 
     cond_rets: np.ndarray, 
-    uncond_rets: np.ndarray, 
+    uncond_rets: np.ndarray,
+    cond_z_gaps: np.ndarray, 
     tune_config: dict,
     common_config: dict
 ) -> float:
@@ -31,11 +32,18 @@ def calculate_hpo_score(
     ln_L = np.log(excess_factor) + np.log(safe_win_rate) - np.log(safe_u_pval)
     
     # complexity k 
-    cross_days = float(tune_config.get("cross_days", 1))
+    targets = common_config.get("T1_rets", {})
     m_mins = float(tune_config["motif_minutes"])
-    dtw_frac = float(common_config["dtw_window_frac"]) 
-    k = cross_days + (dtw_frac * 10.0) + (m_mins / 30.0)
-    
+    dtw_frac = float(common_config["dtw_window_frac"])
+
+    if targets:
+        max_offset = max(targets.values())
+    else:
+        max_offset = 240 
+        
+    # panelty increase by one hour
+    k = (max_offset / 60.0) + (dtw_frac * 10.0) + (m_mins / 30.0)
+
     # =========================================================================
     # - L = excess / P-value (P small --> L large; excess large --> L large)
     # BIC = -2 * ln(L) + k * ln(n) 

@@ -11,7 +11,7 @@ from bt_studio.utils.common import calculate_decay_weights
 
 def extract_fsm_matrix(
     triggers: pl.DataFrame, 
-    bin_cols: list, 
+    state_cols: list, 
     n_macro_states: int = 3, 
     n_ret_states: int = 4
 ) -> dict:
@@ -20,14 +20,14 @@ def extract_fsm_matrix(
     - n_macro_states: (0, 1, 2 -> 3)
     - n_ret_states: (0, 1, 2, 3 -> 4)
     """
-    select_cols = ["macro_state"] + bin_cols
+    select_cols = ["macro_state"] + state_cols
     valid_chain = triggers.drop_nulls(subset=select_cols) 
     
     fsm_dict = {}
     if valid_chain.height == 0:
         return fsm_dict
 
-    windows = [col.split("_")[-1] for col in bin_cols]
+    windows = [col.split("_")[-1] for col in state_cols]
     num_windows = len(windows)
     
     # Laplace Smoothing ---> np.ones
@@ -69,7 +69,7 @@ def evaluate_and_build_fsm(
     if panel_df["sid"].dtype != pl.Binary:
         panel_df = panel_df.with_columns(pl.col("sid").cast(pl.Binary))
     
-    stats_windows = common_config["stats_windows"]
+    rets_window = common_config["T1_rets"] # {"open_5m":  5}   
     
     # =====================================================================================================================
     # 1. Macro States Rolling Rank & Return Bins avoid loopahead
@@ -78,71 +78,79 @@ def evaluate_and_build_fsm(
     
     daily_macro_lf = (
         panel_df.lazy()
-        .select(["day", "sid", pl.col("lag_0").list.sum().alias("sid_ofi_sum")]) # lag_0 ---> daily_curve
+        .select(["day", "sid", pl.col("lag_0").list.sum().alias("sid_ofi_sum")])
         .group_by("day")
-        .agg(pl.col("sid_ofi_sum").mean().alias("daily_ofi_mean"))
+        .agg(pl.col("sid_ofi_sum").median().alias("daily_ofi_median"))
         .sort("day") 
-        .with_columns(pl.col("daily_ofi_mean").shift(1).alias("prev_ofi_mean"))
-        .drop_nulls(subset=["prev_ofi_mean"])
+        .with_columns(pl.col("daily_ofi_median").shift(1).alias("prev_ofi_median"))
         .with_columns([
-            pl.col("prev_ofi_mean")
-              .rolling_quantile(quantile=0.33, window_size=rank_window, min_periods=max(1, rank_window//2)) # half decay
-              .alias("p33"),
-            pl.col("prev_ofi_mean")
-              .rolling_quantile(quantile=0.67, window_size=rank_window, min_periods=max(1, rank_window//2))
-              .alias("p67")
+            pl.col("prev_ofi_median")
+            .rolling_quantile(quantile=0.33, window_size=rank_window, min_periods=max(1, rank_window//2))
+            .alias("p33"),
+            pl.col("prev_ofi_median")
+            .rolling_quantile(quantile=0.67, window_size=rank_window, min_periods=max(1, rank_window//2))
+            .alias("p67")
         ])
         .with_columns(
-            pl.when(pl.col("prev_ofi_mean") <= pl.col("p33")).then(0)
-            .when(pl.col("prev_ofi_mean") <= pl.col("p67")).then(1)
+            pl.when(pl.col("prev_ofi_median") <= pl.col("p33")).then(0)
+            .when(pl.col("prev_ofi_median") <= pl.col("p67")).then(1)
             .otherwise(2)
-            .cast(pl.Int32).alias("macro_state")
+            .fill_null(1) 
+            .cast(pl.Int32)
+            .alias("macro_state")
         )
-        .drop(["p33", "p67", "daily_ofi_mean", "prev_ofi_mean"])
-    )
+        .drop(["p33", "p67", "daily_ofi_median", "prev_ofi_median"])
+    )    
 
     daily_macro = daily_macro_lf.collect()
     eval_df = panel_df.join(daily_macro.select(["day", "macro_state"]), on="day", how="inner")
 
     # =====================================================================================================================
-    # 2. Time-Adjusted Zero-Anchored Bins 
+    # 2. fwd_z_ret Ranking State ---> [0,1,2,3] 
     # =====================================================================================================================
     ranking_ratio = common_config["ranking_ratio"]
-    bin_cols = [] 
 
-    for fw in stats_windows:
-        col = f"fwd_ret_{fw}"
-        if col not in eval_df.columns: 
+    target_names = list(common_config["T1_rets"].keys()) # e.g. ["open_15m", "open_30m"]
+    target_state_cols = [] 
+
+    for target_name in target_names:
+        z_score_col = f"fwd_z_{target_name}"
+        
+        if z_score_col not in eval_df.columns: 
             continue
 
-        bin_col = f"bin_{fw}"
-        rank_col = f"rank_{fw}"
-        bin_cols.append(bin_col) 
+        state_col = f"state_{target_name}"
+        rank_col = f"rank_{target_name}"
+        target_state_cols.append(state_col) 
         
-        eval_df = eval_df.with_columns([
-            (pl.col(col).rank(method="average") / pl.len()).over("day").alias(rank_col)
-        ]).with_columns([
-            pl.when(pl.col(rank_col) <= ranking_ratio).then(0)                
-            .when(pl.col(rank_col) <= 0.50).then(1)                        
-            .when(pl.col(rank_col) <= (1.0 - ranking_ratio)).then(2)         
-            .otherwise(3).cast(pl.Int32).alias(bin_col)                    
-        ])
+        eval_df = (
+            eval_df
+            .with_columns([
+                (pl.col(z_score_col).rank(method="average") / pl.len()).over("day").alias(rank_col)
+            ])
+            .with_columns([
+                pl.when(pl.col(rank_col) <= ranking_ratio).then(0)                
+                .when(pl.col(rank_col) <= 0.50).then(1)                        
+                .when(pl.col(rank_col) <= (1.0 - ranking_ratio)).then(2)         
+                .otherwise(3).cast(pl.Int32).alias(state_col)                    
+            ])
+        )
 
-    if not bin_cols:
-        return {"status": "failed", "reason": "not found Z-Score ret col", "metrics_score": -9999.0}
+    if not target_state_cols:
+        return {"status": "failed", "reason": "未找到 Z-Score 收益列进行状态切分", "metrics_score": -9999.0}
 
     # =====================================================================================================================
     # 3. Route Rank And Route Ret Polars Expr
     # =====================================================================================================================
-    traj_weights = calculate_decay_weights(stats_windows, half_life=common_config["decay"]) 
+    traj_weights = calculate_decay_weights(rets_window, half_life=common_config["decay"]) 
     
     traj_rank_expr = pl.lit(0.0)
     traj_ret_expr = pl.lit(0.0)
     total_weight = 0.0
     
-    for fw in stats_windows:
+    for fw in rets_window:
         w = traj_weights[fw]
-        ret_col = f"fwd_ret_{fw}"  
+        ret_col = f"fwd_z_{fw}"  
         rank_col = f"rank_{fw}"
         
         if rank_col in eval_df.columns:
@@ -203,30 +211,49 @@ def evaluate_and_build_fsm(
     )
 
     # =====================================================================================================================
-    # 5. Bin Weights and Markov Laplace 
+    # 5. State ---> Ret Vector
     # =====================================================================================================================
-    bin_weights = {}
+    state_return_vectors = {} # e.g. { "open_15m": [状态0收益, 状态1收益, 状态2收益, 状态3收益]}
+    expected_states = [0, 1, 2, 3]
 
-    for fw in stats_windows:
-        b_col, r_col = f"bin_{fw}", f"fwd_ret_{fw}"
+    for target_name in target_names:
+        state_col = f"state_{target_name}"
+        z_score_col = f"fwd_z_{target_name}"
         
-        global_grouped = eval_df.group_by(b_col).agg(pl.col(r_col).median().alias("global_ret")).drop_nulls().sort(b_col)
-        prior_map = {row[0]: row[1] for row in global_grouped.iter_rows()}
-        unique_bins = sorted(list(prior_map.keys()))
+        # Baseline Returns 
+        baseline_df = (
+            eval_df.group_by(state_col)
+            .agg(pl.col(z_score_col).median().alias("baseline_ret"))
+            .drop_nulls()
+        )
+        baseline_returns_map = {row[0]: row[1] for row in baseline_df.iter_rows()}
         
-        trigger_grouped = triggers.group_by(b_col).agg(pl.col(r_col).median().alias("median_ret")).drop_nulls().sort(b_col)
-        trigger_map = {row[0]: row[1] for row in trigger_grouped.iter_rows()}
+        # Triggered Returns (Motif)
+        triggered_df = (
+            triggers.group_by(state_col)
+            .agg(pl.col(z_score_col).median().alias("triggered_ret"))
+            .drop_nulls()
+        )
+        triggered_returns_map = {row[0]: row[1] for row in triggered_df.iter_rows()}
         
-        raw_weights = [trigger_map.get(b, prior_map.get(b, 0.0)) for b in unique_bins]
-        bin_weights[fw] = np.round(raw_weights, 6).tolist()
+        value_vector = [
+            triggered_returns_map.get(state, baseline_returns_map.get(state, 0.0)) 
+            for state in expected_states
+        ]
+        
+        state_return_vectors[target_name] = np.round(value_vector, 6).tolist()
+    
+    # =====================================================================================================================
+    # 6. Markov Laplace 
+    # =====================================================================================================================
 
-    fsm_matrix = extract_fsm_matrix(triggers, bin_cols)
+    fsm_matrix = extract_fsm_matrix(triggers, target_state_cols)
     
     for k in list(fsm_matrix.keys()):
         if isinstance(fsm_matrix[k], (np.ndarray, list)):
             fsm_matrix[k] = np.round(fsm_matrix[k], 6).tolist()
     
-    fsm_matrix["bin_weights"] = bin_weights
+    fsm_matrix["state_return_vectors"] = state_return_vectors
 
     if skip_stats:
         return {
@@ -243,7 +270,7 @@ def evaluate_and_build_fsm(
     uncond_ranks = complementary_df["rank_trajectory"].drop_nulls().to_numpy() 
     
     # U Test at least >= 10
-    min_test_samples = max(10, common_config["triggers"] // 3)
+    min_test_samples = max(10, common_config["trigger"] // 3)
     stats_triggers = len(cond_ranks)
 
     if stats_triggers < min_test_samples or np.std(cond_ranks) < 1e-8 or len(uncond_ranks) == 0:
@@ -257,13 +284,18 @@ def evaluate_and_build_fsm(
     # =====================================================================================================================
     # 7. Calculate Hpo Score 
     # =====================================================================================================================
-    cond_rets = triggers["ret_trajectory"].drop_nulls().to_numpy()
+    cond_data = triggers.select(["ret_trajectory", "z_gap"]).drop_nulls().to_numpy()
+    if len(cond_data) == 0:
+        return {"status": "failed", "reason": "No valid returns after mask", "metrics_score": -9999.0}
+        
+    cond_rets = cond_data[:, 0]
+    cond_z_gaps = cond_data[:, 1]
     uncond_rets = complementary_df["ret_trajectory"].drop_nulls().to_numpy()
 
     score = calculate_hpo_score(
-        u_pval, len(cond_rets), cond_rets, uncond_rets, tune_config, common_config
+        u_pval, len(cond_rets), cond_rets, uncond_rets, cond_z_gaps, tune_config, common_config
     )
-
+    
     if score <= -9990.0:
         return {"status": "failed", "reason": f"HPO Score Reach -9999.0 ", "metrics_score": -9999.0}
 

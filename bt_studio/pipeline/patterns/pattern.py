@@ -8,55 +8,60 @@ from .fsm import evaluate_and_build_fsm
 
 
 def get_balanced_samples(curves: np.ndarray, max_points: int = 20000) -> np.ndarray:
-    """unify 1D and MD / balance 50% avoid distortion
+    """
+        no cross_days 50% + 50%
     
-    :param curves: Shape (N, L) / (N, D, L) 
-    :param max_points: Stumpy one core process maxlength
+    :param curves: Shape (N, L) 1D /  (N, D, L) 
+    :param max_points: Stumpy 
     """
     N = curves.shape[0]
-    
+    if N == 0:
+        return curves
+
     # =========================================================================
-    # Sample Size
+    # Points Per Stock
     # =========================================================================
-    if curves.ndim == 2: # 1D Shape (N, L)
+    if curves.ndim == 2:  # 1D: (N, L)
         points_per_stock = curves.shape[1]
-    else: # MD Shape (N, D, L)
-        points_per_stock = curves.shape[1] * curves.shape[2] 
-        
-    # D * L
+    elif curves.ndim == 3:  # MD: (N, D, L)
+        points_per_stock = curves.shape[1] * curves.shape[2]
+    else:
+        raise ValueError(f"Unsupported curves shape: {curves.shape}, expected 2D or 3D array.")
+
     sample_size = min(N, max(5, int(max_points / points_per_stock)))
-    
+
     if N <= sample_size:
         return curves
 
     # =========================================================================
-    # Mutation Score
+    # Mutation Score / Active Rank
     # =========================================================================
-    if curves.ndim == 2: # 1D
+    if curves.ndim == 2:
         mutation_scores = np.nansum(np.abs(np.diff(curves, axis=1)), axis=1)
     else:
-        # MD all feature scale to z-score / curves_md Shape: (N, D, L) and axis=2 --> abs diff 
-        diff_sum = np.nansum(np.abs(np.diff(curves, axis=2)), axis=2) # Shape: (N, D)
+        diff_sum = np.nansum(np.abs(np.diff(curves, axis=2)), axis=2)  # Shape: (N, D)
         _mean = np.nanmean(diff_sum, axis=0, keepdims=True)
-        _std = np.nanstd(diff_sum, axis=0, keepdims=True) + 1e-8
-        z_md = (diff_sum - _mean) / _std # Shape: (N, D)
-        mutation_scores = np.nansum(z_md, axis=1) # Shape: (N,)
+        _std = np.nanstd(diff_sum, axis=0, keepdims=True)
+        _std = np.where(_std < 1e-8, 1e-8, _std)  # 防 0 划分
+        
+        z_md = (diff_sum - _mean) / _std  # Shape: (N, D)
+        mutation_scores = np.nansum(z_md, axis=1)  # Shape: (N,)
+
+    mutation_scores = np.nan_to_num(mutation_scores, nan=0.0)
 
     # =========================================================================
-    # Balanced Sampling: 50% active  + 50% random
+    # 50% Top + 50% Random
     # =========================================================================
     half_size = sample_size // 2
-
-    # 1. sort by score and return idx
     sorted_idx = np.argsort(mutation_scores)
-    # 2. Top Half 
+
     top_active_idx = sorted_idx[-half_size:]
-    # 3. Random
-    remaining_idx = sorted_idx[:-half_size] # avoid np.setdiff1d(np.arange(N), top_active_idx)
+
+    remaining_idx = sorted_idx[:-half_size]
     
-    random_size = sample_size - half_size
-    random_idx = np.random.choice(remaining_idx, size=random_size, replace=False) # Sampling without replacement
-    
+    random_size = min(sample_size - half_size, len(remaining_idx))
+    random_idx = np.random.choice(remaining_idx, size=random_size, replace=False)
+
     final_sample_idx = np.sort(np.concatenate([top_active_idx, random_idx]))
     return curves[final_sample_idx]
 
@@ -88,7 +93,6 @@ def discover_fsm_pattern(
     tune_config["threshold_d"] = threshold_d
 
     curves_2d = prepare_curves(panel_df, tune_config, common_config)
-    N, L = curves_2d.shape
 
     if curves_2d.size == 0:
         return {"status": "failed", "reason": "Curves_2d Empty", "metrics_score": -9999.0}

@@ -92,3 +92,36 @@ def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_t: np.ndarray, dtw_w: int
         if d < min_dist: 
             min_dist = d
     return min_dist
+
+
+
+
+    # # cross_days
+    # actual_cross_days = max(1, tune_config.get("cross_days", 1))
+    
+    # curve_lf = curve_lf.join(calendar_lf, on="day", how="left").join(
+    #     daily_lf.select(["day", "sid", "regime_signal"]), on=["day", "sid"], how="left"
+    # ).sort(["sid", "day"])
+
+    # # trading_days continual
+    # curve_lf = (
+    #     curve_lf
+    #     .with_columns((pl.col("trade_day_idx") - pl.col("trade_day_idx").shift(1).over("sid")).alias("day_diff"))
+    #     .with_columns(
+    #         (
+    #             # 999 ensure skip
+    #             (pl.col("day_diff").fill_null(999).rolling_max(window_size=actual_cross_days, min_periods=actual_cross_days).over("sid") == 1) &
+    #             (pl.col("regime_signal") == 1)
+    #         ).alias("is_valid_sequence")
+    #     )
+    # )
+
+    # shift_exprs = [
+    #     pl.when(pl.col("is_valid_sequence"))
+    #     .then(pl.col("daily_curve").shift(i).over("sid") if i > 0 else pl.col("daily_curve"))
+    #     .otherwise(None)
+    #     .alias(f"lag_{i}")
+    #     for i in reversed(range(actual_cross_days))
+    # ]
+    # curve_lf = curve_lf.with_columns(shift_exprs).drop(["trade_day_idx", "day_diff", "regime_signal"])
+

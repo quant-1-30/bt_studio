@@ -2,6 +2,14 @@ import polars as pl
 import numpy as np
 
 
+# MAD Normalize
+def robust_zscore_expr(col_name: str) -> pl.Expr:
+    median = pl.col(col_name).median().over(["day", "minute_idx"])
+    mad = (pl.col(col_name) - median).abs().median().over(["day", "minute_idx"])
+    robust_scale = 1.4826 * mad + 1e-6
+    return (pl.col(col_name) - median) / robust_scale
+
+
 def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     eps = common_config["eps"]
     min_w = common_config["min_factor_weight"]   
@@ -76,13 +84,6 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
         ])
     )
     
-    # MAD Normalize
-    def robust_zscore_expr(col_name: str) -> pl.Expr:
-        median = pl.col(col_name).median().over(["day", "minute_idx"])
-        mad = (pl.col(col_name) - median).abs().median().over(["day", "minute_idx"])
-        robust_scale = 1.4826 * mad + 1e-6
-        return (pl.col(col_name) - median) / robust_scale
-
     # MDP
     step5_lf = (
         step4_lf
@@ -127,26 +128,25 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
             (pl.col("w_liq_pos") / pl.col("w_sum")).alias("w_liq")
         ])
         .with_columns([
-            # 利用动态权重将多维特征凝聚为单一的一维合成得分
             (
                 pl.col("w_sa") * pl.col("sa_z_tmp") + 
                 pl.col("w_imp") * pl.col("imp_z_tmp") + 
                 pl.col("w_liq") * pl.col("liq_z_tmp")
-            ).alias("raw_synthetic_score")
+            ).alias("raw_score")
         ])
-        .select(["day", "sid", "minute_idx", "close", "raw_synthetic_score"])
+        .select(["day", "sid", "minute_idx","open", "close", "raw_score"])
     )
 
     final_lf = (
         step5_lf
         .with_columns([
-            robust_zscore_expr("raw_synthetic_score").alias("z_score_tmp")
+            robust_zscore_expr("raw_score").alias("z_score_tmp")
         ])
         .with_columns([
             pl.col("z_score_tmp").tanh().alias("ofi_ratio") 
         ])
         .rename({"minute_idx": "bar_idx"})
-        .select(["day", "sid", "bar_idx", "close", "ofi_ratio"])
+        .select(["day", "sid", "bar_idx", "open", "close", "ofi_ratio"])
         .sort(["day", "sid", "bar_idx"])
     )
     return final_lf

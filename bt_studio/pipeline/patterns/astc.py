@@ -11,28 +11,29 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 
 def prepare_curves(panel_df: pl.DataFrame, tune_config: dict, common_config: dict) -> np.ndarray:
-    """DataFrame to (N, L) tensor with Lookahead prevention and NaN Masking"""
-    cross_days = int(tune_config["cross_days"])
+    """
+    DataFrame to (N, L) 2D tensor with Lookahead prevention and NaN Masking.
+    
+    Returns
+    -------
+    np.ndarray: Shape (N, L), where N is number of stock samples, L is bars_per_day.
+    """
+    if panel_df.height == 0:
+        return np.array([], dtype=np.float64)
+
     bars_per_day = 240 // int(tune_config["downsample"])
 
-    lag_cols = [f"lag_{i}" for i in reversed(range(cross_days))]
-
-    # np.nan list --> None 
     nan_pad = np.full(bars_per_day, np.nan, dtype=np.float64)
+    raw_list = panel_df["lag_0"].to_list()
+    filled_list = [nan_pad if x is None else x for x in raw_list]
     
-    lag_arrays = []
-    for col in lag_cols:
-        # Polars  None (Null) ---> nan_pad
-        raw_list = panel_df[col].to_list()
-        filled_list = [nan_pad if x is None else x for x in raw_list]
-        lag_arrays.append(np.vstack(filled_list))
-        
-    execlude_bars = common_config["exclude_bars"] // int(tune_config["downsample"])
-    if execlude_bars > 0:
-        lag_arrays[-1][:, -execlude_bars:] = np.nan
+    curves_2d = np.vstack(filled_list)  # Shape: (N, bars_per_day)
 
-    curves_2d = np.hstack(lag_arrays) # Shape: (N, cross_days * bars_per_day)
-    return curves_2d    
+    exclude_bars = common_config.get("exclude_bars", 0) // int(tune_config["downsample"])
+    if exclude_bars > 0:
+        curves_2d[:, -exclude_bars:] = np.nan  
+
+    return curves_2d
 
 
 def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dict) -> List[np.ndarray]:

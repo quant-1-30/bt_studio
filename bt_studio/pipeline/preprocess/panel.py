@@ -1,4 +1,19 @@
 import polars as pl
+from bt_studio.pipeline.indicators import regime_indicator
+
+
+def align_date_col(lf: pl.LazyFrame) -> pl.LazyFrame:
+    schema = lf.collect_schema()
+    if schema["day"] in [pl.Int32, pl.Int64]:
+        lf = lf.with_columns(pl.col("day").cast(pl.String).str.to_date("%Y%m%d"))
+    elif schema["day"] == pl.String:
+        lf = lf.with_columns(pl.col("day").str.to_date("%Y%m%d"))
+    elif schema["day"] == pl.Datetime:
+        lf = lf.with_columns(pl.col("day").cast(pl.Date))
+    return lf.with_columns([
+        pl.col("sid").cast(pl.String).str.strip_chars(" \x00\t\n"),
+        pl.col("day").cast(pl.Date),
+    ])
 
 
 def build_fsm_panel(
@@ -14,117 +29,112 @@ def build_fsm_panel(
     bars_per_day = 240 // ds  
 
     # =========================================================================
-    # Type Align
+    # daily and all
     # =========================================================================
-    def align_date_col(lf: pl.LazyFrame) -> pl.LazyFrame:
-        schema = lf.collect_schema()
-        if schema["day"] in [pl.Int32, pl.Int64]:
-            lf = lf.with_columns(pl.col("day").cast(pl.String).str.to_date("%Y%m%d"))
-        elif schema["day"] == pl.String:
-            lf = lf.with_columns(pl.col("day").str.to_date("%Y%m%d"))
-        elif schema["day"] == pl.Datetime:
-            lf = lf.with_columns(pl.col("day").cast(pl.Date))
-        return lf.with_columns([
-            pl.col("sid").cast(pl.String).str.strip_chars(" \x00\t\n"),
-            pl.col("day").cast(pl.Date),
-        ])
+    daily_lf = align_date_col(daily_lf).sort(["sid", "day"])
+    all_feat_lf = align_date_col(all_feat_lf).sort(["sid", "day", "bar_idx"])
 
-    daily_lf = align_date_col(daily_lf)
-    all_feat_lf = align_date_col(all_feat_lf)
+    daily_lf = regime_indicator(daily_lf, common_config.get("regime_filter", {}))
 
     # =========================================================================
-    # fut_ret normalize by mad
+    # calendar
+    # =========================================================================
+    calendar_lf = (
+        daily_lf.select("day").unique().sort("day")
+        .with_columns(pl.col("day").shift(-1).alias("t1_day"))
+        .drop_nulls() # abandon last day
+    )
+
+    # =========================================================================
+    # T Gap
     # =========================================================================
     entry_idx = 240 - common_config["exclude_bars"]  
-    entry_price_lf = all_feat_lf.filter(pl.col("bar_idx") == entry_idx).select(
-        ["day", "sid", pl.col("close").alias("entry_price")]
-    )
-
-    stats_windows = common_config["stats_windows"]
     
-    ret_exprs = [
-        (pl.col("close").shift(-p).over("sid") / pl.col("entry_price") - 1.0).alias(f"raw_ret_{p}")
-        for p in stats_windows
-    ]
-
-    daily_ret_lf = (
-        daily_lf.join(entry_price_lf, on=["day", "sid"], how="left")
-        .sort(["sid", "day"])
-        .with_columns(ret_exprs)
-    )
-    
-    # Step A: Median
-    daily_ret_lf = daily_ret_lf.with_columns([
-        pl.col(f"raw_ret_{p}").median().over("day").alias(f"median_{p}") 
-        for p in stats_windows
-    ])
-    
-    # Step B: MAD
-    daily_ret_lf = daily_ret_lf.with_columns([
-        (pl.col(f"raw_ret_{p}") - pl.col(f"median_{p}")).abs().median().over("day").alias(f"mad_{p}") 
-        for p in stats_windows
-    ])
-    
-    # Step C: Z-Score
-    z_score_cols = [f"fwd_ret_{p}" for p in stats_windows]
-    
-    daily_ret_lf = daily_ret_lf.with_columns([
-        ((pl.col(f"raw_ret_{p}") - pl.col(f"median_{p}")) / (1.4826 * pl.col(f"mad_{p}") + 1e-6)).alias(f"fwd_ret_{p}")
-        for p in stats_windows
-    ]).drop(
-        [f"median_{p}" for p in stats_windows] + 
-        [f"mad_{p}" for p in stats_windows] + 
-        [f"raw_ret_{p}" for p in stats_windows] 
+    t_base_lf = (
+        all_feat_lf.filter(pl.col("bar_idx") == entry_idx)
+        .select(["day", "sid", pl.col("close").alias("entry_price")])
+        .join(daily_lf.select(["day", "sid", pl.col("close").alias("t_close")]), on=["day", "sid"], how="left")
+        .join(calendar_lf, on="day", how="inner")
     )
 
     # =========================================================================
-    # Skeleton Solve Suspending and Missing  
+    # T+1 
+    # =========================================================================
+    targets_rets = common_config["T1_rets"]
+    bar_idx_to_name = {max(0, minutes - 1): name for name, minutes in targets_rets.items()}
+    
+    t1_exprs = [pl.col("open").filter(pl.col("bar_idx") == 0).first().alias("t1_open_price")]
+    for b_idx, name in bar_idx_to_name.items():
+        t1_exprs.append(pl.col("close").filter(pl.col("bar_idx") == b_idx).first().alias(f"t1_price_{name}"))
+
+    target_bar_indices = [0] + list(bar_idx_to_name.keys())
+    t1_lf = (
+        all_feat_lf.filter(pl.col("bar_idx").is_in(target_bar_indices))
+        .group_by(["day", "sid"])
+        .agg(t1_exprs)
+        .rename({"day": "t1_day"}) 
+    )
+
+    # =========================================================================
+    # T and T+1
+    # =========================================================================
+    target_lf = t_base_lf.join(t1_lf, on=["t1_day", "sid"], how="left")
+
+    target_names = list(targets_rets.keys())
+    target_lf = target_lf.with_columns([
+        (pl.col("t1_open_price") / pl.col("t_close") - 1.0).alias("raw_gap")
+    ] + [
+        (pl.col(f"t1_price_{name}") / pl.col("entry_price") - 1.0).alias(f"raw_{name}")
+        for name in target_names
+    ])
+
+    # =========================================================================
+    # Robust Z-Score 
+    # =========================================================================
+    cols_to_zscore = ["gap"] + target_names
+    for name in cols_to_zscore:
+        z_col_name = "z_gap" if name == "gap" else f"fwd_z_{name}"
+
+        target_lf = target_lf.with_columns([
+            pl.col(f"raw_{name}").median().over("day").alias(f"med_{name}")
+        ]).with_columns([
+            (pl.col(f"raw_{name}") - pl.col(f"med_{name}")).abs().median().over("day").alias(f"mad_{name}")
+        ]).with_columns([
+            ((pl.col(f"raw_{name}") - pl.col(f"med_{name}")) / 
+             (1.4826 * pl.when(pl.col(f"mad_{name}") < 1e-4).then(1e-4).otherwise(pl.col(f"mad_{name}"))))
+            .clip(-3.0, 3.0).alias(z_col_name)
+        ]).drop([f"med_{name}", f"mad_{name}"])
+
+    output_cols = ["z_gap"] + [f"raw_{n}" for n in target_names] + [f"fwd_z_{n}" for n in target_names]
+    target_lf = target_lf.select(["day", "sid"] + output_cols)
+
+    # =========================================================================
+    # Downsample and Masking
     # =========================================================================
     if ds > 1:
         all_feat_lf = all_feat_lf.filter((pl.col("bar_idx") % ds) == 0)
 
-    calendar_lf = (
-        daily_lf.select("day")
-        .unique().sort("day")
-        .with_row_index(name="trade_day_idx", offset=0)
-        .with_columns(pl.col("trade_day_idx").cast(pl.Int32))
-    )
-    
-    unique_sids_lf = daily_lf.select("sid").unique()
-    skeleton_lf = unique_sids_lf.join(calendar_lf, how="cross")
-
-    raw_curve_lf = (
-        all_feat_lf.sort(["day", "sid", "bar_idx"])
-        .group_by(["day", "sid"])
+    curve_lf = (
+        all_feat_lf.group_by(["day", "sid"])
         .agg([
             pl.col("ofi_ratio").alias("daily_curve"),
             pl.col("ofi_ratio").count().alias("curve_len"),
         ])
-        .filter(pl.col("curve_len") == bars_per_day)
-        .select(["day", "sid", "daily_curve"])
+        .filter(pl.col("curve_len") == bars_per_day)  
     )
-
-    curve_lf = skeleton_lf.join(raw_curve_lf, on=["day", "sid"], how="left")
-
-    # =========================================================================
-    # trading_days left join ---> shift 
-    # =========================================================================
-    actual_cross_days = max(1, tune_config.get("cross_days", 1))
-    curve_lf = curve_lf.sort(["sid", "day"])
-
-    shift_exprs = [
-        pl.col("daily_curve").shift(i).over("sid").alias(f"lag_{i}")
-        for i in reversed(range(actual_cross_days))
-    ]
-
-    curve_lf = curve_lf.with_columns(shift_exprs).drop(["daily_curve", "trade_day_idx"]) # lag_0
+ 
+    curve_lf = curve_lf.join(
+        daily_lf.select(["day", "sid", "regime_signal"]), on=["day", "sid"], how="left"
+    ).with_columns([
+        pl.when(pl.col("regime_signal") == 1)
+        .then(pl.col("daily_curve"))
+        .otherwise(None)
+        .alias("lag_0") 
+    ]).drop(["regime_signal", "daily_curve", "curve_len"])
 
     # =========================================================================
-    # final join
+    # final
     # =========================================================================
-    panel_lf = curve_lf.join(
-        daily_ret_lf.select(["day", "sid"] + z_score_cols),
-        on=["day", "sid"],
-        how=join_how,
-    )
+    panel_lf = curve_lf.join(target_lf, on=["day", "sid"], how=join_how)
+    
     return panel_lf

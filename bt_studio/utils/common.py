@@ -34,42 +34,6 @@ def calculate_dtw_params(config: dict):
     return dtw_window
 
 
-def intercept(config):
-    # ====================================================
-    # Domain Knowledge Guardrails
-    # ====================================================
-    # 拦截 1 形态点数过少非有效博弈或过多无法匹配
-    m = int(config["ndays"] * np.floor(240 / config["downsample"]))
-    if m < 8 or m > 60:
-        return {"status": "failed", "reason": f"m={m} 长度不合理", "metrics_score": -9999}
-        
-    # # 拦截 2 频率倒挂 采样频率比Beta频率还高噪音
-    # if config["downsample"] < config["rolling_freq"]:
-    #     return {"status": "failed", "reason": "频率倒挂", "metrics_score": -9999}
-        
-    # # 拦截 3 相关系数与长度木桶效应
-    # if m > 30 and config["threshold_r"] > 0.90:
-    #     return {"status": "failed", "reason": "长序列要求高r", "metrics_score": -9999}
-    return {"status": "success"}
-
-
-# def get_latest_ckpt(target_year: int, model_dir: str) -> str:
-#     if not os.path.exists(model_dir): return None
-#     valid_models = []
-#     for f in os.listdir(model_dir):
-#         if f.startswith("model_") and f.endswith(".pkl"):
-#             try:
-#                 y = int(f.replace("model_", "").replace(".pkl", ""))
-#                 if y <= target_year:
-#                     valid_models.append((y, os.path.join(model_dir, f)))
-#             except ValueError:
-#                 continue
-                
-#     if not valid_models: return None
-#     valid_models.sort(key=lambda x: x[0], reverse=True)
-#     return valid_models[0][1]
-
-
 def _collect_stream_sync(observable) -> Dict[bytes, pl.DataFrame]:
     q = queue.Queue()
     observable.pipe(
@@ -98,11 +62,35 @@ def _collect_stream_sync(observable) -> Dict[bytes, pl.DataFrame]:
     return data_df
 
 
-def calculate_decay_weights(stats_windows: list[int], half_life: float = 1.0) -> dict[int, float]:
+def calculate_decay_weights(
+    rets_window: dict[str, int], 
+    half_life_minutes: float = 15.0
+) -> dict[str, float]:
     """
-    - half_life: default 1.0 (means day)
+    T+1 open Offset Targets exp weight
+
+    Parameters
+    ----------
+    rets_window : dict[str, int]
+        {"open_5m": 5, "open_15m": 15, "open_30m": 30}
+    half_life_minutes : float, optional
+        default: 30
+
+    Returns
+    -------
+    dict[str, float]
     """
-    decay_const = np.log(2) / half_life
-    raw_weights = [np.exp(-decay_const * (t - 1)) for t in stats_windows]
-    sum_w = sum(raw_weights)
-    return {t: float(w / sum_w) for t, w in zip(stats_windows, raw_weights)}
+    if not rets_window:
+        return {}
+
+    decay_const = np.log(2) / half_life_minutes
+
+    names = list(rets_window.keys())
+    minutes = np.array(list(rets_window.values()), dtype=np.float64)
+
+    raw_weights = np.exp(-decay_const * minutes)
+
+    sum_w = np.sum(raw_weights)
+    norm_weights = raw_weights / sum_w
+
+    return {name: float(w) for name, w in zip(names, norm_weights)}

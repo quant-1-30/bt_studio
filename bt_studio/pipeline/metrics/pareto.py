@@ -15,7 +15,6 @@ def find_pareto_front(df_results: pl.DataFrame, common_config: dict) -> pl.DataF
     # Complexity
     valid_df = valid_df.with_columns([
         (
-            pl.max_horizontal(pl.col("config/cross_days"), 1) * # cross_day 0 ---> complexity 0
             ((pl.col("config/motif_minutes") / pl.col("config/downsample")) * common_config["dtw_window_frac"]) * 
             (1.0 - pl.col("config/threshold_r"))
         ).alias("complexity")
@@ -70,16 +69,13 @@ def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict | None:
     # =========================================================================
     # avoid score stuck in zero or negative
     # =========================================================================
-    AUTOCORR_SHIFT = 1.1        # [-1, 1] ---> [0.1, 2.1]
-    SAMPLE_RATIO_FLOOR = 0.1    # [0, 1] ---> [0.1, 1.1]
-    
     utility_lf = (
         pareto_df.lazy()
         .with_columns(
             (
                 pl.col("efficiency") * 
-                (pl.col("autocorr") + AUTOCORR_SHIFT) * 
-                (pl.col("valid_sample_ratio") + SAMPLE_RATIO_FLOOR)
+                (pl.col("autocorr") + 1.1) * # [-1, 1] ---> [0.1, 2.1]
+                (pl.col("valid_sample_ratio") + 0.1) # [0, 1] ---> [0.1, 1.1]
             ).alias("final_utility")
         )
         .sort("final_utility", descending=True)
