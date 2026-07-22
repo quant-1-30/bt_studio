@@ -91,8 +91,6 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     )
     
     # MDP
-    # z-scored ratios: 仅用于相关性/权重计算（数学上需要标准化）
-    # demeaned ratios: 用于信号合成（保留时序几何形状，避免时变 MAD 扭曲）
     step5_lf = (
         step4_lf
         .with_columns([
@@ -139,7 +137,6 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
             (pl.col("w_liq_pos") / pl.col("w_sum")).alias("w_liq")
         ])
         .with_columns([
-            # 使用 demeaned ratios 合成信号（保留时序形状，不除以时变 MAD）
             (
                 pl.col("w_sa") * pl.col("sa_demean") + 
                 pl.col("w_imp") * pl.col("imp_demean") + 
@@ -152,8 +149,7 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     final_lf = (
         step5_lf
         .with_columns([
-            # 仅去均值（去市场共移），不除以时变 MAD，不做 tanh 压缩
-            # STUMPY 内部会对子序列做 z-normalization，无需预先压缩形状
+            # STUMPY z-normalization avoid tanh
             demean_expr("raw_score").alias("ofi_ratio")
         ])
         .rename({"minute_idx": "bar_idx"})

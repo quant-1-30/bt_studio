@@ -32,7 +32,7 @@ def extract_fsm_matrix(
     
     # Laplace Smoothing ---> np.ones
     trans_macro_t0 = np.ones((n_macro_states, n_ret_states), dtype=np.float64) 
-    # 2. T_{i} -> T_{i+1}
+    # T_{i} -> T_{i+1}
     trans_t_t = [np.ones((n_ret_states, n_ret_states), dtype=np.float64) for _ in range(num_windows - 1)]
 
     matrix_data = valid_chain.select(select_cols).to_numpy()
@@ -191,7 +191,7 @@ def evaluate_and_build_fsm(
     eval_df = eval_df.with_columns(pl.Series("distance", distances))
     triggers = eval_df.filter(pl.col("distance") <= threshold_d)
     complementary_df = eval_df.filter(pl.col("distance") > threshold_d)
-    
+
     if triggers.height < common_config["trigger"]:
         return {
             "status": "failed", 

@@ -125,3 +125,62 @@ def calc_min_subseq_dtw_md(row_md: np.ndarray, z_motif_t: np.ndarray, dtw_w: int
     # ]
     # curve_lf = curve_lf.with_columns(shift_exprs).drop(["trade_day_idx", "day_diff", "regime_signal"])
 
+
+# def get_balanced_samples(curves: np.ndarray, max_points: int = 20000) -> np.ndarray:
+#     """
+#         no cross_days 50% + 50%
+    
+#     :param curves: Shape (N, L) 1D /  (N, D, L) 
+#     :param max_points: Stumpy 
+#     """
+#     N = curves.shape[0]
+#     if N == 0:
+#         return curves
+
+#     # =========================================================================
+#     # Points Per Stock
+#     # =========================================================================
+#     if curves.ndim == 2:  # 1D: (N, L)
+#         points_per_stock = curves.shape[1]
+#     elif curves.ndim == 3:  # MD: (N, D, L)
+#         points_per_stock = curves.shape[1] * curves.shape[2]
+#     else:
+#         raise ValueError(f"Unsupported curves shape: {curves.shape}, expected 2D or 3D array.")
+
+#     sample_size = min(N, max(5, int(max_points / points_per_stock)))
+
+#     if N <= sample_size:
+#         return curves
+
+#     # =========================================================================
+#     # Mutation Score / Active Rank
+#     # =========================================================================
+#     if curves.ndim == 2:
+#         mutation_scores = np.nansum(np.abs(np.diff(curves, axis=1)), axis=1)
+#     else:
+#         diff_sum = np.nansum(np.abs(np.diff(curves, axis=2)), axis=2)  # Shape: (N, D)
+#         _mean = np.nanmean(diff_sum, axis=0, keepdims=True)
+#         _std = np.nanstd(diff_sum, axis=0, keepdims=True)
+#         _std = np.where(_std < 1e-8, 1e-8, _std)  # 防 0 划分
+        
+#         z_md = (diff_sum - _mean) / _std  # Shape: (N, D)
+#         mutation_scores = np.nansum(z_md, axis=1)  # Shape: (N,)
+
+#     mutation_scores = np.nan_to_num(mutation_scores, nan=0.0)
+
+#     # =========================================================================
+#     # 50% Top + 50% Random
+#     # =========================================================================
+#     half_size = sample_size // 2
+#     sorted_idx = np.argsort(mutation_scores)
+
+#     top_active_idx = sorted_idx[-half_size:]
+
+#     remaining_idx = sorted_idx[:-half_size]
+    
+#     random_size = min(sample_size - half_size, len(remaining_idx))
+#     random_idx = np.random.choice(remaining_idx, size=random_size, replace=False)
+
+#     final_sample_idx = np.sort(np.concatenate([top_active_idx, random_idx]))
+#     return curves[final_sample_idx]
+

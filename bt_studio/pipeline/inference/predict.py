@@ -1,5 +1,6 @@
 import numpy as np
 import polars as pl
+from concurrent.futures import ThreadPoolExecutor
 from bt_studio.pipeline.patterns.astc import calc_min_subseq_dtw, prepare_curves
 from bt_studio.utils.common import calculate_decay_weights
 
@@ -33,7 +34,7 @@ class FSMPredictor:
             self.trans_matrices.append(np.array(fsm_matrix[key]))
 
         self.state_return_vectors = fsm_matrix["state_return_vectors"]
-        self.traj_weights = calculate_decay_weights(self.target_names, half_life=common_config["decay"]) 
+        self.traj_weights = calculate_decay_weights(self.target_names, half_life=common_config["decay_minutes"]) 
         
     def _get_macro_state(self, panel_df: pl.DataFrame) -> pl.DataFrame:
         rank_window = self.common_config["ranking_window"]

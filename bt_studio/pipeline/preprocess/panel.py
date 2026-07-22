@@ -26,7 +26,8 @@ def build_fsm_panel(
     
     join_how = "inner" if is_train else "left"
     ds = tune_config["downsample"]
-    bars_per_day = 240 // ds  
+    bars_per_day = 240 // ds 
+    eps = common_config["eps"] 
 
     # =========================================================================
     # daily and all
@@ -83,20 +84,20 @@ def build_fsm_panel(
 
     # Gap
     target_lf = target_lf.with_columns([
-        pl.when(pl.col("t_close") > 1e-4)
+        pl.when(pl.col("t_close") > eps)
         .then(pl.col("t1_open_price") / pl.col("t_close") - 1.0)
         .otherwise(None) 
         .alias("raw_gap")
     ] + [
         # PnL T 14:50 ---> T+1 
-        pl.when(pl.col("entry_price") > 1e-4)
+        pl.when(pl.col("entry_price") > eps)
         .then(pl.col(f"t1_price_{name}") / pl.col("entry_price") - 1.0)
         .otherwise(None)
         .alias(f"raw_{name}")
         for name in target_names
     ] + [
         # T +1 Momeum
-        pl.when(pl.col("t1_open_price") > 1e-4)
+        pl.when(pl.col("t1_open_price") > eps)
         .then(pl.col(f"t1_price_{name}") / pl.col("t1_open_price") - 1.0)
         .otherwise(None)
         .alias(f"intra_{name}")
@@ -116,7 +117,7 @@ def build_fsm_panel(
             (pl.col(f"raw_{name}") - pl.col(f"med_{name}")).abs().median().over("day").alias(f"mad_{name}")
         ]).with_columns([
             ((pl.col(f"raw_{name}") - pl.col(f"med_{name}")) / 
-             (1.4826 * pl.when(pl.col(f"mad_{name}") < 1e-4).then(1e-4).otherwise(pl.col(f"mad_{name}"))))
+             (1.4826 * pl.when(pl.col(f"mad_{name}") < eps).then(eps).otherwise(pl.col(f"mad_{name}"))))
             .clip(-3.0, 3.0).alias(z_col_name)
         ]).drop([f"med_{name}", f"mad_{name}"])
 
@@ -129,10 +130,16 @@ def build_fsm_panel(
     if ds > 1:
         all_feat_lf = all_feat_lf.filter((pl.col("bar_idx") % ds) == 0)
 
+    # =========================================================================
+    # CRITICAL: sort_by("bar_idx") ensures intraday time ordering inside list
+    # Polars group_by is multi-threaded hash aggregation that does NOT guarantee
+    # element order inside the aggregated list. Without sort_by, 09:30 data could
+    # end up after 14:00, turning the OFI curve into shuffled white noise.
+    # =========================================================================
     curve_lf = (
         all_feat_lf.group_by(["day", "sid"])
         .agg([
-            pl.col("ofi_ratio").alias("daily_curve"),
+            pl.col("ofi_ratio").sort_by("bar_idx").alias("daily_curve"),
             pl.col("ofi_ratio").count().alias("curve_len"),
         ])
         .filter(pl.col("curve_len") == bars_per_day)  

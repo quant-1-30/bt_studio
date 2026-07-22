@@ -8,86 +8,51 @@ from .fsm import evaluate_and_build_fsm
 
 
 def get_balanced_samples(curves: np.ndarray, max_points: int = 20000) -> np.ndarray:
-    """
-        no cross_days 50% + 50%
-    
-    :param curves: Shape (N, L) 1D /  (N, D, L) 
-    :param max_points: Stumpy 
-    """
-    N = curves.shape[0]
-    if N == 0:
-        return curves
+    if curves.ndim != 2 or curves.size == 0:
+        return np.empty((0, curves.shape[1] if curves.ndim == 2 else 0))
 
-    # =========================================================================
-    # Points Per Stock
-    # =========================================================================
-    if curves.ndim == 2:  # 1D: (N, L)
-        points_per_stock = curves.shape[1]
-    elif curves.ndim == 3:  # MD: (N, D, L)
-        points_per_stock = curves.shape[1] * curves.shape[2]
-    else:
-        raise ValueError(f"Unsupported curves shape: {curves.shape}, expected 2D or 3D array.")
+    N, L = curves.shape
+    sample_size = min(N, max(5, int(max_points / L)))
 
-    sample_size = min(N, max(5, int(max_points / points_per_stock)))
+    valid_mask = ~np.isnan(curves).all(axis=1)
+    valid_curves = curves[valid_mask]
 
-    if N <= sample_size:
-        return curves
+    if len(valid_curves) <= sample_size:
+        return valid_curves
 
-    # =========================================================================
-    # Mutation Score / Active Rank
-    # =========================================================================
-    if curves.ndim == 2:
-        mutation_scores = np.nansum(np.abs(np.diff(curves, axis=1)), axis=1)
-    else:
-        diff_sum = np.nansum(np.abs(np.diff(curves, axis=2)), axis=2)  # Shape: (N, D)
-        _mean = np.nanmean(diff_sum, axis=0, keepdims=True)
-        _std = np.nanstd(diff_sum, axis=0, keepdims=True)
-        _std = np.where(_std < 1e-8, 1e-8, _std)  # 防 0 划分
-        
-        z_md = (diff_sum - _mean) / _std  # Shape: (N, D)
-        mutation_scores = np.nansum(z_md, axis=1)  # Shape: (N,)
-
-    mutation_scores = np.nan_to_num(mutation_scores, nan=0.0)
-
-    # =========================================================================
-    # 50% Top + 50% Random
-    # =========================================================================
-    half_size = sample_size // 2
-    sorted_idx = np.argsort(mutation_scores)
-
-    top_active_idx = sorted_idx[-half_size:]
-
-    remaining_idx = sorted_idx[:-half_size]
-    
-    random_size = min(sample_size - half_size, len(remaining_idx))
-    random_idx = np.random.choice(remaining_idx, size=random_size, replace=False)
-
-    final_sample_idx = np.sort(np.concatenate([top_active_idx, random_idx]))
-    return curves[final_sample_idx]
+    idx = np.random.choice(len(valid_curves), size=sample_size, replace=False)
+    return valid_curves[idx]
 
 
 def discover_fsm_pattern(
-    panel_lf: pl.LazyFrame,  
-    tune_config: dict, 
+    panel_lf: pl.LazyFrame,
+    tune_config: dict,
     common_config: dict
-) -> Dict[str, Any]: 
+) -> Dict[str, Any]:
 
     m = int(tune_config["motif_minutes"] // tune_config["downsample"])
     threshold_d = float(np.sqrt(2 * m * (1.0 - tune_config["threshold_r"])))
+    random_dist = float(np.sqrt(2 * m))
 
     # =========================================================================
-    # 1. Filter Panel DataFrame
+    # 1. Drop DataFrame lag_0 null
     # =========================================================================
-    panel_df = panel_lf.collect(engine="streaming")
-    if panel_df.height == 0:
+    try:
+        panel_df = panel_lf.collect(engine="streaming")
+    except Exception:
+        panel_df = panel_lf if isinstance(panel_lf, pl.DataFrame) else panel_lf.collect()
+
+    panel_df = panel_df.filter(pl.col("lag_0").is_not_null())
+
+    if panel_df.height <= m or m < 3:
         return {
-            "status": "failed", 
-            "reason": f"Panel_df height 0", 
+            "status": "failed",
+            "reason": f"Data not enough after mask (n={panel_df.height})",
             "metrics_score": -100.0
         }
 
     # =========================================================================
-    # 2. Features Matrix (N,L)
+    # Tensor Matrix
     # =========================================================================
     tune_config["m"] = m
     tune_config["threshold_d"] = threshold_d
@@ -96,41 +61,42 @@ def discover_fsm_pattern(
 
     if curves_2d.size == 0:
         return {
-            "status": "failed", 
-            "reason": "Curves_2d Empty", 
+            "status": "failed",
+            "reason": "Curves_2d Empty",
             "metrics_score": -100.0
         }
 
     # =========================================================================
-    # 3. Volatility-Driven Sampling for stumpy
+    # 3. Balanced Sample
     # =========================================================================
-    theory_points = common_config.get("max_points", 20000) 
-    sampled_curves = get_balanced_samples(curves_2d, max_points=theory_points) 
-    
+    theory_points = common_config.get("max_points", 20000)
+    sampled_curves = get_balanced_samples(curves_2d, max_points=theory_points)
+
     # =========================================================================
-    # 4. Nans between assets and Stumpy T_multi(Sample_N * L) For Candidates 
+    # 4. Padding and NaN
     # =========================================================================
     clean_curves = np.copy(sampled_curves)
-    clean_curves[np.isinf(clean_curves)] = 0.0 # np.nan_to_num(sampled_curves, nan=0.0, posinf=0.0, neginf=0.0) 
-    # m NaN as separate between assets
+    clean_curves[np.isinf(clean_curves)] = 0.0
+
     nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
-    stumpy_1d_array = np.hstack([clean_curves, nan_buffer]).flatten()[:-m] # abundan last m np.nan
+    stumpy_1d_array = np.hstack([clean_curves, nan_buffer]).flatten()[:-m]
 
     candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, common_config)
-    
-    if not candidate_motifs: 
+
+    if not candidate_motifs:
         return {
-            "status": "failed", 
-            "reason": "Not Found Motif", 
+            "status": "failed",
+            "reason": "STUMPY returned no valid motifs",
             "metrics_score": -100.0
         }
-    
+
+    # =========================================================================
+    # 5. Estimate
+    # =========================================================================
     best_result, highest_score = None, -100.0
-    eps = common_config["eps"]
 
     for motif in candidate_motifs:
-
-        if np.nanstd(motif) < eps: 
+        if np.nanstd(motif) < 1e-4:
             continue
 
         result = evaluate_and_build_fsm(
@@ -139,5 +105,9 @@ def discover_fsm_pattern(
         if result["status"] == "success" and result["metrics_score"] > highest_score:
             highest_score = result["metrics_score"]
             best_result = result
-            
-    return best_result if best_result else {"status": "failed", "reason": "(P-val > 0.1)", "metrics_score": -100.0}
+
+    return best_result if best_result else {
+        "status": "failed",
+        "reason": "All candidates failed statistical tests",
+        "metrics_score": -100.0
+    }

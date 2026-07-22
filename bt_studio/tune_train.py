@@ -1,4 +1,3 @@
-
 import os
 # ==============================================================================
 # C++ / OpenMP Ray Worker Polars/NumPy CEngine DeadLock Prevention
@@ -211,7 +210,6 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
 
     result = discover_fsm_pattern(panel_lf, config, common_config)
     if result["status"] == "success":
-        print(f"\n[Trail Success] Score: {result['metrics_score']:.4f} ; Config: {config}\n")
         tune.report({
             "metrics_score": result["metrics_score"], 
             "u_pval": result["u_pval"],
@@ -222,7 +220,6 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
             "fsm_matrix": result["fsm_matrix"]
         })
     else:
-        print(f"\n[Trail Failed] Config: {config} -> Reason: {result.get('reason', 'Unknown')}\n")
         tune.report({
             "metrics_score": result["metrics_score"], 
             "u_pval": result.get("u_pval", 1.0), 
@@ -640,6 +637,7 @@ if __name__ == "__main__":
 
             "trigger": 5, # dtw distance
             "topk": 5, # candidate
+            "min_triggers": 30, # HPO post-filter minimum trigger count
 
              # stats
             "alternative": "greater",
@@ -649,7 +647,7 @@ if __name__ == "__main__":
         "search_bounds": {
             "downsample": [3, 4, 5], # downsample for DTW
             "motif_minutes": [30, 45, 60, 90], # used from motif length intraday
-            "threshold_r": [0.45, 0.70], 
+            "threshold_r": [0.1, 0.40], 
             "num_trials": 400, 
             "max_concurrent_trials": 8
         }

@@ -42,21 +42,18 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dic
         return []
 
     threshold_d = config["threshold_d"]
+    # 理论随机距离: 两个不相关 z-norm 序列的期望欧氏距离
+    random_dist = float(np.sqrt(2 * m))
     
-    try:
-        mp = stumpy.stump(raw_array, m=m)
-    except Exception:
-        return []
-
+    mp = stumpy.stump(raw_array, m=m)
     distances = np.ascontiguousarray(mp[:, 0], dtype=np.float64)
     
     shape = (raw_array.size - m + 1, m)
     strides = (raw_array.strides[0], raw_array.strides[0])
-    windows = np.lib.stride_tricks.as_strided(raw_array, shape=shape, strides=strides) # row --> next row 8byte
+    windows = np.lib.stride_tricks.as_strided(raw_array, shape=shape, strides=strides)
     
     has_nan = np.any(np.isnan(windows), axis=1)
     
-    # np.std  ---> np.nanstd and np.errstate supress NaN RuntimeWarning
     with np.errstate(invalid='ignore'):
         std_vals = np.std(windows, axis=1)
         is_even = std_vals < common_config["eps"]
@@ -84,6 +81,7 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dic
         exclude_start = max(0, anchor_idx - m)
         exclude_end = min(distances.size, anchor_idx + m)
         distances[exclude_start:exclude_end] = np.inf
+
     return candidates
 
 
@@ -117,7 +115,7 @@ def calc_min_subseq_dtw(
     min_dist = np.inf
     
     for i in range(len(z_windows)):
-        z_sub = np.ascontiguousarray(z_windows[i], dtype=np.float64) # row contiguous
+        z_sub = np.ascontiguousarray(z_windows[i], dtype=np.float64)
 
         d = dtw.distance_fast(
             z_sub, 

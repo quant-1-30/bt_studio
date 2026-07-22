@@ -4,7 +4,7 @@ from bt_studio.utils.common import _collect_stream_sync
 
 def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     meta_lf = universe_lf.select(["sid", "first_trading"])
-    eps = 1e-6
+    eps = common_config["eps"]
     
     uni_lf = (
         daily_lf
