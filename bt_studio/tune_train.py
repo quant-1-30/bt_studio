@@ -215,6 +215,9 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
         tune.report({
             "metrics_score": result["metrics_score"], 
             "u_pval": result["u_pval"],
+            "trigger_count": result.get("trigger_count", 0),
+            "valid_sample_ratio": result.get("valid_sample_ratio", 0.0),
+            "autocorr": result.get("autocorr", 0.0),
             "learned_motif": result["learned_motif"], 
             "fsm_matrix": result["fsm_matrix"]
         })
@@ -223,6 +226,9 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
         tune.report({
             "metrics_score": result["metrics_score"], 
             "u_pval": result.get("u_pval", 1.0), 
+            "trigger_count": result.get("trigger_count", 0),
+            "valid_sample_ratio": result.get("valid_sample_ratio", 0.0),
+            "autocorr": result.get("autocorr", 0.0),
             "learned_motif": [], 
             "fsm_matrix": {},
             "reason": result.get("reason", "Unknown")
@@ -340,14 +346,14 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # =========================================================================
     df_results = pl.from_pandas(results.get_dataframe()) # abandon dict fsm_matrix
 
-    if valid_trials.height == 0:
-        print(f"⚠️ [Failed] {model_id} valid_trials height 0")
+    if df_results.height == 0:
+        print(f"⚠️ [Failed] {model_id} df_results height 0")
         return False
 
     max_pval = common_config.get("u_pval", 0.2)
     min_triggers = common_config.get("min_triggers", 30)
     
-    stats_valid_trials = math_valid_trials.filter(
+    stats_valid_trials = df_results.filter(
         (pl.col("u_pval") <= max_pval) & 
         (pl.col("trigger_count") >= min_triggers)
     )
@@ -368,7 +374,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
         return False
 
     # pareto front
-    pareto_front_df = find_pareto_front(valid_trials, common_config)
+    pareto_front_df = find_pareto_front(stats_valid_trials, common_config)
     best_model_dict = select_best_model_from_pareto(pareto_front_df)
     
     if not best_model_dict:
@@ -621,7 +627,7 @@ if __name__ == "__main__":
             "decay_minutes": 15, # minute calculate weight
             
             # ofi
-            "eps": 1e-4,
+            "eps": 1e-8,
             "min_factor_weight": 0.05,      
 
             # stumpy curves and overlap for stumpy  
@@ -642,8 +648,8 @@ if __name__ == "__main__":
 
         "search_bounds": {
             "downsample": [3, 4, 5], # downsample for DTW
-            "motif_minutes": [45, 60, 90], # used from motif length intraday
-            "threshold_r": [0.55, 0.80], 
+            "motif_minutes": [30, 45, 60, 90], # used from motif length intraday
+            "threshold_r": [0.45, 0.70], 
             "num_trials": 400, 
             "max_concurrent_trials": 8
         }

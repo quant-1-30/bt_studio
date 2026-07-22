@@ -32,7 +32,7 @@ def find_pareto_front(df_results: pl.DataFrame, common_config: dict) -> pl.DataF
     autocorr = valid_df["autocorr"].to_numpy()          
     
     # row control by column ---> colj - rowi
-    Eff_diff = eff[None, :] - eff[:, None] 
+    Eff_diff = efficiency[None, :] - efficiency[:, None] 
     Den_diff = density[None, :] - density[:, None]
     Auto_diff = autocorr[None, :] - autocorr[:, None]
     

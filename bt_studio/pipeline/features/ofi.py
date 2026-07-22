@@ -2,7 +2,13 @@ import polars as pl
 import numpy as np
 
 
-# MAD Normalize
+# Cross-Sectional Demean Only (preserves time-series shape for STUMPY/DTW)
+def demean_expr(col_name: str) -> pl.Expr:
+    median = pl.col(col_name).median().over(["day", "minute_idx"])
+    return pl.col(col_name) - median
+
+
+# MAD Normalize (used for correlation/weight calculation only)
 def robust_zscore_expr(col_name: str) -> pl.Expr:
     median = pl.col(col_name).median().over(["day", "minute_idx"])
     mad = (pl.col(col_name) - median).abs().median().over(["day", "minute_idx"])
@@ -85,12 +91,17 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     )
     
     # MDP
+    # z-scored ratios: 仅用于相关性/权重计算（数学上需要标准化）
+    # demeaned ratios: 用于信号合成（保留时序几何形状，避免时变 MAD 扭曲）
     step5_lf = (
         step4_lf
         .with_columns([
             robust_zscore_expr("sa_ratio").alias("sa_z_tmp"),
             robust_zscore_expr("impact_ratio").alias("imp_z_tmp"),
-            robust_zscore_expr("liquidity_ratio").alias("liq_z_tmp")
+            robust_zscore_expr("liquidity_ratio").alias("liq_z_tmp"),
+            demean_expr("sa_ratio").alias("sa_demean"),
+            demean_expr("impact_ratio").alias("imp_demean"),
+            demean_expr("liquidity_ratio").alias("liq_demean")
         ])
         .with_columns([
             # E(X)=0, E(Y)=0,Cov(X,Y) = E(XY)
@@ -128,10 +139,11 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
             (pl.col("w_liq_pos") / pl.col("w_sum")).alias("w_liq")
         ])
         .with_columns([
+            # 使用 demeaned ratios 合成信号（保留时序形状，不除以时变 MAD）
             (
-                pl.col("w_sa") * pl.col("sa_z_tmp") + 
-                pl.col("w_imp") * pl.col("imp_z_tmp") + 
-                pl.col("w_liq") * pl.col("liq_z_tmp")
+                pl.col("w_sa") * pl.col("sa_demean") + 
+                pl.col("w_imp") * pl.col("imp_demean") + 
+                pl.col("w_liq") * pl.col("liq_demean")
             ).alias("raw_score")
         ])
         .select(["day", "sid", "minute_idx","open", "close", "raw_score"])
@@ -140,14 +152,12 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     final_lf = (
         step5_lf
         .with_columns([
-            robust_zscore_expr("raw_score").alias("z_score_tmp")
-        ])
-        .with_columns([
-            pl.col("z_score_tmp").tanh().alias("ofi_ratio") 
+            # 仅去均值（去市场共移），不除以时变 MAD，不做 tanh 压缩
+            # STUMPY 内部会对子序列做 z-normalization，无需预先压缩形状
+            demean_expr("raw_score").alias("ofi_ratio")
         ])
         .rename({"minute_idx": "bar_idx"})
         .select(["day", "sid", "bar_idx", "open", "close", "ofi_ratio"])
         .sort(["day", "sid", "bar_idx"])
     )
     return final_lf
-    

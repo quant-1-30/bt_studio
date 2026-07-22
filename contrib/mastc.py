@@ -50,7 +50,7 @@ def get_candidate_motifs_md(T_multi: np.ndarray, config: dict, dimension: int, t
         distances[max(0, anchor - m) : min(len(distances), anchor + m)] = np.inf
         
     if not candidate_motifs: 
-        return {"status": "failed", "reason": "Not Found Motif", "metrics_score": -9999.0}
+        return {"status": "failed", "reason": "Not Found Motif", "metrics_score": -100.0}
         
     return candidate_motifs
 

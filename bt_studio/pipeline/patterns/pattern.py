@@ -83,7 +83,7 @@ def discover_fsm_pattern(
         return {
             "status": "failed", 
             "reason": f"Panel_df height 0", 
-            "metrics_score": -9999.0
+            "metrics_score": -100.0
         }
 
     # =========================================================================
@@ -98,7 +98,7 @@ def discover_fsm_pattern(
         return {
             "status": "failed", 
             "reason": "Curves_2d Empty", 
-            "metrics_score": -9999.0
+            "metrics_score": -100.0
         }
 
     # =========================================================================
@@ -122,10 +122,10 @@ def discover_fsm_pattern(
         return {
             "status": "failed", 
             "reason": "Not Found Motif", 
-            "metrics_score": -9999.0
+            "metrics_score": -100.0
         }
     
-    best_result, highest_score = None, -9999.0
+    best_result, highest_score = None, -100.0
     eps = common_config["eps"]
 
     for motif in candidate_motifs:
@@ -140,4 +140,4 @@ def discover_fsm_pattern(
             highest_score = result["metrics_score"]
             best_result = result
             
-    return best_result if best_result else {"status": "failed", "reason": "(P-val > 0.1)", "metrics_score": -9999.0}
+    return best_result if best_result else {"status": "failed", "reason": "(P-val > 0.1)", "metrics_score": -100.0}
