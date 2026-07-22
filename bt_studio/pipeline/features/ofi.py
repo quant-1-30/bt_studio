@@ -18,9 +18,16 @@ def robust_zscore_expr(col_name: str) -> pl.Expr:
 
 def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     eps = common_config["eps"]
-    min_w = common_config["min_factor_weight"]   
-    
-    sorted_lf = aligned_lf.sort(["day", "sid", "minute_idx"])
+    min_w = common_config["min_factor_weight"]
+
+    # [VALIDATION] build_ofi uses cross-sectional demean over ["day", "minute_idx"].
+    # If only 1 sid is provided, median == value, producing all-zero ofi_ratio.
+    # This is the root cause of "STUMPY returned no valid motifs".
+    _n_sids = aligned_lf.select(pl.col("sid").n_unique()).collect().item()
+    if _n_sids <= 1:
+        print(f"  ⚠️ [build_ofi WARNING] Only {_n_sids} unique sid in input! "
+              f"Cross-sectional demean will produce all-zero ofi_ratio. "
+              f"Must concat ALL sids BEFORE calling build_ofi.")
     
     step1_lf = (
         aligned_lf.sort(["day", "sid", "minute_idx"])

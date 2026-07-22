@@ -42,8 +42,8 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dic
         return []
 
     threshold_d = config["threshold_d"]
-    # 理论随机距离: 两个不相关 z-norm 序列的期望欧氏距离
-    random_dist = float(np.sqrt(2 * m))
+    # # 理论随机距离: 两个不相关 z-norm 序列的期望欧氏距离
+    # random_dist = float(np.sqrt(2 * m))
     
     mp = stumpy.stump(raw_array, m=m)
     distances = np.ascontiguousarray(mp[:, 0], dtype=np.float64)
@@ -59,12 +59,8 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dic
         is_even = std_vals < common_config["eps"]
         
     bad_mask = has_nan | is_even
-    
     distances[bad_mask[:distances.size]] = np.inf
     distances[np.isnan(distances) | np.isinf(distances)] = np.inf
-
-    if np.all(np.isinf(distances)):
-        return []
 
     candidates = []
     
@@ -82,6 +78,7 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dic
         exclude_end = min(distances.size, anchor_idx + m)
         distances[exclude_start:exclude_end] = np.inf
 
+    print(f"[DEBUG astc] candidates found: {len(candidates)}")
     return candidates
 
 

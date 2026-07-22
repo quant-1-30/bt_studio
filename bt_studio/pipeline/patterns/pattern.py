@@ -43,7 +43,6 @@ def discover_fsm_pattern(
         panel_df = panel_lf if isinstance(panel_lf, pl.DataFrame) else panel_lf.collect()
 
     panel_df = panel_df.filter(pl.col("lag_0").is_not_null())
-
     if panel_df.height <= m or m < 3:
         return {
             "status": "failed",
@@ -82,7 +81,6 @@ def discover_fsm_pattern(
     stumpy_1d_array = np.hstack([clean_curves, nan_buffer]).flatten()[:-m]
 
     candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, common_config)
-
     if not candidate_motifs:
         return {
             "status": "failed",

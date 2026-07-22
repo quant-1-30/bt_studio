@@ -118,15 +118,27 @@ def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, common
     print(f"📥 [gRPC Batch] Fetching tick data from {start_d} to {end_d}...")
     snapshot_dict = prepare_tick(start_date=start_d, end_date=end_d, sids=union_sids)
     
-    eager_dfs = []
-    for sid_bytes, lf in snapshot_dict.items():
-        processed_df = build_ofi(lf, common_config).collect()
-        if processed_df.height > 0:
-            eager_dfs.append(processed_df)
-        
-    if not eager_dfs: return sorted(paths)
+    # [FIX] Concat ALL sids BEFORE build_ofi (cross-sectional demean needs multiple sids)
+    all_lazy_frames = list(snapshot_dict.values())
+    if not all_lazy_frames:
+        return sorted(paths)
 
-    big_df = pl.concat(eager_dfs)
+    combined_lf = pl.concat(all_lazy_frames)
+    big_df = build_ofi(combined_lf, common_config).collect()
+
+    if big_df.height == 0:
+        return sorted(paths)
+
+    # [DEBUG] Verify ofi_ratio is not all zeros
+    ofi_stats = big_df.select([
+        pl.col("ofi_ratio").mean().alias("mean"),
+        pl.col("ofi_ratio").std().alias("std"),
+        (pl.col("ofi_ratio") != 0).sum().alias("nonzero_count"),
+        pl.len().alias("total"),
+    ]).row(0, named=True)
+    print(f"  [DEBUG build_ofi] ofi_ratio: mean={ofi_stats['mean']:.6f}, std={ofi_stats['std']:.6f}, nonzero={ofi_stats['nonzero_count']}/{ofi_stats['total']}")
+    if ofi_stats["std"] == 0.0 or ofi_stats["nonzero_count"] == 0:
+        print(f"  ⚠️ [WARNING] ofi_ratio is ALL ZEROS! Cross-sectional demean may have failed.")
     big_df = big_df.with_columns((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
     
     print("💾 Writing partitioned PIT monthly parquets to disk...")
@@ -386,11 +398,12 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # Ray ResultGrid ---> Result
     best_trial_id = best_model_dict["trial_id"]
     best_ray_result = None
+
     for r in results:
-        if r.trial_id == best_trial_id:
+        if r.metrics.get("trial_id") == best_trial_id:
             best_ray_result = r
             break
-            
+
     if best_ray_result is None:
         raise KeyError(f"Failed to locate original Ray Result for trial_id: {best_trial_id}")
     
@@ -647,7 +660,7 @@ if __name__ == "__main__":
         "search_bounds": {
             "downsample": [3, 4, 5], # downsample for DTW
             "motif_minutes": [30, 45, 60, 90], # used from motif length intraday
-            "threshold_r": [0.1, 0.40], 
+            "threshold_r": [0.5, 0.8], 
             "num_trials": 400, 
             "max_concurrent_trials": 8
         }
