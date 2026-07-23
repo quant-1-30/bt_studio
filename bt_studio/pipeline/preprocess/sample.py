@@ -1,5 +1,5 @@
 import polars as pl
-from bt_studio.utils.common import _collect_stream_sync
+from bt_studio.pipeline.utils import _collect_stream_sync
 
 
 def universe_sample(universe_lf: pl.LazyFrame, daily_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:

@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 
 from .astc import calc_min_subseq_dtw
 from bt_studio.pipeline.metrics import calculate_hpo_score
-from bt_studio.utils.common import calculate_decay_weights
+from bt_studio.pipeline.utils import calculate_decay_weights
 
 
 def extract_fsm_matrix(

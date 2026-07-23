@@ -2,7 +2,7 @@ import numpy as np
 import polars as pl
 from concurrent.futures import ThreadPoolExecutor
 from bt_studio.pipeline.patterns.astc import calc_min_subseq_dtw, prepare_curves
-from bt_studio.utils.common import calculate_decay_weights
+from bt_studio.pipeline.utils import calculate_decay_weights
 
 
 class FSMPredictor:
@@ -26,11 +26,11 @@ class FSMPredictor:
         # =========================================================================
         fsm_matrix = model_ckpt["fsm_matrix"]
         
-        self.p_macro_t0 = np.array(fsm_matrix[f"P(T{self.target_names[0]}|Macro)"])
+        self.p_macro_t0 = np.array(fsm_matrix[f"P({self.target_names[0]}|Macro)"])
         self.trans_matrices = []
 
         for i in range(1, len(self.target_names)):
-            key = f"P(T{self.target_names[i]}|T{self.target_names[i-1]})"
+            key = f"P({self.target_names[i]}|{self.target_names[i-1]})"
             self.trans_matrices.append(np.array(fsm_matrix[key]))
 
         self.state_return_vectors = fsm_matrix["state_return_vectors"]
@@ -145,4 +145,3 @@ class FSMPredictor:
         if panel_df.height == 0: 
             return pl.DataFrame()
         return self._predict(panel_df)
-

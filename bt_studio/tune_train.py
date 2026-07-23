@@ -300,7 +300,11 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
             points_to_evaluate=[{k: prior_cfg[k] for k in search_space if k in prior_cfg}]
 
     # multithread / sample optimize
-    optuna_sampler = optuna.samplers.TPESampler(n_startup_trials=10, multivariate=True) #
+    optuna_sampler = optuna.samplers.TPESampler(
+        n_startup_trials=common_config["n_startup_trials"], 
+        multivariate=True
+    ) 
+
     search_alg = OptunaSearch(
         sampler=optuna_sampler,
         points_to_evaluate=points_to_evaluate
@@ -334,7 +338,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
             num_samples=search_config["num_trials"],        
             # # used for Iterative Training not for One-shot / Single-step Computation    
             # scheduler=tune.schedulers.ASHAScheduler(grace_period=search_config["grace_period"], reduction_factor=search_config["reduction_factor"]),
-            max_concurrent_trials=search_config["max_concurrent_trials"]
+            max_concurrent_trials=common_config["max_concurrent_trials"]
         ),
         run_config=tune.RunConfig(
             name=f"fsm_hpo_{model_id}", 
@@ -607,8 +611,6 @@ def wfo_pipeline(exp_config):
 
 if __name__ == "__main__":
 
-    os.environ["MLFLOW_TRACKING_URI"] = "http://127.0.0.1:5000"
-
     load_dotenv()
 
     exp_config = {
@@ -654,15 +656,18 @@ if __name__ == "__main__":
 
              # stats
             "alternative": "greater",
-            "u_pval": 0.2, # 0.05 too strict and least
+            "u_pval": 0.15, # 0.05 too strict and least
+
+            # concurrency
+            "n_startup_trials": 20, 
+            "max_concurrent_trials": 8
         },
 
         "search_bounds": {
             "downsample": [3, 4, 5], # downsample for DTW
             "motif_minutes": [30, 45, 60, 90], # used from motif length intraday
             "threshold_r": [0.5, 0.8], 
-            "num_trials": 400, 
-            "max_concurrent_trials": 8
+            "num_trials": 500, 
         }
     }
 

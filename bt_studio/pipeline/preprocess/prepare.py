@@ -5,7 +5,7 @@ from bt_sdk.ctx import external_mdapi_context
 from bt_protocol._protocol import QueryBody
 from bt_protocol.constant import RpcTopic
 
-from bt_studio.utils.common import _collect_stream_sync
+from bt_studio.pipeline.utils import _collect_stream_sync
 
 
 def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
