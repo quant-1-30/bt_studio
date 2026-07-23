@@ -11,7 +11,8 @@ from bt_studio.pipeline.utils import calculate_decay_weights
 
 def extract_fsm_matrix(
     triggers: pl.DataFrame, 
-    state_cols: list, 
+    state_cols: list,
+    target_names: list,  
     n_macro_states: int = 3, 
     n_ret_states: int = 4
 ) -> dict:
@@ -27,8 +28,7 @@ def extract_fsm_matrix(
     if valid_chain.height == 0:
         return fsm_dict
 
-    windows = [col.split("_")[-1] for col in state_cols]
-    num_windows = len(windows)
+    num_windows = len(target_names)
     
     # Laplace Smoothing ---> np.ones
     trans_macro_t0 = np.ones((n_macro_states, n_ret_states), dtype=np.float64) 
@@ -47,12 +47,12 @@ def extract_fsm_matrix(
             if 0 <= bins[i] < n_ret_states and 0 <= bins[i + 1] < n_ret_states:
                 trans_t_t[i][bins[i], bins[i + 1]] += 1.0 
             
-    key_macro = f"P({windows[0]}|Macro)"
+    key_macro = f"P({target_names[0]}|Macro)"
     fsm_dict[key_macro] = np.round(trans_macro_t0 / trans_macro_t0.sum(axis=1, keepdims=True), 6).tolist()
     
     # num_windows
     for i in range(num_windows - 1):
-        key = f"P({windows[i+1]}|{windows[i]})"
+        key = f"P({target_names[i+1]}|{target_names[i]})"
         mat = trans_t_t[i]
         fsm_dict[key] = np.round(mat / mat.sum(axis=1, keepdims=True), 6).tolist()
             
@@ -113,7 +113,7 @@ def evaluate_and_build_fsm(
     ranking_ratio = common_config["ranking_ratio"]
 
     target_names = list(common_config["T1_rets"].keys()) # e.g. ["open_15m", "open_30m"]
-    target_state_cols = [] 
+    target_states = [] 
 
     for target_name in target_names:
         z_score_col = f"fwd_z_{target_name}"
@@ -122,7 +122,7 @@ def evaluate_and_build_fsm(
             continue
 
         state_col = f"state_{target_name}"
-        target_state_cols.append(state_col) 
+        target_states.append(state_col) 
         rank_col = f"rank_{target_name}"
         
         eval_df = (
@@ -259,7 +259,7 @@ def evaluate_and_build_fsm(
     # 7. Markov Laplace Matrix
     # =====================================================================================================================
 
-    fsm_matrix = extract_fsm_matrix(triggers, target_state_cols)
+    fsm_matrix = extract_fsm_matrix(triggers, target_states, target_names)
     
     for k in list(fsm_matrix.keys()):
         if isinstance(fsm_matrix[k], (np.ndarray, list)):

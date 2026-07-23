@@ -168,7 +168,6 @@ def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, common
 # ==============================================================================
 # Node 3: OOS Decay
 # ==============================================================================
-
 # @task(name="Node_Check_Decay") 
 def node_check_decay_monthly(
     prev_model_id: int, 
@@ -212,36 +211,22 @@ def node_check_decay_monthly(
 # ==============================================================================
 # Node 4: Ray Tune 
 # ==============================================================================
-
 def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
     # ray.tune auto ray.get from ptr to Arrow ---> Polars DataFrame
-    hf_lf = pl.from_arrow(hf_pa).clone().lazy() # 
-    dret_lf = pl.from_arrow(dret_pa).clone().lazy()
+    hf_lf = pl.from_arrow(hf_pa).lazy() # avoid clone 
+    dret_lf = pl.from_arrow(dret_pa).lazy()
 
     panel_lf = build_fsm_panel(hf_lf, dret_lf, config, common_config)
-
     result = discover_fsm_pattern(panel_lf, config, common_config)
-    if result["status"] == "success":
-        tune.report({
-            "metrics_score": result["metrics_score"], 
-            "u_pval": result["u_pval"],
-            "trigger_count": result.get("trigger_count", 0),
-            "valid_sample_ratio": result.get("valid_sample_ratio", 0.0),
-            "autocorr": result.get("autocorr", 0.0),
-            "learned_motif": result["learned_motif"], 
-            "fsm_matrix": result["fsm_matrix"]
-        })
-    else:
-        tune.report({
-            "metrics_score": result["metrics_score"], 
-            "u_pval": result.get("u_pval", 1.0), 
-            "trigger_count": result.get("trigger_count", 0),
-            "valid_sample_ratio": result.get("valid_sample_ratio", 0.0),
-            "autocorr": result.get("autocorr", 0.0),
-            "learned_motif": [], 
-            "fsm_matrix": {},
-            "reason": result.get("reason", "Unknown")
-        })
+
+    print("Tune Reason :", result.get("reason", "Unknown")) 
+    tune.report({
+        "metrics_score": result["metrics_score"], 
+        "u_pval": result.get("u_pval", 1.0), 
+        "trigger_count": result.get("trigger_count", 0),
+        "valid_sample_ratio": result.get("valid_sample_ratio", 0.0),
+        "autocorr": result.get("autocorr", 0.0),
+    })
 
     del panel_lf, hf_lf, dret_lf
     gc.collect()
@@ -292,7 +277,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     }
 
     points_to_evaluate = None
-    prev_model_path = f"{MODEL_DIR}/model_{prev_model_id}.pkl"  # 提前定义
+    prev_model_path = f"{MODEL_DIR}/model_{prev_model_id}.pkl"  
     if os.path.exists(prev_model_path):
         print(f"Prior model found, using as point to evaluate...")
         with open(prev_model_path, "rb") as f:
@@ -302,7 +287,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # multithread / sample optimize
     optuna_sampler = optuna.samplers.TPESampler(
         n_startup_trials=common_config["n_startup_trials"], 
-        multivariate=True
+        multivariate=False # True
     ) 
 
     search_alg = OptunaSearch(
@@ -325,7 +310,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     mlflow_callback = MLflowLoggerCallback(
         tracking_uri=mlflow.get_tracking_uri(), 
         experiment_name="FSM_Production_Models",
-        save_artifact=True 
+        save_artifact=False  
     )
 
     tuner = tune.Tuner(
@@ -338,7 +323,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
             num_samples=search_config["num_trials"],        
             # # used for Iterative Training not for One-shot / Single-step Computation    
             # scheduler=tune.schedulers.ASHAScheduler(grace_period=search_config["grace_period"], reduction_factor=search_config["reduction_factor"]),
-            max_concurrent_trials=common_config["max_concurrent_trials"]
+            max_concurrent_trials=common_config["num_workers"]
         ),
         run_config=tune.RunConfig(
             name=f"fsm_hpo_{model_id}", 
@@ -364,7 +349,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
         return False
 
     max_pval = common_config.get("u_pval", 0.2)
-    min_triggers = common_config.get("min_triggers", 30)
+    min_triggers = common_config.get("trigger", 30)
     
     stats_valid_trials = df_results.filter(
         (pl.col("u_pval") <= max_pval) & 
@@ -411,21 +396,22 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     if best_ray_result is None:
         raise KeyError(f"Failed to locate original Ray Result for trial_id: {best_trial_id}")
     
-    # retrieve Python object from Ray
-    actual_fsm_matrix = best_ray_result.metrics.get("fsm_matrix", {})
-    actual_learned_motif = best_ray_result.metrics.get("learned_motif", [])
-
     # trial config
     best_config = {k.replace("config/", ""): v for k, v in best_model_dict.items() if k.startswith("config/")}
     if "m" not in best_config:
         best_config["m"] = int(best_config["motif_minutes"] // best_config["downsample"])
     if "threshold_d" not in best_config:
         best_config["threshold_d"] = float(np.sqrt(2 * best_config["m"] * (1.0 - best_config["threshold_r"])))
+
+    # rerun avoid tune.report
+    np.random.seed(42) 
+    final_panel_lf = build_fsm_panel(hf_lazy, dret_lazy, best_config, common_config)
+    final_result = discover_fsm_pattern(final_panel_lf, best_config, common_config)
     
     model_ckpt = {
         "config": best_config, 
-        "motif": np.array(actual_learned_motif),       
-        "fsm_matrix": actual_fsm_matrix,               
+        "motif": np.array(final_result.get("learned_motif", [])),       
+        "fsm_matrix": final_result.get("fsm_matrix", {}),             
         "valid_month": model_id 
     }
     
@@ -541,7 +527,7 @@ def wfo_pipeline(exp_config):
         },
         # "working_dir": os.path.dirname(os.path.abspath(__file__)) 
     }
-    ray.init(num_cpus=6, runtime_env=runtime_env, ignore_reinit_error=True)
+    ray.init(num_cpus=common_config["num_workers"], runtime_env=runtime_env, ignore_reinit_error=True)
 
     # Setup Macro
     global_data = node_prepare_macro(common_config)
@@ -617,7 +603,7 @@ if __name__ == "__main__":
         "common_params": {
             "start_date": 20100101, "end_date": 20201231, "benchmark": "1A0001",
 
-            # sample sids from universe
+            # sample
             "top_k_ratio": 0.25, # used for sample
             "days_since_ipo": 120, # days since ipo
 
@@ -650,23 +636,22 @@ if __name__ == "__main__":
             "ranking_window": 5, # rolling macro_state 
             "ranking_ratio": 0.25, # ranking
 
-            "trigger": 5, # dtw distance
             "topk": 5, # candidate
-            "min_triggers": 30, # HPO post-filter minimum trigger count
+            "trigger": 30, 
 
              # stats
             "alternative": "greater",
-            "u_pval": 0.15, # 0.05 too strict and least
+            "u_pval": 0.10, # 0.05 too strict and least
 
             # concurrency
-            "n_startup_trials": 20, 
-            "max_concurrent_trials": 8
+            "num_workers": 10,
+            "n_startup_trials": 40, 
         },
 
         "search_bounds": {
             "downsample": [3, 4, 5], # downsample for DTW
             "motif_minutes": [30, 45, 60, 90], # used from motif length intraday
-            "threshold_r": [0.5, 0.8], 
+            "threshold_r": [0.6, 0.8], 
             "num_trials": 500, 
         }
     }

@@ -19,7 +19,7 @@ class FSMPredictor:
         self.threshold_d = self.tune_config["threshold_d"]
         self.dtw_w = max(3, int(self.m * self.common_config["dtw_window_frac"]))
         
-        self.target_names = list(self.common_config.get("T1_rets", {}).keys())
+        self.target_names = list(self.common_config["T1_rets"].keys())
 
         # =========================================================================
         # Transfer Matrix
@@ -34,7 +34,7 @@ class FSMPredictor:
             self.trans_matrices.append(np.array(fsm_matrix[key]))
 
         self.state_return_vectors = fsm_matrix["state_return_vectors"]
-        self.traj_weights = calculate_decay_weights(self.target_names, half_life=common_config["decay_minutes"]) 
+        self.traj_weights = calculate_decay_weights(common_config["T1_rets"], half_life_minutes=common_config["decay_minutes"]) 
         
     def _get_macro_state(self, panel_df: pl.DataFrame) -> pl.DataFrame:
         rank_window = self.common_config["ranking_window"]
