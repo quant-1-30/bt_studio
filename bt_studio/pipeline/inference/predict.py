@@ -100,7 +100,9 @@ class FSMPredictor:
         return (
             triggers
             .with_columns(
-                pl.col("macro_state").replace(mapping).alias("expected_return")
+                # pl.col("macro_state").replace(mapping).alias("expected_return") # Int32
+                pl.col("macro_state").replace_strict(mapping, default=0.0, return_dtype=pl.Float64) 
+
             )
             .with_columns(
                 (

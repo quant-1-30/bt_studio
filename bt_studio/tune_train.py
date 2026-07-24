@@ -171,14 +171,14 @@ def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, common
 # @task(name="Node_Check_Decay") 
 def node_check_decay_monthly(
     prev_model_id: int, 
-    prev_oos_months: list[int], 
+    prev_oos_yms: list[int], 
     dret_path: str, 
     prev_oos_paths: list[str], 
     common_config: dict
 ) -> bool:
     """
     - prev_model_id: e.g. 201007
-    - prev_oos_months: e.g. [201007, ..., 201012])
+    - prev_oos_yms: e.g. [201007, ..., 201012])
     """
     prev_model_path = f"{MODEL_DIR}/model_{prev_model_id}.pkl"
     if not os.path.exists(prev_model_path):
@@ -201,7 +201,7 @@ def node_check_decay_monthly(
     )
     
     if result.get("status") == "success":
-        print(f" {prev_model_id} on ({prev_oos_months[0]}-{prev_oos_months[-1]}) effective and (P-val: {result['u_pval']:.4f})")
+        print(f" {prev_model_id} on ({prev_oos_yms[0]}-{prev_oos_yms[-1]}) effective and (P-val: {result['u_pval']:.4f})")
         return False
         
     print(f"🔄 last {prev_model_id} decay (P-val: {result['u_pval']:.4f}) trigger retune")
@@ -287,7 +287,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     # multithread / sample optimize
     optuna_sampler = optuna.samplers.TPESampler(
         n_startup_trials=common_config["n_startup_trials"], 
-        multivariate=False # True
+        multivariate=True # False
     ) 
 
     search_alg = OptunaSearch(
@@ -348,7 +348,7 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
         print(f"⚠️ [Failed] {model_id} df_results height 0")
         return False
 
-    max_pval = common_config.get("u_pval", 0.2)
+    max_pval =0.05 # common_config.get("u_pval", 0.2)
     min_triggers = common_config.get("trigger", 30)
     
     stats_valid_trials = df_results.filter(
@@ -535,7 +535,7 @@ def wfo_pipeline(exp_config):
     daily_lazy = pl.scan_parquet(global_data["dret_path"]).select(["day"])
     month_id_expr = (pl.col("day") // 100).cast(pl.Int32).alias("month_id")
 
-    all_months = (
+    yms = (
         daily_lazy
         .select(month_id_expr)
         .unique()                  # stream hash unique
@@ -550,31 +550,31 @@ def wfo_pipeline(exp_config):
     STEP = common_config["oss_step"]     
     last_available_model_id = None
 
-    for idx in range(TRAIN_WINDOW, len(all_months), STEP):
+    for idx in range(TRAIN_WINDOW, len(yms), STEP):
 
-        train_months = all_months[idx - TRAIN_WINDOW : idx]            
-        oos_months = all_months[idx : min(idx + STEP, len(all_months))]
-        warmup_month = [train_months[-1]] # used for oss cold start 
+        train_yms = yms[idx - TRAIN_WINDOW : idx]            
+        oos_yms = yms[idx : min(idx + STEP, len(yms))]
+        warmup_month = [train_yms[-1]] # used for oss cold start
         
-        model_id = oos_months[0]           
+        model_id = oos_yms[0]           
         
         print(f"\n===========================================================================")
-        print(f"📅 WFO | OOS : {model_id} | Train Month: {train_months[0]}-{train_months[-1]} ")
+        print(f"📅 WFO | OOS : {model_id} | Train Month: {train_yms[0]}-{train_yms[-1]} ")
         print(f"============================================================================\n")
         
-        train_paths = node_extract_feature_monthly(train_months, global_data["universe_sids"], common_config)
-        oos_paths = node_extract_feature_monthly(oos_months, global_data["universe_sids"], common_config)
+        train_paths = node_extract_feature_monthly(train_yms, global_data["universe_sids"], common_config)
+        oos_paths = node_extract_feature_monthly(oos_yms, global_data["universe_sids"], common_config)
         warmup_paths = node_extract_feature_monthly(warmup_month, global_data["universe_sids"], common_config)
 
         if last_available_model_id is None:
             is_decayed = True
             print("🚀 First run (Cold Start), forcing HPO Training...")
         else:
-            prev_oos_months = train_months[-STEP:] 
-            prev_oos_paths = node_extract_feature_monthly(prev_oos_months, global_data["universe_sids"], common_config)
+            prev_oos_yms = train_yms[-STEP:] 
+            prev_oos_paths = node_extract_feature_monthly(prev_oos_yms, global_data["universe_sids"], common_config)
             
             is_decayed = node_check_decay_monthly(
-                last_available_model_id, prev_oos_months, global_data["dret_path"], prev_oos_paths, common_config
+                last_available_model_id, prev_oos_yms, global_data["dret_path"], prev_oos_paths, common_config
             )
         if is_decayed:
             print(f"🔄 Model decayed or First Run. Tuning Model for {model_id}...")
@@ -592,7 +592,7 @@ def wfo_pipeline(exp_config):
  
             last_available_model_id = model_id
 
-        node_oos_inference_monthly(model_id, global_data["dret_path"], oos_months, oos_paths, warmup_paths, common_config)
+        node_oos_inference_monthly(model_id, global_data["dret_path"], oos_yms, oos_paths, warmup_paths, common_config)
 
 
 if __name__ == "__main__":
@@ -644,7 +644,7 @@ if __name__ == "__main__":
             "u_pval": 0.10, # 0.05 too strict and least
 
             # concurrency
-            "num_workers": 10,
+            "num_workers": 8,
             "n_startup_trials": 40, 
         },
 
