@@ -6,7 +6,7 @@ authors = ["hengxin.liu <hengxin.liu@inceptio.ai>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.11,<3.15"
+python = ">=3.11,<3.14"
 ray = {extras = ["tune"], version = "^2.55.1"}
 dtaidistance = "^2.4.0"
 optuna = "^4.8.0"
@@ -23,7 +23,7 @@ graphviz = "^0.21"
 mlflow = "^3.13.0"
 prefect = "^3.7.3"
 scikit-learn = "^1.9.0"
-bt-core = "0.4.7"
+bt-core = "0.4.8"
 tensorboard = "^2.21.0"
 
 [tool.pytest.ini_options]
@@ -48,8 +48,7 @@ url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
 priority = "primary"
 
 [[tool.poetry.source]]
-name = "devpi"
-# url = "http://192.168.2.100:3141/bt_sdk/dev/+simple/"
-url = "http://localhost:3141/bt_sdk/dev/+simple/"
+name = "local-hub"
+url = "http://localhost:3141/"
 # optional: make this your default source for all installs
 priority = "supplemental"

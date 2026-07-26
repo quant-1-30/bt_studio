@@ -1,27 +1,13 @@
 import os
-# ==============================================================================
-# C++ / OpenMP Ray Worker Polars/NumPy CEngine DeadLock Prevention
-# ==============================================================================
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["POLARS_MAX_THREADS"] = "1"
-os.environ["RAYON_NUM_THREADS"] = "1"
-os.environ["NUMBA_NUM_THREADS"] = "1"
-os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
-
 import multiprocessing
 import numpy as np
 import polars as pl
-from datetime import datetime
 from dotenv import load_dotenv
 
 try:
     multiprocessing.set_start_method('spawn', force=True)
 except RuntimeError:
-    pass 
+    pass
 
 import gc
 import re
@@ -34,13 +20,13 @@ import calendar
 from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 from ray.air.integrations.mlflow import MLflowLoggerCallback
-# from prefect import flow, task, get_run_logger
 
 from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample, build_fsm_panel
 from bt_studio.pipeline.features import build_ofi
 from bt_studio.pipeline.patterns import prepare_curves, evaluate_and_build_fsm, discover_fsm_pattern
 from bt_studio.pipeline.inference import FSMPredictor
 from bt_studio.pipeline.metrics import validate_parameter_plateau_fanova, find_pareto_front, select_best_model_from_pareto
+from bt_studio.pipeline.utils import consume_time
 
 # ==============================================================================
 # Node 1 Macro and Universe
@@ -209,12 +195,42 @@ def node_check_decay_monthly(
 
 
 # ==============================================================================
-# Node 4: Ray Tune 
+# Node 4a: Train Data Preparation accoicated with common_config
 # ==============================================================================
-def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
-    # ray.tune auto ray.get from ptr to Arrow ---> Polars DataFrame
-    hf_lf = pl.from_arrow(hf_pa).lazy() # avoid clone 
-    dret_lf = pl.from_arrow(dret_pa).lazy()
+def node_prepare_train_data(dret_path: str, train_paths: list[str]) -> dict | None:
+    """
+    - scan_parquet + collect + ray.put ---> Plasma
+    - ObjectRef + lazy frame
+    """
+    lazy_frames = [pl.scan_parquet(p) for p in train_paths if os.path.exists(p)]
+    if not lazy_frames:
+        return None
+
+    hf_lazy = pl.concat(lazy_frames)
+    dret_lazy = pl.scan_parquet(dret_path).select(["day", "sid", "close"])
+
+    try:
+        hf_pa = hf_lazy.collect().to_arrow()
+        dret_pa = dret_lazy.collect().to_arrow()
+    except Exception as e:
+        print(f"💥 OOM or Engine Error during Polars collect: {str(e)}")
+        return None
+
+    return {
+        "hf_ref": ray.put(hf_pa),
+        "dret_ref": ray.put(dret_pa),
+        "hf_lazy": hf_lazy,
+        "dret_lazy": dret_lazy,
+    }
+
+
+# ==============================================================================
+# Node 4b: Ray Tune Trainable + HPO accoicated with tune_config
+# ==============================================================================
+def trainable_fsm_worker(config, hf_ref, dret_ref, common_config):
+    """Ray worker trial and reuse_actors=True"""
+    hf_lf = pl.from_arrow(hf_ref).lazy()
+    dret_lf = pl.from_arrow(dret_ref).lazy()
 
     panel_lf = build_fsm_panel(hf_lf, dret_lf, config, common_config)
     result = discover_fsm_pattern(panel_lf, config, common_config)
@@ -233,38 +249,14 @@ def trainable_fsm_worker(config, hf_pa, dret_pa, common_config):
 
 
 # @task(name="Node_Tune") 
-def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_paths: list[str], exp_config: dict) -> bool:
+def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_config: dict) -> bool:
+    """
+        node_prepare_train_data ---> tune_config
+    """
     common_config, search_config = exp_config["common_params"], exp_config["search_bounds"]
 
-    # =========================================================================
-    # scan_parquet replace read_parquet / Projection Pushdown
-    # =========================================================================
-    lazy_frames = [
-        pl.scan_parquet(p) # .select(required_cols)
-        for p in train_paths
-        if os.path.exists(p)
-    ]
-
-    if not lazy_frames:
-        print(f"⚠️ {model_id} HPO Failed: No valid training parquet files found.")
-        return False
-
-    hf_lazy = pl.concat(lazy_frames)
-    dret_lazy = pl.scan_parquet(dret_path).select(["day", "sid", "close"])
-
-    # =========================================================================
-    # Ray Plasma 
-    # =========================================================================
-    try:
-        hf_pa = hf_lazy.collect().to_arrow()
-        dret_pa = dret_lazy.collect().to_arrow()
-
-        hf_ref = ray.put(hf_pa)
-        dret_ref = ray.put(dret_pa)
-
-    except Exception as e:
-        print(f"💥 OOM or Engine Error during Polars collect: {str(e)}")
-        return False
+    hf_ref, dret_ref = train_data["hf_ref"], train_data["dret_ref"]
+    hf_lazy, dret_lazy = train_data["hf_lazy"], train_data["dret_lazy"]
 
     # =========================================================================
     # Ray search and Opt algo
@@ -301,8 +293,8 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
     wrapped_trainable = tune.with_resources(
         tune.with_parameters(
             trainable_fsm_worker,
-            hf_pa=hf_ref,      
-            dret_pa=dret_ref,   
+            hf_ref=hf_ref,      
+            dret_ref=dret_ref,   
             common_config=common_config),
         resources={"cpu": 1, "gpu": 0} 
     )
@@ -322,8 +314,10 @@ def node_tune_monthly(prev_model_id:str, model_id: int, dret_path: str, train_pa
             search_alg=search_alg, 
             num_samples=search_config["num_trials"],        
             # # used for Iterative Training not for One-shot / Single-step Computation    
-            # scheduler=tune.schedulers.ASHAScheduler(grace_period=search_config["grace_period"], reduction_factor=search_config["reduction_factor"]),
-            max_concurrent_trials=common_config["num_workers"]
+            # scheduler=tune.schedulers.ASHAScheduler(grace_period=search_config["grace_period"], reduction_factor=search_config["grace_factor"]),
+            max_concurrent_trials=common_config["num_workers"],
+            # due to heavy numba / stumpy and reuse to increase cpu usage
+            reuse_actors=True,
         ),
         run_config=tune.RunConfig(
             name=f"fsm_hpo_{model_id}", 
@@ -510,10 +504,13 @@ def node_oos_inference_monthly(
 # ==============================================================================
 
 # @flow(name="WFO_FSM_Pipeline")
+@consume_time
 def wfo_pipeline(exp_config):
     common_config = exp_config["common_params"]     
 
-    # setup ray
+    # =========================================================================
+    # Ray init: restricted only in worker
+    # =========================================================================
     runtime_env = {
         "env_vars": {
             "POLARS_MAX_THREADS": "1",
@@ -523,7 +520,8 @@ def wfo_pipeline(exp_config):
             "MKL_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1",
             "VECLIB_MAXIMUM_THREADS": "1",
-            "NUMEXPR_NUM_THREADS": "1"
+            "NUMEXPR_NUM_THREADS": "1",
+            "GRPC_ENABLE_FORK_SUPPORT": "0",
         },
         # "working_dir": os.path.dirname(os.path.abspath(__file__)) 
     }
@@ -538,7 +536,7 @@ def wfo_pipeline(exp_config):
     yms = (
         daily_lazy
         .select(month_id_expr)
-        .unique()                  # stream hash unique
+        .unique()                 
         .sort("month_id")          
         .collect()                 
         .get_column("month_id")    
@@ -578,7 +576,13 @@ def wfo_pipeline(exp_config):
             )
         if is_decayed:
             print(f"🔄 Model decayed or First Run. Tuning Model for {model_id}...")
-            success = node_tune_monthly(last_available_model_id, model_id, global_data["dret_path"], train_paths, exp_config)
+
+            train_data = node_prepare_train_data(global_data["dret_path"], train_paths)
+            if train_data is None:
+                print(f"⚠️ {model_id} HPO Failed: No valid training parquet files found.")
+                continue
+
+            success = node_tune_monthly(last_available_model_id, model_id, train_data, exp_config)
             if not success:
                 print(f"⚠️ {model_id} HPO Failed. Skipping this window.")
                 continue
@@ -644,7 +648,7 @@ if __name__ == "__main__":
             "u_pval": 0.10, # 0.05 too strict and least
 
             # concurrency
-            "num_workers": 8,
+            "num_workers": 12,
             "n_startup_trials": 40, 
         },
 

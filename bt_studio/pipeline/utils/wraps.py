@@ -1,4 +1,6 @@
+import time
 from functools import wraps
+
 
 def consume_time(func):
 
