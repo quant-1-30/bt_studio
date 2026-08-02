@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import duckdb
 import numpy as np
-from plot import Plot # 导入你之前的 Plot 类
+from bt_studio.visual.bkh import Plot  # 修复导入路径
 
 # 页面配置
 st.set_page_config(page_title="自包含日志分析工具", layout="wide")

@@ -110,23 +110,24 @@ def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, common
         return sorted(paths)
 
     combined_lf = pl.concat(all_lazy_frames)
-    big_df = build_ofi(combined_lf, common_config).collect()
+    ofi_df = build_ofi(combined_lf, common_config).collect()
 
-    if big_df.height == 0:
+    if ofi_df.height == 0:
         return sorted(paths)
 
     # [DEBUG] Verify ofi_ratio is not all zeros
-    ofi_stats = big_df.select([
+    ofi_stats = ofi_df.select([
         pl.col("ofi_ratio").mean().alias("mean"),
         pl.col("ofi_ratio").std().alias("std"),
         (pl.col("ofi_ratio") != 0).sum().alias("nonzero_count"),
         pl.len().alias("total"),
     ]).row(0, named=True)
-    print(f"  [DEBUG build_ofi] ofi_ratio: mean={ofi_stats['mean']:.6f}, std={ofi_stats['std']:.6f}, nonzero={ofi_stats['nonzero_count']}/{ofi_stats['total']}")
-    if ofi_stats["std"] == 0.0 or ofi_stats["nonzero_count"] == 0:
+    print(f"[DEBUG build_ofi] ofi_ratio: mean={ofi_stats['mean']:.6f}, std={ofi_stats['std']:.6f}, nonzero={ofi_stats['nonzero_count']}/{ofi_stats['total']}")
+    if ofi_stats["nonzero_count"] == 0 or ofi_stats["std"] <= common_config["eps"]:
         print(f"  ⚠️ [WARNING] ofi_ratio is ALL ZEROS! Cross-sectional demean may have failed.")
-    big_df = big_df.with_columns((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
-    
+
+    ofi_df = ofi_df.with_columns((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).alias("month_id"))
+
     print("💾 Writing partitioned PIT monthly parquets to disk...")
     for ym in missing_ymonths:
         out_path = f"{FEATURE_DIR}/hf_{ym}.parquet"
@@ -136,15 +137,13 @@ def node_extract_feature_monthly(ymonths: list[int], universe_sids: dict, common
             print(f"{ym} no legal sids")
             continue
             
-        month_df = big_df.filter(
+        month_df = ofi_df.filter(
             (pl.col("month_id") == ym) & 
             (pl.col("sid").is_in(valid_sids_for_month)) 
         ).drop("month_id")
         
         if month_df.height > 0:
-            month_df.write_parquet(out_path)
-            # month_lf.collect(streaming=False).write_parquet(out_path)
-            # month_lf.sink_parquet(out_path) # not supported with window func
+            month_df.write_parquet(out_path) # sink_parquet(out_path) but not supported with window func
             paths.append(out_path)
             print(f"Saved Strict PIT feature: {out_path}")
 
@@ -279,7 +278,7 @@ def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_c
     # multithread / sample optimize
     optuna_sampler = optuna.samplers.TPESampler(
         n_startup_trials=common_config["n_startup_trials"], 
-        multivariate=True # False
+        multivariate=True 
     ) 
 
     search_alg = OptunaSearch(
@@ -474,7 +473,7 @@ def node_oos_inference_monthly(
     # ensure rolling_quantile avoid nan
     all_paths = warmup_paths + oos_paths
     if not all_paths:
-        print(f"⚠️ {model_id} 没有可用的 warmup/oos 特征，跳过 OOS")
+        print(f"⚠️ {model_id} no avaiable warmup/oos feature and skip OOS")
         return
     aligned_lfs = [pl.scan_parquet(p) for p in all_paths if os.path.exists(p)]
     if not aligned_lfs: return
@@ -488,7 +487,7 @@ def node_oos_inference_monthly(
         if match:
             warmup_ym = int(match.group(1)) # group(0) ---> hf201206 / group(1) --> \d{6}
         else:
-            raise ValueError(f"无法从路径中解析合法的月度特征 YYYYMM 格式: {warmup_paths[0]}")
+            raise ValueError(f"Cannot parse YYYYMM: {warmup_paths[0]}")
         
         scored_df = scored_df.filter(
             (pl.col("day").dt.year() * 100 + pl.col("day").dt.month()) != warmup_ym
@@ -521,7 +520,7 @@ def wfo_pipeline(exp_config):
             "OPENBLAS_NUM_THREADS": "1",
             "VECLIB_MAXIMUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
-            "GRPC_ENABLE_FORK_SUPPORT": "0",
+            # "GRPC_ENABLE_FORK_SUPPORT": "0", # set in global
         },
         # "working_dir": os.path.dirname(os.path.abspath(__file__)) 
     }
@@ -529,7 +528,6 @@ def wfo_pipeline(exp_config):
 
     # Setup Macro
     global_data = node_prepare_macro(common_config)
-    # daily_df = pl.read_parquet(global_data["dret_path"], columns=["day"])
     daily_lazy = pl.scan_parquet(global_data["dret_path"]).select(["day"])
     month_id_expr = (pl.col("day") // 100).cast(pl.Int32).alias("month_id")
 

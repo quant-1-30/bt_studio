@@ -23,7 +23,7 @@ graphviz = "^0.21"
 mlflow = "^3.13.0"
 prefect = "^3.7.3"
 scikit-learn = "^1.9.0"
-bt-core = "0.4.8"
+bt-core = "0.4.9"
 tensorboard = "^2.21.0"
 
 [tool.pytest.ini_options]
@@ -49,6 +49,6 @@ priority = "primary"
 
 [[tool.poetry.source]]
 name = "local-hub"
-url = "http://localhost:3141/"
+url = "http://127.0.0.1:3141/"
 # optional: make this your default source for all installs
 priority = "supplemental"
