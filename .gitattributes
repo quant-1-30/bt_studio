@@ -4,8 +4,8 @@ site/** linguist-vendored
 build/** linguist-vendored
 dist/** linguist-vendored
 
-# *.html                        linguist-vendors
 *.html                          linguist-detectable=false
 docs/*.html                     linguist-documentation
+tests/test_plot.html            linguist-generated
 *.pyx                           linguist-language=Cython
 *.pxd                           linguist-language=Cython
