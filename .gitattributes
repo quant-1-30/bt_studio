@@ -4,7 +4,9 @@ site/** linguist-vendored
 build/** linguist-vendored
 dist/** linguist-vendored
 
-*.html                        linguist-vendors
+# Bokeh/mpl 生成的可视化测试输出，不应计入语言统计
+tests/test_plot.html linguist-generated
+*.html linguist-detectable=false
 
-*.pyx                         linguist-language=Cython
-*.pxd                         linguist-language=Cython
+*.pyx linguist-language=Cython
+*.pxd linguist-language=Cython
