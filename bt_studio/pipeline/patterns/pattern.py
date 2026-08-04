@@ -7,7 +7,7 @@ from .astc import prepare_curves, get_candidate_motifs
 from .fsm import evaluate_and_build_fsm
 
 
-def get_balanced_samples(curves: np.ndarray, max_points: int = 20000) -> np.ndarray:
+def get_balanced_samples(curves: np.ndarray, max_points: int, seed: int) -> np.ndarray:
     if curves.ndim != 2 or curves.size == 0:
         return np.empty((0, curves.shape[1] if curves.ndim == 2 else 0))
 
@@ -20,7 +20,11 @@ def get_balanced_samples(curves: np.ndarray, max_points: int = 20000) -> np.ndar
     if len(valid_curves) <= sample_size:
         return valid_curves
 
-    idx = np.random.choice(len(valid_curves), size=sample_size, replace=False)
+    # [FIX P2-P6] Use a local RNG with fixed seed for reproducible HPO.
+    # Without this, the same tune_config produces different scores across
+    # trials due to random sampling, adding noise to Optuna TPE optimization.
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(len(valid_curves), size=sample_size, replace=False)
     return valid_curves[idx]
 
 
@@ -69,7 +73,7 @@ def discover_fsm_pattern(
     # 3. Balanced Sample
     # =========================================================================
     theory_points = common_config.get("max_points", 20000)
-    sampled_curves = get_balanced_samples(curves_2d, max_points=theory_points)
+    sampled_curves = get_balanced_samples(curves_2d, max_points=theory_points, seed=common_config.get("seed", 42))
 
     # =========================================================================
     # 4. Padding and NaN

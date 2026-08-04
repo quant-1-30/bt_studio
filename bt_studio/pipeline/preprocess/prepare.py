@@ -126,21 +126,15 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
             processed_lf, on=["day", "sid", "minute_idx"], how="left"
         )
         .sort(["day", "sid", "minute_idx"])
-        # ensure padding in sid
+        # [FIX P0-L1] forward_fill only: use prior bar price for gaps.
+        # backward_fill was REMOVED — it filled opening nulls with FUTURE
+        # prices (e.g. 09:30 null → filled from 09:31), causing lookahead.
         .with_columns(
             [
                 pl.col("close")
-                .forward_fill() 
+                .forward_fill()
                 .over(["day", "sid"])
                 .alias("close"),
-            ]
-        )
-        .with_columns(
-            [
-                pl.col("close")
-                .backward_fill()
-                .over(["day", "sid"])
-                .alias("close")
             ]
         )
         .with_columns(

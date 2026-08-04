@@ -1,8 +1,10 @@
+import os
 import polars as pl
 import numpy as np
 import scipy.stats as stats
 
 from typing import List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
 
 from .astc import calc_min_subseq_dtw
 from bt_studio.pipeline.metrics import calculate_hpo_score
@@ -183,10 +185,16 @@ def evaluate_and_build_fsm(
 
     z_motif = np.ascontiguousarray((motif - np.mean(motif)) / (np.std(motif) + 1e-8), dtype=np.float64)
 
-    distances = [
-        calc_min_subseq_dtw(curve, z_motif, m, dtw_w, threshold_d) 
-        for curve in curves_2d
-    ]
+    # [FIX P1-P1] Parallelize DTW with ThreadPoolExecutor.
+    # dtaidistance releases the GIL, so threads give true parallelism.
+    # This was serial in training (bottleneck for topk candidates × N curves),
+    # while predict.py already used ThreadPoolExecutor.
+    max_workers = common_config.get("max_workers", os.cpu_count())
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        distances = list(executor.map(
+            lambda i: calc_min_subseq_dtw(curves_2d[i], z_motif, m, dtw_w, threshold_d),
+            range(curves_2d.shape[0])
+        ))
     
     eval_df = eval_df.with_columns(pl.Series("distance", distances))
     triggers = eval_df.filter(pl.col("distance") <= threshold_d)

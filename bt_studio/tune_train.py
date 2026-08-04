@@ -21,7 +21,7 @@ from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 from ray.air.integrations.mlflow import MLflowLoggerCallback
 
-from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample, build_fsm_panel
+from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample, extract_curves_from_panel, build_static_panel, build_fsm_panel
 from bt_studio.pipeline.features import build_ofi
 from bt_studio.pipeline.patterns import prepare_curves, evaluate_and_build_fsm, discover_fsm_pattern
 from bt_studio.pipeline.inference import FSMPredictor
@@ -196,10 +196,12 @@ def node_check_decay_monthly(
 # ==============================================================================
 # Node 4a: Train Data Preparation accoicated with common_config
 # ==============================================================================
-def node_prepare_train_data(dret_path: str, train_paths: list[str]) -> dict | None:
+def node_prepare_train_data(dret_path: str, train_paths: list[str], common_config: dict) -> dict | None:
     """
     - scan_parquet + collect + ray.put ---> Plasma
     - ObjectRef + lazy frame
+    - [FIX P1-P2] Pre-compute static panel ONCE (targets/z-scores/gap),
+      so HPO trials only pay for downsample+curve per-trial.
     """
     lazy_frames = [pl.scan_parquet(p) for p in train_paths if os.path.exists(p)]
     if not lazy_frames:
@@ -208,9 +210,17 @@ def node_prepare_train_data(dret_path: str, train_paths: list[str]) -> dict | No
     hf_lazy = pl.concat(lazy_frames)
     dret_lazy = pl.scan_parquet(dret_path).select(["day", "sid", "close"])
 
+    # [FIX P1-P2] Pre-compute static panel (targets + z-scores) ONCE.
+    # This is tune_config-independent, so 500 trials no longer repeat it.
+    try:
+        static_lazy = build_static_panel(hf_lazy, dret_lazy, common_config, is_train=True)
+    except Exception as e:
+        print(f"💥 Static panel pre-compute failed: {str(e)}")
+
     try:
         hf_pa = hf_lazy.collect().to_arrow()
         dret_pa = dret_lazy.collect().to_arrow()
+        static_pa = static_lazy.collect().to_arrow()
     except Exception as e:
         print(f"💥 OOM or Engine Error during Polars collect: {str(e)}")
         return None
@@ -218,6 +228,7 @@ def node_prepare_train_data(dret_path: str, train_paths: list[str]) -> dict | No
     return {
         "hf_ref": ray.put(hf_pa),
         "dret_ref": ray.put(dret_pa),
+        "static_ref": ray.put(static_pa),
         "hf_lazy": hf_lazy,
         "dret_lazy": dret_lazy,
     }
@@ -226,12 +237,17 @@ def node_prepare_train_data(dret_path: str, train_paths: list[str]) -> dict | No
 # ==============================================================================
 # Node 4b: Ray Tune Trainable + HPO accoicated with tune_config
 # ==============================================================================
-def trainable_fsm_worker(config, hf_ref, dret_ref, common_config):
+def trainable_fsm_worker(config, hf_ref, dret_ref, static_ref, common_config):
     """Ray worker trial and reuse_actors=True"""
     hf_lf = pl.from_arrow(hf_ref).lazy()
     dret_lf = pl.from_arrow(dret_ref).lazy()
+    static_lf = pl.from_arrow(static_ref).lazy()
 
-    panel_lf = build_fsm_panel(hf_lf, dret_lf, config, common_config)
+    # [FIX P1-P2] Reuse pre-computed static panel; only pay for curves per-trial.
+    # manual build_fsm_panel 
+    curve_lf = extract_curves_from_panel(hf_lf, dret_lf, config, common_config)
+    panel_lf = curve_lf.join(static_lf, on=["day", "sid"], how="inner")
+
     result = discover_fsm_pattern(panel_lf, config, common_config)
 
     print("Tune Reason :", result.get("reason", "Unknown")) 
@@ -244,6 +260,8 @@ def trainable_fsm_worker(config, hf_ref, dret_ref, common_config):
     })
 
     del panel_lf, hf_lf, dret_lf
+    if static_ref is not None:
+        del static_df
     gc.collect()
 
 
@@ -254,7 +272,7 @@ def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_c
     """
     common_config, search_config = exp_config["common_params"], exp_config["search_bounds"]
 
-    hf_ref, dret_ref = train_data["hf_ref"], train_data["dret_ref"]
+    hf_ref, dret_ref, static_ref = train_data["hf_ref"], train_data["dret_ref"], train_data["static_ref"]
     hf_lazy, dret_lazy = train_data["hf_lazy"], train_data["dret_lazy"]
 
     # =========================================================================
@@ -294,6 +312,7 @@ def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_c
             trainable_fsm_worker,
             hf_ref=hf_ref,      
             dret_ref=dret_ref,   
+            static_ref=static_ref,
             common_config=common_config),
         resources={"cpu": 1, "gpu": 0} 
     )
@@ -397,7 +416,6 @@ def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_c
         best_config["threshold_d"] = float(np.sqrt(2 * best_config["m"] * (1.0 - best_config["threshold_r"])))
 
     # rerun avoid tune.report
-    np.random.seed(42) 
     final_panel_lf = build_fsm_panel(hf_lazy, dret_lazy, best_config, common_config)
     final_result = discover_fsm_pattern(final_panel_lf, best_config, common_config)
     
@@ -575,7 +593,7 @@ def wfo_pipeline(exp_config):
         if is_decayed:
             print(f"🔄 Model decayed or First Run. Tuning Model for {model_id}...")
 
-            train_data = node_prepare_train_data(global_data["dret_path"], train_paths)
+            train_data = node_prepare_train_data(global_data["dret_path"], train_paths, common_config)
             if train_data is None:
                 print(f"⚠️ {model_id} HPO Failed: No valid training parquet files found.")
                 continue
@@ -647,7 +665,9 @@ if __name__ == "__main__":
 
             # concurrency
             "num_workers": 12,
-            "n_startup_trials": 40, 
+            "n_startup_trials": 40,
+
+            "seed": 42, # for reproducibility 
         },
 
         "search_bounds": {

@@ -25,6 +25,7 @@ prefect = "^3.7.3"
 scikit-learn = "^1.9.0"
 bt-core = "0.5.0"
 tensorboard = "^2.21.0"
+protobuf = ">=7.35.1"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -16,18 +16,22 @@ def align_date_col(lf: pl.LazyFrame) -> pl.LazyFrame:
     ])
 
 
-def build_fsm_panel(
+def build_static_panel(
     all_feat_lf: pl.LazyFrame,
     daily_lf: pl.LazyFrame,
-    tune_config: dict,
     common_config: dict,
     is_train: bool = True,
-) -> pl.DataFrame:
-    
+) -> pl.LazyFrame:
+    """
+    [FIX P1-P2] Build the tune_config-INDEPENDENT part of the panel.
+    This includes: regime_indicator, calendar, T/T+1 forward returns, gap, z-scores.
+    None of these depend on downsample/motif_minutes/threshold_r, so they should
+    be computed ONCE and reused across all HPO trials.
+
+    Returns a LazyFrame with columns: day, sid, z_gap, raw_*, fwd_z_*, intra_*
+    """
     join_how = "inner" if is_train else "left"
-    ds = tune_config["downsample"]
-    bars_per_day = 240 // ds 
-    eps = common_config["eps"] 
+    eps = common_config["eps"]
 
     # =========================================================================
     # daily and all
@@ -49,8 +53,8 @@ def build_fsm_panel(
     # =========================================================================
     # T Gap
     # =========================================================================
-    entry_idx = 240 - common_config["exclude_bars"]  
-    
+    entry_idx = 240 - common_config["exclude_bars"]
+
     t_base_lf = (
         all_feat_lf.filter(pl.col("bar_idx") == entry_idx)
         .select(["day", "sid", pl.col("close").alias("entry_price")])
@@ -59,11 +63,11 @@ def build_fsm_panel(
     )
 
     # =========================================================================
-    # T+1 
+    # T+1
     # =========================================================================
     targets_rets = common_config["T1_rets"]
     bar_idx_to_name = {max(0, minutes - 1): name for name, minutes in targets_rets.items()}
-    
+
     t1_exprs = [pl.col("open").filter(pl.col("bar_idx") == 0).first().alias("t1_open_price")]
     for b_idx, name in bar_idx_to_name.items():
         t1_exprs.append(pl.col("close").filter(pl.col("bar_idx") == b_idx).first().alias(f"t1_price_{name}"))
@@ -73,7 +77,7 @@ def build_fsm_panel(
         all_feat_lf.filter(pl.col("bar_idx").is_in(target_bar_indices))
         .group_by(["day", "sid"])
         .agg(t1_exprs)
-        .rename({"day": "t1_day"}) 
+        .rename({"day": "t1_day"})
     )
 
     # =========================================================================
@@ -86,10 +90,10 @@ def build_fsm_panel(
     target_lf = target_lf.with_columns([
         pl.when(pl.col("t_close") > eps)
         .then(pl.col("t1_open_price") / pl.col("t_close") - 1.0)
-        .otherwise(None) 
+        .otherwise(None)
         .alias("raw_gap")
     ] + [
-        # PnL T 14:50 ---> T+1 
+        # PnL T 14:50 ---> T+1
         pl.when(pl.col("entry_price") > eps)
         .then(pl.col(f"t1_price_{name}") / pl.col("entry_price") - 1.0)
         .otherwise(None)
@@ -105,7 +109,7 @@ def build_fsm_panel(
     ])
 
     # =========================================================================
-    # Robust Z-Score 
+    # Robust Z-Score
     # =========================================================================
     cols_to_zscore = ["gap"] + target_names
     for name in cols_to_zscore:
@@ -116,13 +120,36 @@ def build_fsm_panel(
         ]).with_columns([
             (pl.col(f"raw_{name}") - pl.col(f"med_{name}")).abs().median().over("day").alias(f"mad_{name}")
         ]).with_columns([
-            ((pl.col(f"raw_{name}") - pl.col(f"med_{name}")) / 
+            ((pl.col(f"raw_{name}") - pl.col(f"med_{name}")) /
              (1.4826 * pl.when(pl.col(f"mad_{name}") < eps).then(eps).otherwise(pl.col(f"mad_{name}"))))
             .clip(-3.0, 3.0).alias(z_col_name)
         ]).drop([f"med_{name}", f"mad_{name}"])
 
-    output_cols = ["z_gap"] + [f"raw_{n}" for n in target_names] + [f"fwd_z_{n}" for n in target_names]
+    output_cols = ["z_gap"] + [f"raw_{n}" for n in target_names] + [f"fwd_z_{n}" for n in target_names] + [f"intra_{n}" for n in target_names]
     target_lf = target_lf.select(["day", "sid"] + output_cols)
+
+    return target_lf.select(["day", "sid"] + output_cols)
+
+
+def extract_curves_from_panel(
+    all_feat_lf: pl.LazyFrame,
+    daily_lf: pl.LazyFrame,
+    tune_config: dict,
+    common_config: dict,
+) -> pl.LazyFrame:
+    """
+    [FIX P1-P2] Build the tune_config-DEPENDENT part of the panel.
+    This does downsample + curve group_by + regime masking.
+    Called per-trial with the trial's tune_config.
+
+    Returns a LazyFrame with columns: day, sid, lag_0
+    """
+    ds = tune_config["downsample"]
+    bars_per_day = 240 // ds
+
+    daily_lf = align_date_col(daily_lf).sort(["sid", "day"])
+    all_feat_lf = align_date_col(all_feat_lf).sort(["sid", "day", "bar_idx"])
+    daily_lf = regime_indicator(daily_lf, common_config.get("regime_filter", {}))
 
     # =========================================================================
     # Downsample and Masking
@@ -142,21 +169,33 @@ def build_fsm_panel(
             pl.col("ofi_ratio").sort_by("bar_idx").alias("daily_curve"),
             pl.col("ofi_ratio").count().alias("curve_len"),
         ])
-        .filter(pl.col("curve_len") == bars_per_day)  
+        .filter(pl.col("curve_len") == bars_per_day)
     )
- 
+
     curve_lf = curve_lf.join(
         daily_lf.select(["day", "sid", "regime_signal"]), on=["day", "sid"], how="left"
     ).with_columns([
         pl.when(pl.col("regime_signal") == 1)
         .then(pl.col("daily_curve"))
         .otherwise(None)
-        .alias("lag_0") 
+        .alias("lag_0")
     ]).drop(["regime_signal", "daily_curve", "curve_len"])
 
-    # =========================================================================
-    # final
-    # =========================================================================
-    panel_lf = curve_lf.join(target_lf, on=["day", "sid"], how=join_how)
-    
-    return panel_lf
+    return curve_lf
+
+
+def build_fsm_panel(
+    all_feat_lf: pl.LazyFrame,
+    daily_lf: pl.LazyFrame,
+    tune_config: dict,
+    common_config: dict,
+    is_train: bool = True,
+) -> pl.LazyFrame:
+    """
+    Backward-compatible wrapper: builds full panel in one call.
+    For HPO, prefer pre-computing build_static_panel once and calling
+    extract_curves_from_panel per trial (see tune_train.py).
+    """
+    static_lf = build_static_panel(all_feat_lf, daily_lf, common_config, is_train)
+    curve_lf = extract_curves_from_panel(all_feat_lf, daily_lf, tune_config, common_config)
+    return curve_lf.join(static_lf, on=["day", "sid"], how="inner" if is_train else "left")
