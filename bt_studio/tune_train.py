@@ -184,12 +184,13 @@ def node_check_decay_monthly(
     result = evaluate_and_build_fsm(
         panel_df, curves_2d, model_ckpt["motif"], model_ckpt["config"], common_config
     )
-    
+
+    u_pval = result.get("u_pval", 1.0) 
     if result.get("status") == "success":
-        print(f" {prev_model_id} on ({prev_oos_yms[0]}-{prev_oos_yms[-1]}) effective and (P-val: {result['u_pval']:.4f})")
+        print(f" {prev_model_id} on ({prev_oos_yms[0]}-{prev_oos_yms[-1]}) effective and (P-val: {u_pval:.4f})")
         return False
         
-    print(f"🔄 last {prev_model_id} decay (P-val: {result['u_pval']:.4f}) trigger retune")
+    print(f"🔄 last {prev_model_id} decay (P-val: {u_pval:.4f}) trigger retune")
     return True
 
 
@@ -259,9 +260,7 @@ def trainable_fsm_worker(config, hf_ref, dret_ref, static_ref, common_config):
         "autocorr": result.get("autocorr", 0.0),
     })
 
-    del panel_lf, hf_lf, dret_lf
-    if static_ref is not None:
-        del static_df
+    del panel_lf, curve_lf, static_lf, hf_lf, dret_lf
     gc.collect()
 
 
