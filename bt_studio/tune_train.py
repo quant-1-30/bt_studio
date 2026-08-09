@@ -338,7 +338,7 @@ def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_c
         ),
         run_config=tune.RunConfig(
             name=f"fsm_hpo_{model_id}", 
-            storage_path="/tmp/ray_results",
+            storage_path=common_config["storage_path"],
             callbacks=[mlflow_callback]
             )  
         )
@@ -667,6 +667,8 @@ if __name__ == "__main__":
             "n_startup_trials": 40,
 
             "seed": 42, # for reproducibility 
+
+            "storage_path": "/tmp/ray_results", # for Ray Tune
         },
 
         "search_bounds": {

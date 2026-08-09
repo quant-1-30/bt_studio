@@ -51,7 +51,10 @@ def load_and_align(file_path: str, file_type: str = 'parquet', tick_unit: str = 
 
         # align notify_timer and on_dt_over
         align_df = align_df.ffill()
-        
+
+        # drop bt_core sentinel row (datetime=0 → 1970-01-01, engine init marker)
+        align_df = align_df[align_df.index != pd.Timestamp(0)]
+
         if 'close' in align_df.columns:
             align_df = align_df.dropna(subset=['close'])
 

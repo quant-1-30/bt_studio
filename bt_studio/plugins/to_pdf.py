@@ -1,22 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-Parquet -> PDF report converter for bt_core log files.
-
-Reads a parquet file produced by ``LogConsumerThread`` (long-format: each row
-is a ``(datetime, value, metric_name)`` triple) and renders a multi-page PDF
-report with cover, summary table and grouped time-series charts.
-
-Usage (library)::
-
-    from plugins.to_pdf import convert_parquet_to_pdf
-    convert_parquet_to_pdf("logs/log_cerebro_0.parquet", "logs/report.pdf")
-
-Usage (CLI)::
-
-    python -m plugins.to_pdf.converter logs/log_cerebro_0.parquet logs/report.pdf
-"""
-
 from __future__ import annotations
 
 import os
@@ -81,7 +64,25 @@ def _categorize(metrics: Iterable[str]) -> Dict[str, List[str]]:
 
 
 class ParquetToPDFConverter:
-    """Convert a bt_core log parquet file into a multi-page PDF report."""
+    """
+    Convert a bt_core log parquet file into a multi-page PDF report
+
+    Parquet -> PDF report converter for bt_core log files.
+
+    Reads a parquet file produced by ``LogConsumerThread`` (long-format: each row
+    is a ``(datetime, value, metric_name)`` triple) and renders a multi-page PDF
+    report with cover, summary table and grouped time-series charts.
+
+    Usage (library)::
+
+        from plugins.to_pdf import convert_parquet_to_pdf
+        convert_parquet_to_pdf("logs/log_cerebro_0.parquet", "logs/report.pdf")
+
+    Usage (CLI)::
+
+        python -m plugins.to_pdf.converter logs/log_cerebro_0.parquet logs/report.pdf
+    """
+
 
     def __init__(self, parquet_path: str, pdf_path: Optional[str] = None):
         self.parquet_path = parquet_path

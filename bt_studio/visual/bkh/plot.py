@@ -1,21 +1,3 @@
-"""
-bt_core 回测结果可视化模块Bokeh
-
-布局设计：垂直堆叠 + X 轴联动
-    +------------------------------------------+
-    |  1. OHLCV Main (line/candle + volume)    |  <- 主图
-    +------------------------------------------+
-    |  2. Indicators (每个指标独立子图)          |  <- ind_* 列
-    +------------------------------------------+
-    |  3. Analyzers (每个分析器独立子图)         |  <- bt_core metrics
-    +------------------------------------------+
-
-联动机制：
-    1. X 轴范围联动 所有子图共享 fig_main.x_range
-    2. 十字线联动 CustomJS hover callback 同步所有子图的红色垂直线
-    3. Hover tooltip 联动：各子图独立 HoverTool, datetime 格式化一致
-"""
-
 import pandas as pd
 import numpy as np
 from bokeh.plotting import figure, show
@@ -29,6 +11,23 @@ from .utils import load_and_align
 
 
 class Plot(object):
+    """
+
+    vertical stacking + X-axis linking
+        +------------------------------------------+
+        |  1. OHLCV Main (line/candle + volume)    |  <- main_*
+        +------------------------------------------+
+        |  2. Indicators                           |  <- ind_* 
+        +------------------------------------------+
+        |  3. Analyzers                            |  <- bt_core metrics
+        +------------------------------------------+
+
+    Link Mechanism:
+        1. X-axis range linking: All subplots share fig_main.x_range
+        2. Crosshair linking: CustomJS hover callback synchronizes red vertical lines across all subplots
+        3. Hover tooltip linking: Each subplot has its own HoverTool, with consistent datetime formatting
+    """
+
     def __init__(self, scheme=None):
         self.scheme = scheme or PlotScheme()
         self.fig_main = None
@@ -37,8 +36,7 @@ class Plot(object):
         self.bt_renderers = {}
         self.datasource = None
 
-    def plot_from_wide_df(self, df, candle=True):
-        """从宽表 DataFrame 渲染垂直联动多面板图。"""
+    def plot_from_wide_df(self, df, candle=True, auto_show=True):
         df = df.rename(columns=lambda x: x.decode("utf-8") if isinstance(x, bytes) else str(x))
         if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
             df["datetime"] = pd.to_datetime(df["datetime"])
@@ -51,27 +49,33 @@ class Plot(object):
         has_ohlcv = {"close"}.issubset(available_cols)
         if has_ohlcv:
             self._plot_main(candle)
+        elif analyzer_cols:
+            self._plot_main_fallback(analyzer_cols[0])
+            analyzer_cols = analyzer_cols[1:]
+        elif ind_cols:
+            self._plot_main_fallback(ind_cols[0])
+            ind_cols = ind_cols[1:]
         if ind_cols:
             self._plot_indicators_stacked(ind_cols)
         if analyzer_cols:
             self._plot_analyzers_stacked(analyzer_cols)
         layout = self._build_layout()
-        show(layout)
+        if auto_show:
+            show(layout)
+        return layout
 
-    def plot_from_btcore_log(self, file_path, candle=True, tick_unit="s"):
-        """bt_core 长格式 parquet 日志 -> 宽表 -> 垂直联动可视化。"""
+    def plot_from_btcore_log(self, file_path, candle=True, tick_unit="s", auto_show=True):
         df = load_and_align(file_path, tick_unit=tick_unit)
         ohlcv_present = {"open", "high", "low"}.issubset(df.columns)
         if not ohlcv_present:
             candle = False
-        return self.plot_from_wide_df(df, candle=candle)
+        return self.plot_from_wide_df(df, candle=candle, auto_show=auto_show)
 
-    def plot_from_integrated_df(self, df, candle=True):
-        """自适应渲染：有 OHLCV 则画 K 线，否则只画指标/分析器行。"""
+    def plot_from_integrated_df(self, df, candle=True, auto_show=True):
         ohlcv_present = {"open", "high", "low", "close"}.issubset(df.columns)
         if not ohlcv_present:
             candle = False
-        return self.plot_from_wide_df(df, candle=candle)
+        return self.plot_from_wide_df(df, candle=candle, auto_show=auto_show)
 
     def _plot_main(self, candle):
         dmaster = self.datasource
@@ -123,6 +127,21 @@ class Plot(object):
         title_div = Div(text="<h2>Market Execution Feed</h2>", margin=(10, 0, 10, 0), sizing_mode="stretch_width")
         self.layout_main = column(title_div, self.fig_main, sizing_mode="stretch_width")
 
+    def _plot_main_fallback(self, col):
+        """Fallback main figure for bt_core analyzer-only logs (no OHLCV)."""
+        self.fig_main = figure(
+            width=self.scheme.figure_width, height=self.scheme.main_height,
+            title=f"Main: {col}", x_axis_type="datetime",
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+        )
+        self.all_figures.append(self.fig_main)
+        line = self.fig_main.line("datetime", col, source=self.datasource,
+                                  line_width=self.scheme.line_width, color=tableau20[0])
+        self.bt_tooltips[self.fig_main] = [("Date", "@datetime{%F %T}"), (col, f"@{{{col}}}{{0.0000}}")]
+        self.bt_renderers[self.fig_main] = [line]
+        title_div = Div(text="<h2>Backtest Analyzers</h2>", margin=(10, 0, 10, 0), sizing_mode="stretch_width")
+        self.layout_main = column(title_div, self.fig_main, sizing_mode="stretch_width")
+
     def _plot_indicators_stacked(self, ind_cols):
         """每个 ind_* 列渲染为独立子图，垂直堆叠，共享 X 轴。"""
         ind_figs = []
@@ -144,7 +163,6 @@ class Plot(object):
         self.layout_indicators = column(title_div, *ind_figs, sizing_mode="stretch_width")
 
     def _plot_analyzers_stacked(self, analyzer_cols):
-        """每个 analyzer 列渲染为独立子图，垂直堆叠，共享 X 轴。"""
         ana_figs = []
         for i, col in enumerate(analyzer_cols):
             p_ana = figure(
@@ -164,7 +182,6 @@ class Plot(object):
         self.layout_analyzers = column(title_div, *ana_figs, sizing_mode="stretch_width")
 
     def _build_layout(self):
-        """组装垂直布局：main -> indicators -> analyzers。"""
         _vlines = []
         for _plt in self.all_figures:
             vline = Span(location=0, dimension="height", line_color="red", line_width=1, line_alpha=0)

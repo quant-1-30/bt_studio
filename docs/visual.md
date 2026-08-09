@@ -11,10 +11,7 @@ bt_studio/visual/
 │   ├── plot.py     #   垂直联动多面板图（OHLCV + Indicators + Analyzers）
 │   ├── scheme.py   #   配色方案与绘图参数
 │   └── utils.py    #   数据加载（bt_core 长表 → 宽表 pivot）
-├── mpl/            # Matplotlib 回测绘图（backtrader 风格，strategy 对象输入）
-│   └── plot.py     #   Plot 类（直接消费 strategy 对象）
-├── app.py          # Streamlit 日志分析应用
-└── board.py        # TensorBoard 日志路径注释
+└── app.py          # Streamlit 日志分析应用
 ```
 
 ### 数据流
