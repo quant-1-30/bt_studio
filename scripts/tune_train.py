@@ -666,6 +666,19 @@ if __name__ == "__main__":
             "num_workers": 12,
             "n_startup_trials": 40,
 
+            # "fanova_min_samples": 20,     
+            # "fanova_neighbor_ratio": 0.15,
+            # "fanova_drop_iqr_limit": 1.5, # 1.5 IQR
+            
+            # "complexity_weights": {
+            #     "offset_scale": 60.0,     
+            #     "dtw_scale": 10.0,        
+            #     "motif_scale": 30.0,      
+            # },
+            
+            # "gap_z_lower": -2.0, # 2 MAD 
+            # "gap_z_upper": 3.0,  # 3 MAD 
+
             "seed": 42, # for reproducibility 
 
             "storage_path": "/tmp/ray_results", # for Ray Tune
@@ -674,8 +687,8 @@ if __name__ == "__main__":
         "search_bounds": {
             "downsample": [3, 4, 5], # downsample for DTW
             "motif_minutes": [30, 45, 60, 90], # used from motif length intraday
-            "threshold_r": [0.6, 0.8], 
-            "num_trials": 500, 
+            "threshold_r": [0.65, 0.90], 
+            "num_trials": 800, 
         }
     }
 

@@ -51,7 +51,7 @@ def discover_fsm_pattern(
         return {
             "status": "failed",
             "reason": f"Data not enough after mask (n={panel_df.height})",
-            "metrics_score": -100.0
+            "metrics_score": -500.0
         }
 
     # =========================================================================
@@ -66,7 +66,7 @@ def discover_fsm_pattern(
         return {
             "status": "failed",
             "reason": "Curves_2d Empty",
-            "metrics_score": -100.0
+            "metrics_score": -500.0
         }
 
     # =========================================================================
@@ -89,13 +89,13 @@ def discover_fsm_pattern(
         return {
             "status": "failed",
             "reason": "STUMPY returned no valid motifs",
-            "metrics_score": -100.0
+            "metrics_score": -500.0
         }
 
     # =========================================================================
     # 5. Estimate
     # =========================================================================
-    best_result, highest_score = None, -100.0
+    best_result, highest_score = None, -500.0
 
     for motif in candidate_motifs:
         if np.nanstd(motif) < 1e-4:
@@ -111,5 +111,5 @@ def discover_fsm_pattern(
     return best_result if best_result else {
         "status": "failed",
         "reason": "All candidates failed statistical tests",
-        "metrics_score": -100.0
+        "metrics_score": -500.0
     }

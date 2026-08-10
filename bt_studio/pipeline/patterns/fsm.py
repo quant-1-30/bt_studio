@@ -204,7 +204,7 @@ def evaluate_and_build_fsm(
         return {
             "status": "failed", 
             "reason": f"DTW (n={triggers.height}) < trigger", 
-            "metrics_score": -100.0
+            "metrics_score": -500.0
         }
     
     # =====================================================================================================================
@@ -297,7 +297,7 @@ def evaluate_and_build_fsm(
          return {
             "status": "failed", 
             "reason": f" Rank_trajectory trigger ({n_triggers}) <= {min_test_samples}", 
-            "metrics_score": -100.0
+            "metrics_score": -500.0
         }
     
     try:
@@ -314,7 +314,7 @@ def evaluate_and_build_fsm(
         return {
             "status": "failed", 
             "reason": "cond_data height 0", 
-            "metrics_score": -100.0
+            "metrics_score": -500.0
         }
         
     cond_rets = cond_data[:, 0]

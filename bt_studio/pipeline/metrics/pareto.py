@@ -4,7 +4,7 @@ import numpy as np
 
 def find_pareto_front(df_results: pl.DataFrame, common_config: dict) -> pl.DataFrame:
     """
-        帕累托支配核心定义
+        帕累托支配
             a. 在所有指标上都不比对方差
             b. 必须至少有一个指标严格优于对方
     """
@@ -45,22 +45,6 @@ def find_pareto_front(df_results: pl.DataFrame, common_config: dict) -> pl.DataF
     
     return valid_df.filter(~is_dominated)
     
-
-def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict: # Shift-and-Divide Utility
-    if pareto_df.height == 0: 
-        return None
-    
-    min_score = pareto_df["metrics_score"].min()
-    
-    return (
-        # transfer to positive space 
-        pareto_df.with_columns(
-            ((pl.col("metrics_score") - min_score + 1.0) / pl.col("complexity")).alias("efficiency")
-        )
-        .sort("efficiency", descending=True)
-        .row(0, named=True)
-    )
-
 
 def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict | None:
     if pareto_df.height == 0: 

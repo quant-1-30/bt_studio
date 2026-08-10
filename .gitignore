@@ -232,3 +232,6 @@ result/*
 mlartifacts/*
 mlflow.db
 mlflow.db
+
+.claude
+.agents
