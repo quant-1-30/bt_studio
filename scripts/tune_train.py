@@ -316,11 +316,20 @@ def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_c
         resources={"cpu": 1, "gpu": 0} 
     )
 
-    mlflow_callback = MLflowLoggerCallback(
-        tracking_uri=mlflow.get_tracking_uri(), 
-        experiment_name="FSM_Production_Models",
-        save_artifact=False  
-    )
+    # [FIX] MLflow safety guard: auto-disable if server unreachable (prevents HPO hang)
+    mlflow_callback = None
+    try:
+        import requests
+        _mlflow_uri = mlflow.get_tracking_uri()
+        requests.get(_mlflow_uri, timeout=3)
+        mlflow_callback = MLflowLoggerCallback(
+            tracking_uri=_mlflow_uri,
+            experiment_name="FSM_Production_Models",
+            save_artifact=False
+        )
+        print(f"  [MLflow] Connected to {_mlflow_uri}")
+    except Exception as _e:
+        print(f"  [MLflow] Server unreachable, disabling callback: {_e}")
 
     tuner = tune.Tuner(
         wrapped_trainable, 
@@ -339,7 +348,7 @@ def node_tune_monthly(prev_model_id: str, model_id: int, train_data: dict, exp_c
         run_config=tune.RunConfig(
             name=f"fsm_hpo_{model_id}", 
             storage_path=common_config["storage_path"],
-            callbacks=[mlflow_callback]
+            callbacks=[mlflow_callback] if mlflow_callback else []
             )  
         )
     
@@ -537,7 +546,6 @@ def wfo_pipeline(exp_config):
             "OPENBLAS_NUM_THREADS": "1",
             "VECLIB_MAXIMUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
-            # "GRPC_ENABLE_FORK_SUPPORT": "0", # set in global
         },
         # "working_dir": os.path.dirname(os.path.abspath(__file__)) 
     }
@@ -618,6 +626,10 @@ if __name__ == "__main__":
 
     load_dotenv()
 
+    # [FIX] Force local SQLite MLflow backend (avoid Docker HTTP 403 + retry hang)
+    mlflow.set_tracking_uri(f"sqlite:///{os.path.join(os.getcwd(), 'mlflow.db')}")
+    print(f"  [MLflow] Tracking URI: {mlflow.get_tracking_uri()}")
+
     exp_config = {
         "common_params": {
             "start_date": 20100101, "end_date": 20201231, "benchmark": "1A0001",
@@ -688,7 +700,7 @@ if __name__ == "__main__":
             "downsample": [3, 4, 5], # downsample for DTW
             "motif_minutes": [30, 45, 60, 90], # used from motif length intraday
             "threshold_r": [0.65, 0.90], 
-            "num_trials": 800, 
+            "num_trials": 500, 
         }
     }
 

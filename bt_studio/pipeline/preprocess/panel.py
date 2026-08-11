@@ -163,11 +163,15 @@ def extract_curves_from_panel(
     # element order inside the aggregated list. Without sort_by, 09:30 data could
     # end up after 14:00, turning the OFI curve into shuffled white noise.
     # =========================================================================
+    # [FeatureAgent] Support configurable feature column.
+    # Defaults to "ofi_ratio" for backward compatibility.
+    feature_col = common_config.get("feature_col", "ofi_ratio")
+
     curve_lf = (
         all_feat_lf.group_by(["day", "sid"])
         .agg([
-            pl.col("ofi_ratio").sort_by("bar_idx").alias("daily_curve"),
-            pl.col("ofi_ratio").count().alias("curve_len"),
+            pl.col(feature_col).sort_by("bar_idx").alias("daily_curve"),
+            pl.col(feature_col).count().alias("curve_len"),
         ])
         .filter(pl.col("curve_len") == bars_per_day)
     )
