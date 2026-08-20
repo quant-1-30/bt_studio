@@ -44,22 +44,32 @@ from bt_studio.pipeline.preprocess import (
     extract_curves_from_panel,
     prepare_macro,
     universe_sample,
-    prepare_tick
+    prepare_tick,
 )
 from bt_studio.utils.diagnostics.hpo_check import run_collapse_check
 from bt_studio.utils.months import paths_for_months
 from bt_studio.utils.io import atomic_save_parquet, atomic_save_pickle
 
 # ==============================================================================
-# Date and Int32
+# Date and Int32 
 # ==============================================================================
 
 def _expr_month_id(col_name: str = "day") -> pl.Expr:
-    """YYYYMM month_id and Date/Datetime / Int(20200101)"""
+    """
+        Int32 YYYYMM ---> Date, Datetime, Int32/Int64 (20210101) and  Utf8 ('2021-01-01')
+    """
+    col = pl.col(col_name)
+    # fixbug SafeExpr
     return (
-        pl.when(pl.col(col_name).dtype.is_temporal())
-        .then(pl.col(col_name).dt.year() * 100 + pl.col(col_name).dt.month())
-        .otherwise(pl.col(col_name) // 100)
+        pl.coalesce([
+            # 1. Date/Datetime
+            col.dt.year() * 100 + col.dt.month(),
+            # 2. YYYYMMDD -> YYYYMM
+            col.cast(pl.Int64) // 100,
+            # 3. 'YYYY-MM-DD' -> YYYYMM
+            col.cast(pl.Utf8).str.replace_all("-", "").str.slice(0, 6).cast(pl.Int64),
+        ])
+        .cast(pl.Int32)
         .alias("_month_id")
     )
 
@@ -105,7 +115,7 @@ def node_prepare_macro(common_config: dict, warm: int = 10000) -> Dict[str, Any]
 # Node 2: Feature Extraction & PIT Partitioning
 # ==============================================================================
 
-def _prepare_tick_for_months(missing_ymonths: List[int], universe_sids: Dict[int, List[Any]]) -> pl.LazyFrame:
+def _prepare_tick_for_months(missing_ymonths: List[int], universe_sids: Dict[int, List[Any]]) -> Optional[pl.LazyFrame]:
     start_date = min(missing_ymonths) * 100 + 1
     end_date = max(missing_ymonths) * 100 + 31
 
@@ -145,9 +155,21 @@ def node_extract_feature_monthly(
     generated_paths: List[str] = []
     missing_ymonths: List[int] = []
 
+    # fixbug to determin real feature_col
     if feature_col is None:
         feature_col = common_config.get("feature_col")
 
+    compiled_exprs = None
+    if feature_col is None:
+        if isinstance(ast_recipe, list):
+            compiled_exprs = compile_recipe(ast_recipe, check_causal=True)
+            feature_col = ast_recipe[-1].get("name", f"recipe_feat")
+        else:
+            single_expr, inferred_name = compile_ast(ast_recipe, check_causal=True)
+            feature_col = inferred_name
+            compiled_exprs = [single_expr.alias(feature_col)]
+
+    # check cache
     for ym in ymonths:
         p = f"{FEATURE_DIR}/hf_{feature_col}_{ym}.parquet"
         if os.path.exists(p):
@@ -164,16 +186,14 @@ def node_extract_feature_monthly(
             return sorted(list(set(generated_paths)))
 
     combined_lf = raw_hf_lf
-    if isinstance(ast_recipe, list):
-        exprs = compile_recipe(ast_recipe, check_causal=True)
-        for e in exprs:
+    if compiled_exprs is not None:
+        for e in compiled_exprs:
             combined_lf = combined_lf.with_columns(e)
-        if feature_col is None and exprs:
-            feature_col = exprs[-1].meta.output_name()
+    elif isinstance(ast_recipe, list):
+        for e in compile_recipe(ast_recipe, check_causal=True):
+            combined_lf = combined_lf.with_columns(e)
     else:
-        expr, inferred_name = compile_ast(ast_recipe, check_causal=True)
-        if feature_col is None:
-            feature_col = inferred_name
+        expr, _ = compile_ast(ast_recipe, check_causal=True)
         combined_lf = combined_lf.with_columns(expr.alias(feature_col))
 
     schema_names = combined_lf.collect_schema().names()
@@ -201,9 +221,7 @@ def node_extract_feature_monthly(
         )
 
         if month_df.height > 0:
-            # month_df.write_parquet(out_path)
             atomic_save_parquet(month_df, out_path)
-
             generated_paths.append(out_path)
             print(f"  [Persist PIT] -> {out_path}")
 
@@ -215,31 +233,33 @@ def node_extract_feature_monthly(
 # ==============================================================================
 
 def node_check_decay_monthly(
-    prev_model_id: int,  # train_month[-1]
+    prev_model_id: Optional[int],  # train_month[-1]
     prev_oos_yms: List[int],
     dret_path: str,
     train_paths: List[str],
     common_config: dict,
 ) -> bool:
+    if prev_model_id is None:
+        print(f"Cold start (prev_model_id is None) -> Trigger Tune")
+        return True
 
     prev_model_path = f"{TUNE_MODEL_DIR}/model_{prev_model_id}.pkl"
     if not os.path.exists(prev_model_path):
-        print(f"NotFound : {prev_model_id} -> Trigger Tune")
+        print(f"NotFound: {prev_model_id} -> Trigger Tune")
         return True
 
     try:
         with open(prev_model_path, "rb") as f:
             model_ckpt = pickle.load(f)
     except Exception as e:
-        print(f"Parser Model: {e} -> Trigger Tune")
+        print(f"Parse Model Error: {e} -> Trigger Tune")
         return True
 
     prev_oos_paths = paths_for_months(train_paths, prev_oos_yms)
     aligned_lfs = [pl.scan_parquet(p) for p in prev_oos_paths if os.path.exists(p)]
     
-    # avoid []
     if not aligned_lfs:
-        print(f"⚠️ OOS ({prev_oos_yms}) Notfound -> Trigger Tune")
+        print(f"⚠️ OOS ({prev_oos_yms}) NotFound -> Trigger Tune")
         return True
 
     panel_lf = build_fsm_panel(
@@ -257,17 +277,18 @@ def node_check_decay_monthly(
     )
 
     if result.get("status") != "success":
-        print(f"Model {prev_model_id} in OOS not pass evaluate -> Trigger Retune")
+        print(f"Model {prev_model_id} in OOS failed evaluation -> Trigger Retune")
         return True
 
     u_pval = result.get("u_pval", 1.0)
     max_pval = common_config.get("u_pval", 0.05)
     if u_pval <= max_pval:
-        print(f"Model {prev_model_id} in OOS ({prev_oos_yms[0]}-{prev_oos_yms[-1]}) (P-val: {u_pval:.4f} <= {max_pval})")
+        print(f"Model {prev_model_id} healthy in OOS ({prev_oos_yms[0]}-{prev_oos_yms[-1]}) (P-val: {u_pval:.4f} <= {max_pval})")
         return False
 
     print(f"Model {prev_model_id} decay (P-val: {u_pval:.4f} > {max_pval}) -> Trigger Retune")
     return True
+
 
 # ==============================================================================
 # Node 4a: Train Data Preparation
@@ -291,7 +312,7 @@ def node_prepare_train_data(
         dret_pa = dret_lazy.collect(engine="streaming").to_arrow()
         static_pa = static_lazy.collect(engine="streaming").to_arrow()
     except Exception as e:
-        print(f"Train Dataset Failure: {e}")
+        print(f"Train Dataset Preparation Failure: {e}")
         return None
 
     return {
@@ -348,19 +369,22 @@ def node_tune_monthly(
     exp_config: dict,
 ) -> Optional[int]:
     os.makedirs(TUNE_MODEL_DIR, exist_ok=True)
-    common_config = exp_config["common_params"]
-    search_config = exp_config["search_bounds"]
+
+    # fixbug None  
+    common_config = exp_config.get("common_config") or exp_config.get("common_params", {})
+    search_config = exp_config.get("search_bounds") or exp_config.get("search_config", {})
 
     hf_ref, dret_ref, static_ref = train_data["hf_ref"], train_data["dret_ref"], train_data["static_ref"]
     hf_lazy, dret_lazy = train_data["hf_lazy"], train_data["dret_lazy"]
 
+    r_bounds = search_config.get("threshold_r", [0.55, 0.85])
     search_space = {
-        "downsample": tune.choice(search_config["downsample"]),
-        "motif_minutes": tune.choice(search_config["motif_minutes"]),
-        "threshold_r": tune.uniform(search_config["threshold_r"][0], search_config["threshold_r"][1]),
+        "downsample": tune.choice(search_config.get("downsample", [3, 4, 5])),
+        "motif_minutes": tune.choice(search_config.get("motif_minutes", [30, 45, 60])),
+        "threshold_r": tune.uniform(r_bounds[0], r_bounds[-1]) if isinstance(r_bounds, (list, tuple)) and len(r_bounds) >= 2 else tune.choice(r_bounds),
     }
 
-    # prior
+    # Prior Warm Start
     points_to_evaluate = None
     if prev_model_id:
         prev_model_path = f"{TUNE_MODEL_DIR}/model_{prev_model_id}.pkl"
@@ -398,14 +422,15 @@ def node_tune_monthly(
     try:
         import requests
         _mlflow_uri = mlflow.get_tracking_uri()
-        requests.get(_mlflow_uri, timeout=2)
-        mlflow_callback = MLflowLoggerCallback(
-            tracking_uri=_mlflow_uri,
-            experiment_name="FSM_Production_Models",
-            save_artifact=False,
-        )
+        if _mlflow_uri and _mlflow_uri.startswith("http"):
+            requests.get(_mlflow_uri, timeout=1.5)
+            mlflow_callback = MLflowLoggerCallback(
+                tracking_uri=_mlflow_uri,
+                experiment_name="FSM_Production_Models",
+                save_artifact=False,
+            )
     except Exception as _e:
-        print(f"  [MLflow] Server unreachable: {_e}")
+        pass
 
     num_trials = common_config.get("num_trials") or search_config.get("num_trials", 300)
 
@@ -430,10 +455,10 @@ def node_tune_monthly(
     results = tuner.fit()
     df_results = pl.from_pandas(results.get_dataframe())
 
-    # Block flat / spike
+    # Space Collapse Gating
     is_healthy, verdict, _ = run_collapse_check(df_results, exp_config, model_id)
     if not is_healthy:
-        print(f"❌ [HPO Gating] Model {model_id} not pass ({verdict.upper()}) -> reject")
+        print(f"❌ [HPO Gating] Model {model_id} rejected due to {verdict.upper()}")
         return None
 
     if df_results.height == 0:
@@ -446,20 +471,20 @@ def node_tune_monthly(
         (pl.col("u_pval") <= max_pval) & (pl.col("trigger_count") >= min_triggers)
     )
     if stats_valid_trials.height == 0:
-        print(f"⚠️ [Failed] {model_id} due to zero sample")
+        print(f"⚠️ [Failed] {model_id} zero valid statistical samples")
         return None
 
     best_valid_row = stats_valid_trials.sort("metrics_score", descending=True).row(0, named=True)
     best_valid_score = best_valid_row["metrics_score"]
     best_valid_config = {k.replace("config/", ""): v for k, v in best_valid_row.items() if k.startswith("config/")}
 
-    # fANOVA 
+    # fANOVA Stability Check
     is_plateau = validate_parameter_plateau_fanova(df_results, best_valid_config, best_valid_score)
     if not is_plateau:
-        print(f"❌ {model_id} fANOVA spike")
+        print(f"❌ {model_id} fANOVA spike detected")
         return None
 
-    # Pareto 
+    # Pareto
     pareto_front_df = find_pareto_front(stats_valid_trials, common_config)
     best_model_dict = select_best_model_from_pareto(pareto_front_df)
     if not best_model_dict:
@@ -471,10 +496,10 @@ def node_tune_monthly(
     if "threshold_d" not in best_config:
         best_config["threshold_d"] = float(np.sqrt(2 * best_config["m"] * (1.0 - best_config["threshold_r"])))
 
+    # Motif
     final_panel_lf = build_fsm_panel(hf_lazy, dret_lazy, best_config, common_config, is_train=True)
     final_result = discover_fsm_pattern(final_panel_lf, best_config, common_config)
 
-    # Motif 
     raw_motif = final_result.get("learned_motif", [])
     motif_arr = np.asarray(raw_motif, dtype=np.float64) if raw_motif else np.empty((0, 0), dtype=np.float64)
 
@@ -487,9 +512,6 @@ def node_tune_monthly(
     }
 
     pkl_path = f"{TUNE_MODEL_DIR}/model_{model_id}.pkl"
-    # with open(pkl_path, "wb") as f:
-    #     pickle.dump(model_ckpt, f)
-
     atomic_save_pickle(model_ckpt, pkl_path)
 
     print(f"✅ 模型成功落盘: {pkl_path}")
@@ -546,9 +568,6 @@ def node_update_fsm_matrix(
         "feature_col": common_config.get("feature_col"),
     }
     pkl_path = f"{TUNE_MODEL_DIR}/model_{model_id}.pkl"
-    # with open(pkl_path, "wb") as f:
-    #     pickle.dump(new_ckpt, f)
-
     atomic_save_pickle(new_ckpt, pkl_path)
 
     print(f"✅ {model_id} inherit {prev_model_id} Motif and Update Fsm Matrix")
@@ -600,4 +619,4 @@ def node_oos_inference_monthly(
         if scored_df.height > 0:
             out_path = f"{TUNE_SCORE_DIR}/scores_{model_id}.parquet"
             atomic_save_parquet(scored_df, out_path)
-            print(f"{model_id} OOS ({oos_yms[0]} ~ {oos_yms[-1]}) Save to {out_path} and Num: {scored_df.height}")
+            print(f"{model_id} OOS ({oos_yms[0]} ~ {oos_yms[-1]}) Saved to {out_path}, Rows: {scored_df.height}")

@@ -3,62 +3,88 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 import traceback
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
+
 from .prompt import build_system_prompt, build_rl_context_prompt
 from .harness import TwoStageAgentHarness, FeatureMiningResult
 from bt_studio.compiler.ast import ast_fingerprint
-
 from bt_studio.constant import LLM_RUN_DIR
 from bt_studio.utils.io import atomic_save_json
 
 
 class ReplayBuffer:
+    """
+    - success:  score desc Top-K and support fingerprint
+    - failure:  fingerprint to unqiue
+    """
 
     def __init__(self, max_success: int = 10, max_failed: int = 10):
         self.max_success = max_success
         self.max_failed = max_failed
         self.successful_history: List[Dict[str, Any]] = []
         self.failed_history: List[Dict[str, Any]] = []
-        self._seen_success_fps: set[str] = set()
+        self._success_fps: Dict[str, float] = {}  # fp -> best_score
 
     def add_success(self, item: Dict[str, Any]) -> None:
         ast_obj = item.get("ast")
         fp = ast_fingerprint(ast_obj) if ast_obj else ""
 
-        # decouple 
-        if fp and fp in self._seen_success_fps:
-            return
-
         score = item.get("score")
-        if score is None or not isinstance(score, (int, float)):
-            item["score"] = -500.0
+        if score is None or not isinstance(score, (int, float)) or np.isnan(score):
+            score = -500.0
+            item["score"] = score
+
+        # fixbug
+        if fp and fp in self._success_fps:
+            if score <= self._success_fps[fp]:
+                return
+            
+            self.successful_history = [
+                x for x in self.successful_history 
+                if ast_fingerprint(x.get("ast")) != fp
+            ]
 
         self.successful_history.append(item)
         if fp:
-            self._seen_success_fps.add(fp)
+            self._success_fps[fp] = score
 
+        # fixbug avoid Nan
         self.successful_history.sort(
-            key=lambda x: x.get("score") if isinstance(x.get("score"), (int, float)) else -9999.0,
+            key=lambda x: (
+                x.get("score") 
+                if isinstance(x.get("score"), (int, float)) and not np.isnan(x.get("score"))
+                else -9999.0
+            ),
             reverse=True,
         )
+
         if len(self.successful_history) > self.max_success:
             removed = self.successful_history.pop()
             rem_fp = ast_fingerprint(removed.get("ast"))
-            self._seen_success_fps.discard(rem_fp)
+            self._success_fps.pop(rem_fp, None)
 
-    def add_failure(self, item: Dict[str, Any]) -> None:
-        """FIFO Failure"""
+    def add_failure(self, item: Dict[str, Any]) -> None: # FIFO
+        
+        ast_obj = item.get("ast")
+        fp = ast_fingerprint(ast_obj) if ast_obj else str(item.get("reason", ""))
+
+        if self.failed_history:
+            prev_ast = self.failed_history[0].get("ast")
+            prev_fp = ast_fingerprint(prev_ast) if prev_ast else str(self.failed_history[0].get("reason", ""))
+            if fp and fp == prev_fp:
+                return
+
         self.failed_history.insert(0, item)
         del self.failed_history[self.max_failed:]
 
 
 class RLFeatureFlywheel:
     """
-        LLM Hperthesis and generate -> Harness Test -> RL -> Dump
+        LLM Hyperthesis -> Harness -> ReplayBuffer RL -> Artifact Persist
     """
 
     def __init__(
@@ -73,36 +99,35 @@ class RLFeatureFlywheel:
         self.buffer = ReplayBuffer()
         self._step_counter = 0
 
+    def _clean_json_str(self, text: str) -> str:
+        """LLM JSON Format bug"""
+        text = re.sub(r",\s*([\]}])", r"\1", text)
+        return text.strip()
+
     def _parse_llm_json(self, raw_text: str) -> Optional[Dict[str, Any]]:
         if not raw_text or not raw_text.strip():
             return None
 
-        text = raw_text.strip()
-
-        # 1. re ```json ... ``` / ``` ... ```
-        match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-        if match:
-            text = match.group(1).strip()
-        else:
-            first_brace = text.find("{")
-            last_brace = text.rfind("}")
-            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                text = text[first_brace : last_brace + 1].strip()
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as e:
-            # Handle possible trailing data issue
+        # 1. retrieve markdown
+        code_blocks = re.findall(r"```(?:json)?\s*(.*?)\s*```", raw_text, re.DOTALL)
+        for block in reversed(code_blocks): 
+            cleaned = self._clean_json_str(block)
             try:
-                # Find the very last brace
-                last_brace = text.rfind("}")
-                if last_brace != -1:
-                    text = text[:last_brace + 1].strip()
-                    return json.loads(text)
+                return json.loads(cleaned)
             except json.JSONDecodeError:
-                pass
-            print(f"[Flywheel] JSON 解析失败: {e} | 原始片段: {raw_text[:120]!r}")
-            return None
+                continue
+
+        first_brace = raw_text.find("{")
+        last_brace = raw_text.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            snippet = self._clean_json_str(raw_text[first_brace : last_brace + 1])
+            try:
+                return json.loads(snippet)
+            except json.JSONDecodeError as e:
+                print(f"[Flywheel] JSON 括号裁剪解析失败: {e} | 片段: {snippet[:100]!r}")
+
+        print(f"[Flywheel] 无法从 LLM 输出中解析有效 JSON | 原始片段: {raw_text[:120]!r}")
+        return None
 
     @staticmethod
     def _failure_reason(r: FeatureMiningResult) -> str:
@@ -118,7 +143,6 @@ class RLFeatureFlywheel:
         )
 
     def step(self, target_description: str, hf_lf: Any, dret_lf: Any) -> List[FeatureMiningResult]:
-   
         self._step_counter += 1
         print("\n" + "=" * 80)
         print(f"[Flywheel] Step {self._step_counter} 开始迭代...")
@@ -148,7 +172,7 @@ class RLFeatureFlywheel:
         candidate_asts = agent_data.get("sub_features", [])
         hyp_id = agent_data.get("hypothesis_id", f"hyp_{self._step_counter}")
 
-        print(f"[Flywheel] [{hyp_id}] candidates: {len(candidate_asts)}")
+        print(f"[Flywheel] [{hyp_id}] 提出候选特征 AST 数量: {len(candidate_asts) if isinstance(candidate_asts, list) else 0}")
 
         if not candidate_asts or not isinstance(candidate_asts, list):
             self.buffer.add_failure({
@@ -157,7 +181,7 @@ class RLFeatureFlywheel:
             })
             return []
 
-        # Harness 
+        # Harness Pipeline
         try:
             results = self.harness.run(candidate_asts, hf_lf, dret_lf)
         except Exception as e:
@@ -169,6 +193,7 @@ class RLFeatureFlywheel:
                 })
             return []
 
+        # RL
         for r in results:
             target_ast = r.raw_ast
             if not target_ast:
@@ -197,18 +222,20 @@ class RLFeatureFlywheel:
         results: List[FeatureMiningResult],
         target: str,
     ) -> None:
-        
         try:
             os.makedirs(LLM_RUN_DIR, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            hyp = agent_data.get("hypothesis_id", "unknown")
-            step_id = f"step_{ts}_{hyp}_s{self._step_counter}"
+            raw_hyp = agent_data.get("hypothesis_id", "unknown")
+            
+            # fixbug
+            safe_hyp = re.sub(r"[^\w\-]", "_", str(raw_hyp))
+            step_id = f"step_{ts}_{safe_hyp}_s{self._step_counter}"
 
             rec = {
                 "step_index": self._step_counter,
                 "timestamp": ts,
                 "target": target,
-                "hypothesis_id": hyp,
+                "hypothesis_id": raw_hyp,
                 "economic_reasoning": agent_data.get("economic_reasoning", ""),
                 "candidates": agent_data.get("sub_features", []),
                 "features": [r.to_summary() for r in results],
@@ -220,6 +247,6 @@ class RLFeatureFlywheel:
 
             path = os.path.join(LLM_RUN_DIR, f"{step_id}.json")
             atomic_save_json(rec, path)
-            print(f"[Flywheel] Artifact Save to: {path}")
+            print(f"[Flywheel] Artifact 保存至: {path}")
         except Exception as e:
-            print(f"[Flywheel] Artifact Error: {e}")
+            print(f"[Flywheel] Artifact 保存异常: {e}")

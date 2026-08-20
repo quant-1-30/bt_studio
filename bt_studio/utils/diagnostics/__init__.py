@@ -5,8 +5,8 @@ pipeline (auto-validation) and the visual dashboards.
 """
 
 from .hpo_check import run_collapse_check, build_search_bounds  # noqa: F401
-from .collapse import (
-    detect_space_collapse,
+from .collapse import detect_space_collapse
+from .recorder import (
     print_collapse_report,
     build_collapse_report,
     save_collapse_report,

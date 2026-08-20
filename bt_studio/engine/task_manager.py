@@ -3,22 +3,22 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
-import time
-import uuid
 import queue
 import threading
-import logging
+import time
 import traceback
-from typing import Any, Dict, Optional, Tuple
-from enum import Enum
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, Optional, Tuple
 
-from bt_studio.constant import TUNE_MODEL_DIR, TUNE_COLLAPSE_DIR, LLM_PENDING_DIR
+from bt_studio.constant import LLM_PENDING_DIR, TUNE_COLLAPSE_DIR, TUNE_MODEL_DIR
 from bt_studio.default_config import build_exp_config
 from bt_studio.engine import parse_dag, run_dag
-from bt_studio.engine.executor import ensure_ray
+from bt_studio.engine.ctx import ensure_ray
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,10 @@ class TaskStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
 
 
 @dataclass
@@ -60,42 +64,35 @@ class TaskResult:
 
 
 class AsyncTaskManager:
-    """
-        FIFO  + signal Worker  => Ray Occupy execute
-        Intake thread listen LLM-Agent Deploy task
-    """
-
-    def __init__(self, llm_intake_dir: Optional[str] = None, max_concurrency: int = 100):
+    def __init__(
+        self,
+        llm_intake_dir: Optional[str] = None,
+        max_queued_tasks: int = 50,    
+        max_history_tasks: int = 200,  
+    ):
         self._tasks: Dict[str, TaskResult] = {}
-        self._max_concurrency = max_concurrency
+        self._max_queued_tasks = max_queued_tasks
+        self._max_history_tasks = max_history_tasks
         self._lock = threading.Lock()
         self._queue: queue.Queue[Tuple[str, str, Dict[str, Any], Any]] = queue.Queue()
+        self._running = True
 
-        # Orchestrator
         ensure_ray(num_cpus=12)
 
-        # MainLoop Queue Worker
         self._worker = threading.Thread(
             target=self._queue_loop, daemon=True, name="dag-serial-worker"
         )
         self._worker.start()
 
-        # LLM Scan threading 
+        # LLM Monitor
         if llm_intake_dir is None and os.environ.get("BT_STUDIO_LLM_INTAKE") == "1":
             llm_intake_dir = LLM_PENDING_DIR
-
         self._intake_dir = llm_intake_dir
-
-        self._intake_thread: Optional[threading.Thread] = None
         if self._intake_dir:
-            self._intake_thread = threading.Thread(
-                target=self._intake_loop, daemon=True, name="llm-intake"
-            )
-            self._intake_thread.start()
-            logger.info(f"LLM Intake 监听已启用: {self._intake_dir}")
+            threading.Thread(target=self._intake_loop, daemon=True, name="llm-intake").start()
 
     # ------------------------------------------------------------------ #
-    # submit Dag task
+    # Load Shedding
     # ------------------------------------------------------------------ #
     def submit_dag_task(self, dag_ref: str, config: Dict[str, Any]) -> str:
         exp_config = build_exp_config(config)
@@ -103,16 +100,35 @@ class AsyncTaskManager:
         feature_col = exp_config.get("feature_col")
         if feature_col is None:
             raise ValueError("submit_dag_task: feature_col must be provided in config")
-        
-        # Fail-Fast
+
         dag = parse_dag(dag_ref)
-
         task_id = f"dag_{uuid.uuid4().hex[:8]}"
-        with self._lock:
-            if len(self._tasks) >= self._max_concurrency:
-                oldest_key = next(iter(self._tasks))
-                del self._tasks[oldest_key]
 
+        with self._lock:
+            # 1. Shedding
+            queued_task_ids = [
+                tid for tid, t in self._tasks.items() if t.status == TaskStatus.QUEUED
+            ]
+            if len(queued_task_ids) >= self._max_queued_tasks:
+                
+                victim_id = queued_task_ids[0] # oldest
+                victim_task = self._tasks[victim_id]
+                
+                victim_task.status = TaskStatus.CANCELLED
+                victim_task.message = f"因队列积压达到上限 ({self._max_queued_tasks})，被新任务挤出淘汰"
+                victim_task.timestamp = datetime.now()
+                logger.warning(
+                    f"[Load Shedding] 队列拥堵，已主动淘汰最旧排队任务: {victim_id} (Feature={victim_task.feature_col})"
+                )
+
+            # 2. recycle record
+            terminal_ids = [
+                tid for tid, t in self._tasks.items() if t.status.is_terminal
+            ]
+            if len(terminal_ids) >= self._max_history_tasks:
+                del self._tasks[terminal_ids[0]]
+
+            # 3. register 
             self._tasks[task_id] = TaskResult(
                 task_id=task_id,
                 status=TaskStatus.QUEUED,
@@ -124,58 +140,32 @@ class AsyncTaskManager:
         self._queue.put((task_id, dag_ref, exp_config, ast_recipe))
         logger.info(
             f"任务已入队: {task_id} (DAG={dag.name}, Feature={feature_col}), "
-            f"当前排队深度={self._queue.qsize()}"
+            f"当前有效排队深度={len([t for t in self._tasks.values() if t.status == TaskStatus.QUEUED])}"
         )
         return task_id
 
     # ------------------------------------------------------------------ #
-    # LLM Consumer
-    # ------------------------------------------------------------------ #
-    def _intake_loop(self) -> None:
-        while True:
-            try:
-                self._drain_intake_once()
-            except Exception as e:
-                logger.error(f"Intake Scan: {e}\n{traceback.format_exc()}")
-            time.sleep(_INTAKE_INTERVAL)
-
-    def _drain_intake_once(self) -> int:
-        if not self._intake_dir or not os.path.isdir(self._intake_dir):
-            return 0
-
-        enqueued = 0
-        for path in sorted(glob.glob(os.path.join(self._intake_dir, "*.json"))):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    task = json.load(f)
-                dag_ref = task.pop("dag", "wfo_hpo")
-                self.submit_dag_task(dag_ref, task)
-                os.replace(path, path + ".consumed")
-                enqueued += 1
-            except Exception as e:
-                logger.warning(f"Intake Parse {path}: {e}")
-                try:
-                    os.replace(path, path + ".invalid")
-                except OSError:
-                    pass
-        return enqueued
-
-    # ------------------------------------------------------------------ #
-    # Worker 
+    # Worker Loop
     # ------------------------------------------------------------------ #
     def _queue_loop(self) -> None:
-        while True:
-            task_id, dag_ref, exp_config, ast_recipe = self._queue.get()
+        while self._running:
+            try:
+                item = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            task_id, dag_ref, exp_config, ast_recipe = item
             try:
                 with self._lock:
                     current_task = self._tasks.get(task_id)
-                    if current_task and current_task.status == TaskStatus.CANCELLED:
-                        logger.info(f" taks {task_id} skip due to cancelled")
+
+                    if not current_task or current_task.status == TaskStatus.CANCELLED:
+                        logger.info(f"任务 {task_id} 已处于取消/淘汰状态 Worker 直接跳过")
                         continue
 
                 self._execute_pipeline(task_id, dag_ref, exp_config, ast_recipe)
             except Exception as e:
-                logger.error(f"execute {task_id} crash {e}")
+                logger.error(f"任务 {task_id} 执行崩溃: {e}")
                 self._update(
                     task_id,
                     status=TaskStatus.FAILED,
@@ -185,12 +175,57 @@ class AsyncTaskManager:
             finally:
                 self._queue.task_done()
 
+    # ------------------------------------------------------------------ #
+    # LLM Intake
+    # ------------------------------------------------------------------ #
+    def _intake_loop(self) -> None:
+        while self._running:
+            try:
+                self._drain_intake_once()
+            except Exception as e:
+                logger.error(f"Intake Scan 异常: {e}\n{traceback.format_exc()}")
+            time.sleep(_INTAKE_INTERVAL)
+
+    def _drain_intake_once(self) -> int:
+        if not self._intake_dir or not os.path.isdir(self._intake_dir):
+            return 0
+
+        enqueued = 0
+        for path in sorted(glob.glob(os.path.join(self._intake_dir, "*.json"))):
+            #
+            if path.endswith(".consumed") or path.endswith(".invalid"):
+                continue
+
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    task = json.load(f)
+                
+                dag_ref = task.pop("dag", "wfo_hpo")
+                self.submit_dag_task(dag_ref, task)
+                
+                os.replace(path, path + ".consumed")
+                enqueued += 1
+
+            except Exception as e:
+                # os.rename atomic ops
+                logger.warning(f"Intake 文件损坏或语法非法 {path}: {e}")
+                try:
+                    os.replace(path, path + ".invalid")
+                except OSError:
+                    pass
+
+        return enqueued
+
+    # ------------------------------------------------------------------ 
+    # Pipeline Execute 
+    # ------------------------------------------------------------------ 
+
     def _execute_pipeline(
         self, task_id: str, dag_ref: str, exp_config: Dict[str, Any], ast_recipe: Any
-    ) -> None:
+        ) -> None:
         dag = parse_dag(dag_ref)
         feature_col = exp_config.get("feature_col")
-        exec_start_time = time.time() 
+        exec_start_time = time.time()
 
         self._update(
             task_id,
@@ -204,21 +239,26 @@ class AsyncTaskManager:
         collapse = None
         if os.path.isdir(TUNE_COLLAPSE_DIR):
             matched_reports = []
-            for rpath in glob.glob(os.path.join(TUNE_COLLAPSE_DIR, f"*_{feature_col}.json")):
-                mtime = os.path.getmtime(rpath)
-                
-                if mtime >= exec_start_time - 2.0:
-                    matched_reports.append((mtime, rpath))
+            for rpath in glob.glob(os.path.join(TUNE_COLLAPSE_DIR, f"*{feature_col}*.json")):
+                try:
+                    mtime = os.path.getmtime(rpath)
+                    if mtime >= exec_start_time - 2.0:
+                        matched_reports.append((mtime, rpath))
+                except OSError:
+                    continue
 
             if matched_reports:
                 matched_reports.sort(key=lambda x: x[0])
                 latest_report_path = matched_reports[-1][1]
-                with open(latest_report_path, "r", encoding="utf-8") as f:
-                    rep = json.load(f)
-                collapse = {
-                    "verdict": rep.get("verdict", "unknown"),
-                    "report_path": latest_report_path,
-                }
+                try:
+                    with open(latest_report_path, "r", encoding="utf-8") as f:
+                        rep = json.load(f)
+                    collapse = {
+                        "verdict": rep.get("verdict", "unknown"),
+                        "report_path": latest_report_path,
+                    }
+                except Exception as e:
+                    logger.warning(f"读取坍塌报告失败: {latest_report_path}: {e}")
 
         self._update(
             task_id,
@@ -235,9 +275,9 @@ class AsyncTaskManager:
             },
         )
 
-    # ------------------------------------------------------------------ #
-    # state management
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ 
+    # State Management
+    # ------------------------------------------------------------------ 
     def _update(self, task_id: str, **kwargs) -> None:
         with self._lock:
             if task_id in self._tasks:
@@ -264,9 +304,8 @@ class AsyncTaskManager:
                     task.message = "任务已在排队中被取消"
                     task.timestamp = datetime.now()
                     return True
-
                 elif task.status == TaskStatus.RUNNING:
-                    logger.warning(f"任务 {task_id} 正在运行中，无法即时中断。")
+                    logger.warning(f"任务 {task_id} 正在运行中，无法即时中断")
                     return False
             return False
 
@@ -278,25 +317,21 @@ class AsyncTaskManager:
                 "running": 0,
                 "completed": 0,
                 "failed": 0,
-                "cancelled": 0,  
+                "cancelled": 0,
             }
             for t in self._tasks.values():
                 counts["total"] += 1
-                if t.status == TaskStatus.QUEUED:
-                    counts["queued"] += 1
-                elif t.status == TaskStatus.RUNNING:
-                    counts["running"] += 1
-                elif t.status == TaskStatus.COMPLETED:
-                    counts["completed"] += 1
-                elif t.status == TaskStatus.FAILED:
-                    counts["failed"] += 1
-                elif t.status == TaskStatus.CANCELLED:
-                    counts["cancelled"] += 1
+                counts[t.status.value] += 1
             return counts
+
+    def shutdown(self, wait: bool = True) -> None:
+        self._running = False
+        if wait:
+            self._queue.join()
 
 
 # ---------------------------------------------------------------------- #
-# singleton
+# Singleton
 # ---------------------------------------------------------------------- #
 _task_manager_instance: Optional[AsyncTaskManager] = None
 _singleton_lock = threading.Lock()

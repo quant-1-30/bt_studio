@@ -139,7 +139,9 @@ def parse_dag(ref: str) -> PipelineDag:
         if role is not None and role not in _ROLES:
             raise DagValidationError(f"{path}: node {nid}: role={role!r} invalid")
 
-        node_deps = _parse_deps(el.get("deps", ""), path, nid) if el.get("deps") else ()
+        raw_deps = (el.get("deps") or "").strip()
+        node_deps = _parse_deps(raw_deps, path, nid) if raw_deps else ()
+
         g.add_node(nid, fn=fn, role=role, deps=node_deps)
         deps_by_node[nid] = node_deps
 
@@ -188,3 +190,14 @@ def parse_dag(ref: str) -> PipelineDag:
     return PipelineDag(
         name=root.get("name"), graph=g, window=window, source_path=path
     )
+
+
+__all__ = [
+    "DagValidationError",
+    "DepTerm",
+    "Dep",
+    "DagWindow",
+    "PipelineDag",
+    "parse_dag",
+    "list_dags",
+]

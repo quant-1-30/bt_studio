@@ -11,7 +11,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from bt_studio.utils.diagnostics.collapse import (
+from bt_studio.utils.diagnostics import (
     detect_space_collapse,
     print_collapse_report,
     build_collapse_report,

@@ -203,7 +203,16 @@ def test_executor_resume_and_fail_fast():
             raise RuntimeError("decay exploded")
         
         ex.NODE_REGISTRY["node_check_decay_monthly"] = boom
-        exp = {"common_params": {"train_window": 3, "oss_step": 3, "num_workers": 1, "feature_col": "f"}, "search_bounds": {}}
+        exp = {
+            "common_params": {
+                "train_window": 3,
+                 "oss_step": 3, 
+                 "num_workers": 1, 
+                 "feature_col": "f"
+                 }, 
+            "search_bounds": {}
+        }
+        
         try:
             ex.run_dag(parse_dag("wfo_production"), exp, ast_recipe={"op": "x"})
             raise SystemExit("FAIL: node error swallowed")
@@ -213,19 +222,22 @@ def test_executor_resume_and_fail_fast():
         print("[ok] executor fail-fast: exception raised with graph repr")
 
         # resume grid alignment
-        exp2 = {"common_params": {"train_window": 3, "oss_step": 3, "num_workers": 1,
-                                  "feature_col": "f", "last_model_id": 202106},
-                "search_bounds": {}}
+        exp2 = {
+            "common_params": {
+                "train_window": 3,
+                "oss_step": 3,
+                "num_workers": 1,
+                "feature_col": "f",
+                "last_model_id": 202106,  # 202106 已完成
+            },
+            "search_bounds": {},
+        }
         res_r = ex.run_dag(parse_dag("wfo_production"), exp2, ast_recipe={"op": "x"})
-        # yms has 15 items. all splits = [3, 6, 9, 12]. last_model_id=202106 is at index 5.
-        # remaining splits: 6, 9, 12. 
-        # so models produced are from splits 6, 9, 12 -> 202106, 202109, 202112.
-        # But wait! split 6 ends at 202106. The list of splits executed is:
-        # idx=6: train=202104..202106. model=202106.
-        # idx=9: train=202107..202109. model=202109.
-        # idx=12: train=202110..202112. model=202112.
-        assert res_r.windows_executed == 3, f"Expected 3 windows, got {res_r.windows_executed}"
-        assert res_r.models_produced == [202106, 202109, 202112], f"Got models {res_r.models_produced}"
+
+        # 202106 (idx=6) 已经产出 恢复后应仅执行 idx=9 (202109) 和 idx=12 (202112)
+        assert res_r.windows_executed == 2, f"Expected 2 windows, got {res_r.windows_executed}"
+        assert res_r.models_produced == [202109, 202112], f"Got models {res_r.models_produced}"
+
         print("[ok] executor resume: grid alignment skipped earlier completed windows")
     finally:
         ex.NODE_REGISTRY.clear()
@@ -261,7 +273,8 @@ def test_intake():
     tm = AsyncTaskManager.__new__(AsyncTaskManager)
     tm._tasks, tm._lock = {}, __import__("threading").Lock()
     tm._queue = __import__("queue").Queue()
-    tm._max_concurrency = 100
+    tm._max_queued_tasks = 100
+    tm._max_history_tasks = 200
     tm._intake_dir = tmp
     assert tm._drain_intake_once() == 2
     _, dag1, cfg1, _ = tm._queue.get_nowait()

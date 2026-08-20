@@ -7,11 +7,11 @@ import polars as pl
 from typing import Any, Dict, List, Tuple
 
 from bt_studio.constant import TUNE_COLLAPSE_DIR
-from .collapse import (
-    detect_space_collapse,
+from .collapse import detect_space_collapse
+from .recorder import (
     build_collapse_report,
     save_collapse_report,
-    print_collapse_report,
+    print_collapse_report
 )
 
 __all__ = ["build_search_bounds", "run_collapse_check"]

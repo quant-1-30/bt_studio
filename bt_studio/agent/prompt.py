@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from typing import Any, Dict, List
+
+import numpy as np
 
 from .safeops import SAFE_OPS
 from .plugins import talib_ops
@@ -15,11 +18,10 @@ _KNOWN_ROLLING_OPS = {
     "ts_max", "ts_min", "decay_linear", "wma", "ts_argmax", "ts_argmin"
 }
 
-_TALIB_BRIDGE_OPS = {"talib", "rsi"}  # 桥接/外挂算子排除项
+_TALIB_BRIDGE_OPS = {"talib", "rsi"} 
 
 
 def _render_layer_one() -> str:
-    """从 SAFE_OPS 动态渲染第一层基础算子帮助信息"""
     unary: List[str] = []
     rolling: List[str] = []
     pairwise: List[str] = []
@@ -40,7 +42,6 @@ def _render_layer_one() -> str:
                 rolling.append(op)
             else:
                 pairwise.append(op)
-
         elif (lo, hi) == (3, 3):
             ternary.append(op)
         else:
@@ -50,12 +51,14 @@ def _render_layer_one() -> str:
         "[第一层: 基础算子 (Primitives)]",
         f"- 单目/截面算子 (1个参数: [输入]): {json.dumps(unary, ensure_ascii=False)}",
         "  *截面算子 (cs_*) 对全市场截面进行去极值、标准化或中性化*",
-        f"- 时序滚动算子 (2个参数: [表达式, 窗口N]): {json.dumps(rolling, ensure_ascii=False)}",
+        f"- 二元时序滚动算子 (2个参数: [表达式, 窗口N]): {json.dumps(rolling, ensure_ascii=False)}",
         "  *特别提醒: `delta(expr, N)` 代表时序变动量; `rank(expr, N)` / `ts_rank` 代表滚动分位数排名*",
         f"- 二元代数算子 (2个参数: [左表达式, 右表达式]): {json.dumps(pairwise, ensure_ascii=False)}",
     ]
     if ternary:
-        lines.append(f"- 三元算子 (3个参数): {json.dumps(ternary, ensure_ascii=False)}")
+        lines.append(
+            f"- 三元算子 (3个参数: [表达式1, 表达式2, 窗口N]): {json.dumps(ternary, ensure_ascii=False)}"
+        )
     if variadic:
         lines.append(f"- 变参/多参数算子: {json.dumps(variadic, ensure_ascii=False)}")
     return "\n".join(lines)
@@ -65,22 +68,23 @@ def _format_ops_help() -> str:
     layer_one = _render_layer_one()
     talib_content = ""
     if talib_ops.talib is None:
-        talib_content = "\n (# TA-Lib C底层库未启用: 仅支持第一层基础算子，禁止调用 TA-Lib 算子)"
+        talib_content = "\n(# TA-Lib C底层库未启用: 仅支持第一层基础算子，禁止调用 TA-Lib 算子)"
     else:
         talib_content = f"\n{talib_ops.format_ops_help()}"
 
-    return f"""
-        {layer_one}
+    res = f"""{layer_one}
 
-        【第二层: TA-Lib 白名单精选算子 (Layer 2)】
-        系统内置了极速的 C 底层实现。**为了防止参数过拟合，我们极其克制地只开放了以下白名单**.
-        语法一律采用位置参数传递: `{{"op": "算子名", "args": [输入列, 周期N]}}`，绝对禁止使用 kwargs!
-        冻结参数(如 MACD 的 12/26/9)必须显式按顺序写出，否则编译期直接拒绝。{talib_content}
-    """
+【第二层: TA-Lib 白名单精选算子 (Layer 2)】
+系统内置了极速的 C 底层实现。**为了防止参数过拟合，我们极其克制地只开放了以下白名单**.
+语法一律采用位置参数传递: `{{"op": "算子名", "args": [输入列, 周期N]}}`，绝对禁止使用 kwargs!
+冻结参数(如 MACD 的 12/26/9)必须显式按顺序写出，否则编译期直接拒绝。{talib_content}"""
+    return res
 
 
 def build_system_prompt(max_depth: int = 4) -> str:
-    return f"""你是一名顶尖的量化对冲基金资深 Alpha 研究员（如 WorldQuant / Two Sigma 风格）。
+    ops_help = _format_ops_help()
+    
+    prompt = f"""你是一名顶尖的量化对冲基金资深 Alpha 研究员（如 WorldQuant / Two Sigma 风格）。
 你的任务是根据金融微观结构逻辑与量价行为金融学，构建极具预测能力的高频/日频因子表达式，并输出为严格规范的 JSON AST(抽象语法树)。
 
 【WorldQuant 101 Alphas 级别的动能与微观结构指导原则】:
@@ -93,14 +97,14 @@ def build_system_prompt(max_depth: int = 4) -> str:
 【AST 结构语法规则】:
 1. 顶层必须为合法 JSON, 包含 `"hypothesis_id"`, `"economic_reasoning"` 和 `"sub_features"`。
 2. 基础行情列: `{{"col": "字段名"}}`，可用字段仅限: `["open", "high", "low", "close", "volume", "amount"]`。
-3. 算子节点: `{{"op": "算子名", "args": [...]}}`。全部参数必须放入 `args` 列表中，**绝对禁止使用 `kwargs` 或 `params`**!
+3. 算子节点: `{{"op": "算子名", "args": [...]}}`。全部参数必须放入 `args` 列表中，**绝对禁止使用 `kwargs` 或 `params`**！标量参数（如周期窗口、乘数）直接作为字面量写在 `args` 中（如 `[{{"col": "close"}}, 20]`）。
 4. **最大树深硬限制在 {max_depth} 层以内！** 超过 {max_depth} 层的过度嵌套树会被编译器直接拒绝。
 5. 严禁未来数据操作（如负向位移 `shift(-1)` 或 `backward_fill`）。
 6. 每一轮迭代可在 `sub_features` 中提出 1~3 个候选特征（支持单行 AST 或 多步 Recipe)。
 
-{_format_ops_help()}
+{ops_help}
 
-[两种特征构建模式的范例]:
+【两种特征构建模式的范例】:
 
 **模式 A: 单行复合 AST (适合紧凑型公式)**
 ```json
@@ -124,6 +128,7 @@ def build_system_prompt(max_depth: int = 4) -> str:
 }}
 
 **模式 B: 多步 Recipe / Let-binding (适合需要中间变量的复杂特征)**
+```json
 {{
   "hypothesis_id": "hyp_trend_consistency_volume",
   "economic_reasoning": "计算连续 3 天的涨跌符号和衡量趋势一致性。利用当前成交额与 20 日均值的比值确认量能，二者结合并做截面去均值。",
@@ -138,23 +143,22 @@ def build_system_prompt(max_depth: int = 4) -> str:
     ]
   ]
 }}
-
 输出格式强制要求:
-请直接输出标准 JSON 文本（允许使用 json  代码块包裹）,不要包含与 JSON 内容无关的闲聊或前后缀解释。
-"""
+请直接输出标准 JSON 文本（允许使用 ```json 代码块包裹），不要包含与 JSON 内容无关的闲聊或前后缀解释。"""
 
 
 def build_rl_context_prompt(
-    target_description: str,
-    successful_history: List[Dict[str, Any]],
-    failed_history: List[Dict[str, Any]],
-) -> str:
+        target_description: str,
+        successful_history: List[Dict[str, Any]],
+        failed_history: List[Dict[str, Any]],
+    ) -> str:
+
     """构建注入强化学习经验回放(Replay Buffer)的 User 提示词"""
     sections: List[str] = [
-    f"【当前挖掘目标与市场场景】:\n{target_description}\n"
+        f"【当前挖掘目标与市场场景】:\n{target_description}\n"
     ]
 
-    # 1. Reward > 0
+    # 1. Top-Reward
     if successful_history:
         success_lines = [
             "[经验池 - 成功案例 (Top-Reward 因子参考)]:",
@@ -162,7 +166,10 @@ def build_rl_context_prompt(
         ]
         for i, item in enumerate(successful_history[:RL_TOPK]):
             score_val = item.get("score")
-            score_str = f"{float(score_val):.2f}" if isinstance(score_val, (int, float)) else "N/A"
+            if isinstance(score_val, (int, float)) and not np.isnan(score_val):
+                score_str = f"{float(score_val):.2f}"
+            else:
+                score_str = "N/A"
             reasoning = item.get("reasoning", "无记录")
             ast_json = json.dumps(item.get("ast", {}), ensure_ascii=False)
             success_lines.append(
@@ -172,7 +179,7 @@ def build_rl_context_prompt(
             )
         sections.append("\n".join(success_lines) + "\n")
 
-    # 2. Reward <= 0 
+    # 2. Negative Feedback
     if failed_history:
         failed_lines = [
             "[经验池 - 失败案例 (避坑与约束提示)]:",
