@@ -21,7 +21,6 @@ from reactivex.scheduler.eventloop import AsyncIOScheduler
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from bt_sdk.core.protocol import _ENCODER, _RespDECODER
-from bt_sdk.core.rpc.client cimport RpcClient
 
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())

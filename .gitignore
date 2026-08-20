@@ -234,4 +234,5 @@ mlflow.db
 mlflow.db
 
 .claude
-.agents
+.agents.DS_Store
+.env

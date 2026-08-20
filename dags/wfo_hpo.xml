@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Single-window forced HPO (agent feature validation). Pruned graph:
+     nodes not declared do not exist — nothing to skip, nothing to fetch. -->
+<pipeline name="wfo_hpo">
+  <window from="last-trainable"/>
+  <node id="macro"         fn="node_prepare_macro"/>
+  <node id="extract_train" fn="node_extract_feature_monthly" role="train" deps="macro"/>
+  <node id="train_data"    fn="node_prepare_train_data"      deps="macro, extract_train>train_paths"/>
+  <node id="tune"          fn="node_tune_monthly"            deps="train_data"/>
+</pipeline>

@@ -64,7 +64,7 @@ class FSMPredictor:
             )
             .drop(["p33", "p67", "daily_ofi_median", "prev_ofi_median"])
         )
-        return daily_macro_lf.collect()
+        return daily_macro_lf.collect(engine="streaming")
 
     def _calculate_fsm_score(self, triggers: pl.DataFrame) -> pl.DataFrame:
         state_scores = np.zeros(3, dtype=np.float64)
@@ -142,7 +142,7 @@ class FSMPredictor:
         return self._calculate_fsm_score(valid_triggers)
 
     def predict(self, panel_lf: pl.LazyFrame) -> pl.DataFrame:
-        panel_df = panel_lf.collect(streaming=True)
+        panel_df = panel_lf.collect(engine="streaming")
         if panel_df.height == 0: 
             return pl.DataFrame()
         return self._predict(panel_df)

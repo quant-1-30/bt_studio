@@ -143,7 +143,7 @@ class Plot(object):
         self.layout_main = column(title_div, self.fig_main, sizing_mode="stretch_width")
 
     def _plot_indicators_stacked(self, ind_cols):
-        """每个 ind_* 列渲染为独立子图，垂直堆叠，共享 X 轴。"""
+        """每个 ind_* 列渲染为独立子图,垂直堆叠,共享 X 轴。"""
         ind_figs = []
         for i, col in enumerate(ind_cols):
             p_ind = figure(

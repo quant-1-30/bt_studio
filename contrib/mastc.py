@@ -23,7 +23,7 @@ def prepare_mcurves(panel_df: pl.DataFrame, tune_config: dict, common_config: di
     
     curves_md = np.array(curves_list) # Shape: (D, N, L)
     
-    # lag_0 today eg 14:55  np.nan！
+    # lag_0 today eg 14:55  np.nan!
     execlude_bars = common_config.get("exclude_bars", 10) // int(tune_config["downsample"])
     if execlude_bars > 0:
         curves_md[:, :, -execlude_bars:] = np.nan

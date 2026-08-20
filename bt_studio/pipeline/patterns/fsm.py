@@ -16,12 +16,12 @@ def extract_fsm_matrix(
     state_cols: list,
     target_names: list,  
     n_macro_states: int = 3, 
-    n_ret_states: int = 4
+    n_ret_states: int = 5
 ) -> dict:
     """
     Laplace Matrix
     - n_macro_states: (0, 1, 2 -> 3)
-    - n_ret_states: (0, 1, 2, 3 -> 4)
+    - n_ret_states: (0, 1, 2, 3, 4 -> 5)
     """
     select_cols = ["macro_state"] + state_cols
     valid_chain = triggers.drop_nulls(subset=select_cols) 
@@ -106,14 +106,13 @@ def evaluate_and_build_fsm(
         .drop(["p33", "p67", "daily_ofi_median", "prev_ofi_median"])
     )    
 
-    daily_macro = daily_macro_lf.collect()
+    daily_macro = daily_macro_lf.collect(engine="streaming")
     eval_df = panel_df.join(daily_macro.select(["day", "macro_state"]), on="day", how="inner")
 
     # =====================================================================================================================
     # 2. fwd_z_ret Ranking State ---> [0,1,2,3] 
     # =====================================================================================================================
-    ranking_ratio = common_config["ranking_ratio"]
-
+ 
     target_names = list(common_config["T1_rets"].keys()) # e.g. ["open_15m", "open_30m"]
     target_states = [] 
 
@@ -127,20 +126,36 @@ def evaluate_and_build_fsm(
         target_states.append(state_col) 
         rank_col = f"rank_{target_name}"
         
+        # ranking_ratio = common_config["ranking_ratio"]
+        # eval_df = (
+        #     eval_df
+        #     .with_columns([
+        #         (pl.col(z_score_col).rank(method="average") / pl.len()).over("day").alias(rank_col)
+        #     ])
+        #     .with_columns([
+        #         pl.when(pl.col(rank_col) <= ranking_ratio)
+        #         .then(0)                
+        #         .when(pl.col(rank_col) <= 0.50)
+        #         .then(1)                        
+        #         .when(pl.col(rank_col) <= (1.0 - ranking_ratio))
+        #         .then(2)         
+        #         .otherwise(3).
+        #         cast(pl.Int32).alias(state_col)                    
+        #     ])
+        # )
+
         eval_df = (
             eval_df
             .with_columns([
                 (pl.col(z_score_col).rank(method="average") / pl.len()).over("day").alias(rank_col)
             ])
             .with_columns([
-                pl.when(pl.col(rank_col) <= ranking_ratio)
-                .then(0)                
-                .when(pl.col(rank_col) <= 0.50)
-                .then(1)                        
-                .when(pl.col(rank_col) <= (1.0 - ranking_ratio))
-                .then(2)         
-                .otherwise(3).
-                cast(pl.Int32).alias(state_col)                    
+                pl.when(pl.col(rank_col) <= 0.10).then(0)                
+                  .when(pl.col(rank_col) <= 0.30).then(1)               
+                  .when(pl.col(rank_col) <= 0.70).then(2)                
+                  .when(pl.col(rank_col) <= 0.90).then(3)                
+                  .otherwise(4)                                         
+                  .cast(pl.Int32).alias(state_col)                    
             ])
         )
 

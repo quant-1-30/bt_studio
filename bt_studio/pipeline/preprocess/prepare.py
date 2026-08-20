@@ -147,6 +147,5 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
             ]
         )
         .drop(["to_minutes", "tick_dt", "tick"])
-        # .rename({"tick_dt": "tick"})
     )
     return padded_lf

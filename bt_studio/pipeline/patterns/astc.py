@@ -42,7 +42,6 @@ def get_candidate_motifs(raw_array: np.ndarray, config: dict, common_config: dic
         return []
 
     threshold_d = config["threshold_d"]
-    # # 理论随机距离: 两个不相关 z-norm 序列的期望欧氏距离
     # random_dist = float(np.sqrt(2 * m))
     
     mp = stumpy.stump(raw_array, m=m)

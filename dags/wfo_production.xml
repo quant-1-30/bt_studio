@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Production walk-forward. Branching = conditional deps on decay's
+     return value: ?decay (truthy → retune path), ?!decay (false →
+     inherit path). oos needs either tune or update (OR). -->
+<pipeline name="wfo_production">
+  <window from="first" train-window-key="train_window" step-key="oss_step"/>
+  <node id="macro"          fn="node_prepare_macro"/>
+  <node id="extract_train"  fn="node_extract_feature_monthly" role="train"   deps="macro"/>
+  <node id="extract_oos"    fn="node_extract_feature_monthly" role="oos"     deps="macro"/>
+  <node id="extract_warmup" fn="node_extract_feature_monthly" role="warmup"  deps="macro"/>
+  <node id="decay"          fn="node_check_decay_monthly"     role="prev_oos" deps="macro, extract_train>train_paths"/>
+  <node id="train_data"     fn="node_prepare_train_data"      deps="macro, extract_train>train_paths?decay"/>
+  <node id="tune"           fn="node_tune_monthly"            deps="train_data, decay?decay"/>
+  <node id="update"         fn="node_update_fsm_matrix"       deps="macro, extract_train>train_paths, decay?!decay"/>
+  <node id="oos"            fn="node_oos_inference_monthly"   deps="macro, extract_oos>oos_paths, extract_warmup>warmup_paths, tune|update"/>
+</pipeline>

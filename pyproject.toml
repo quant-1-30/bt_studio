@@ -16,17 +16,21 @@ statsmodels = "^0.14.6"
 dotenv = "^0.9.9"
 streamlit = "^1.57.0"
 bokeh = "^3.9.0"
+fastapi = "^0.115.0"
+uvicorn = "^0.30.0"
+websockets = "^13.0"
 coremltools = "^9.0"
 asitop = "^0.0.24"
 prometheus-client = "^0.25.0"
 graphviz = "^0.21"
 mlflow = "^3.13.0"
-prefect = "^3.7.3"
 scikit-learn = "^1.9.0"
+scipy = "^1.11"
 bt-core = "0.5.4"
 tensorboard = "^2.21.0"
 protobuf = ">=7.35.1"
 watchdog = "^6.0.0"
+networkx = "^3.6.1"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -54,3 +58,11 @@ name = "local-hub"
 url = "http://127.0.0.1:3141/"
 # optional: make this your default source for all installs
 priority = "supplemental"
+
+[tool.poetry.group.clients]
+optional = true
+
+[tool.poetry.group.clients.dependencies]
+PyQt6 = "^6.8.0"
+PyQt6-Qt6 = "^6.8.0"
+pyqtgraph = "^0.13.0"

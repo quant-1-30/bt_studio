@@ -44,7 +44,7 @@ def discover_fsm_pattern(
     try:
         panel_df = panel_lf.collect(engine="streaming")
     except Exception:
-        panel_df = panel_lf if isinstance(panel_lf, pl.DataFrame) else panel_lf.collect()
+        panel_df = panel_lf if isinstance(panel_lf, pl.DataFrame) else panel_lf.collect(engine="streaming")
 
     panel_df = panel_df.filter(pl.col("lag_0").is_not_null())
     if panel_df.height <= m or m < 3:
