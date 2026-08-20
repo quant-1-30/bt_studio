@@ -178,10 +178,8 @@ def _scan_directory_sync(
             else:
                 events.append(("artifact_updated", record))
         else:
-            # 状态未改变，直接复用
             new_registry[name] = prev
 
-    # 检测已删除产物
     deleted_names = [name for name in prev_registry if name not in seen]
 
     return new_registry, events, deleted_names
@@ -210,7 +208,7 @@ class ResultWatcher:
             return
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
-        logger.info(f"ResultWatcher 启动完成 (轮询间隔={self._interval}s)")
+        logger.info(f"ResultWatcher Poll start and interval={self._interval}s)")
 
     async def stop(self) -> None:
         self._running = False
@@ -221,7 +219,7 @@ class ResultWatcher:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        logger.info("ResultWatcher 已安全停止")
+        logger.info("ResultWatcher Stop")
 
     # ------------------------------------------------------------------ #
     # Loop
@@ -297,7 +295,7 @@ class ResultWatcher:
             logger.debug(f"[Watcher] WebSocket 广播异常: {e}")
 
     # ------------------------------------------------------------------ #
-    # REST 查询接口
+    # REST 
     # ------------------------------------------------------------------ #
     def snapshot(self, kind: str) -> List[Dict[str, Any]]:
         try:

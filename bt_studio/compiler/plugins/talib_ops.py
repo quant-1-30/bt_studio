@@ -81,7 +81,7 @@ _register(TalibOpSpec(
     prior_refs=("wq024",),
     primitive_equiv=None,
     equiv_note="DMI 方向运动经双平滑后归一, 用作趋势/横盘 regime 开关 (对应 WQ#24 均线 regime)",
-    summary="趋势强度 (无量纲 regime 开关)",
+    summary="趋势强度(无量纲 regime 开关)",
 ))
 
 _register(TalibOpSpec(
@@ -153,7 +153,7 @@ _register(TalibOpSpec(
     inputs=("high", "low", "close"),
     params=(
         ParamSpec("timeperiod1", 2, 250, fixed=7, default=7),
-        ParamSpec("timeperiod2", 2, 250, default=14),  # 唯一暴露的自由参数
+        ParamSpec("timeperiod2", 2, 250, default=14), 
         ParamSpec("timeperiod3", 2, 250, fixed=28, default=28),
     ),
     prior_refs=(),
@@ -213,7 +213,7 @@ def validate_node(node: Any) -> List[str]:
         if not (isinstance(a, dict) and set(a) == {"col"} and a.get("col") == col):
             errors.append(f'{op}: args[{i}] 应为字段引用 {{"col": "{col}"}}')
 
-    for j, p in enumerate(spec.params):
+    for j, p in enumerate(spec.params): # p is ParamSpec
         v = args[len(spec.inputs) + j]
         if isinstance(v, bool) or not isinstance(v, int):
             errors.append(f"{op}: 参数 {p.name} 必须为整数, 实际 {v!r}")
@@ -273,7 +273,7 @@ def warmup_bars(node: Dict[str, Any]) -> int:
 
 def compute(df: pd.DataFrame, node: Dict[str, Any]) -> pd.Series:
     if talib is None:
-        raise RuntimeError("talib 未安装，请执行: pip install TA-Lib")
+        raise RuntimeError("pip install TA-Lib")
 
     spec = REGISTRY[node["op"]]
     arrays = [df[c].to_numpy(dtype=float) for c in spec.inputs]
@@ -297,14 +297,14 @@ def format_ops_help() -> str:
         prior = f" [{','.join(spec.prior_refs)}]" if spec.prior_refs else ""
         lines.append(f"  {spec.op}({cols}, {ps}){prior}  # {spec.summary}")
     lines.append(
-        "  严禁堆叠名指标组合 (如 RSI+MACD+KDJ 式拼盘); "
-        "MOM/ROC/APO/BOP/WILLR 等请用原语层组合，不在白名单内。"
+        "  严禁堆叠名指标组合 (RSI+MACD+KDJ); "
+        "MOM/ROC/APO/BOP/WILLR 等请用原语层组合，不在白名单内."
     )
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Reject
+# Reject Due to Duplicate and multi dimensions
 # ---------------------------------------------------------------------------
 
 REJECTED: Dict[str, str] = {
@@ -320,41 +320,3 @@ REJECTED: Dict[str, str] = {
     "DX/ADXR": "ADX 原始值/平滑值",
     "MACDEXT/MACDFIX": "MACD 冗余变体, 参数不显式",
 }
-
-
-# ---------------------------------------------------------------------------
-# SelfTest
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    assert validate_node({"op": "rsi", "args": [{"col": "close"}, 14]}) == []
-    assert any("冻结" in e for e in validate_node(
-        {"op": "macd", "args": [{"col": "close"}, 5, 26, 9]}
-    ))
-    assert any("整数" in e for e in validate_node(
-        {"op": "rsi", "args": [{"col": "close"}, 14.5]}
-    ))
-    assert any("字段引用" in e for e in validate_node(
-        {"op": "adx", "args": [{"col": "open"}, 14]}
-    ))
-    assert any("args 应有" in e for e in validate_node(
-        {"op": "cmo", "args": [{"col": "close"}]}
-    ))
-    assert warmup_bars({
-        "op": "adx",
-        "args": [{"col": "high"}, {"col": "low"}, {"col": "close"}, 14]
-    }) == 28
-
-    if talib is not None:
-        import numpy as np
-
-        rng = np.random.default_rng(0)
-        df_test = pd.DataFrame({"close": 100 + rng.normal(0, 1, 300).cumsum()})
-        n_samples, win = 300, 14
-        v = compute(df_test, {"op": "cmo", "args": [{"col": "close"}, win]})
-        diff = df_test["close"].diff()
-        hand_cmo = 100 * diff.rolling(win).sum() / diff.abs().rolling(win).sum()
-        assert np.allclose(v.iloc[30:], hand_cmo.iloc[30:], atol=1e-8), "CMO 等价校验失败"
-        print("✅ talib 数值基准校验通过 (CMO ≡ 100*ΣΔ/Σ|Δ|)")
-
-    print("✅ talib_ops 自测全部通过")

@@ -8,13 +8,13 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import polars as pl
 
-from ..ops import ExprLike, SAFE_OPS, _to_expr
 from . import talib_ops
+from bt_studio.compiler.ops import ExprLike, SAFE_OPS, _to_expr
+
 
 __all__ = ["register_talib_whitelist", "make_talib_fn", "talib_validate_hook"]
 
 logger = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Registration bridge
@@ -40,7 +40,7 @@ def make_talib_fn(spec: talib_ops.TalibOpSpec) -> Callable[..., pl.Expr]:
 
         field_exprs = [_to_expr(a) for a in expr_args[: len(spec.inputs)]]
 
-        raw_params = list(expr_args[len(spec.inputs) :])
+        raw_params = list(expr_args[len(spec.inputs):])
         kwargs: Dict[str, Any] = {}
 
         for p_spec, val in zip(spec.params, raw_params):
@@ -50,7 +50,7 @@ def make_talib_fn(spec: talib_ops.TalibOpSpec) -> Callable[..., pl.Expr]:
                 )
 
             # avoid TA-Lib C TypeError
-            if isinstance(val, float) and val.is_integer():
+            if isinstance(val, float) and val.is_integer(): # is_integer means 14.0 decimal is 0.0
                 val = int(val)
             elif isinstance(val, float) and getattr(p_spec, "type", None) == "int":
                 val = int(round(val))
@@ -80,7 +80,8 @@ def make_talib_fn(spec: talib_ops.TalibOpSpec) -> Callable[..., pl.Expr]:
             return pl.Series(result)
 
         struct_parts = [e.alias(f"_talib_in_{i}") for i, e in enumerate(field_exprs)]
-        return pl.struct(struct_parts).map_batches(_apply_talib_c)
+        # pl.struct pack multi fields/column to struct for udf
+        return pl.struct(struct_parts).map_batches(_apply_talib_c) 
 
     return _fn
 
