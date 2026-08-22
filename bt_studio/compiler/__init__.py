@@ -1,8 +1,9 @@
 from .ops import SAFE_OPS, list_ops, compile_expr
-from . import plugins  # noqa: F401  (mounts agent op plugins: talib whitelist → SAFE_OPS)
 from .ast import compile_ast, compile_to_alias, ast_fingerprint, ASTCompilationError
 from .ast import check_causal, is_causal
 from .ast import compile_recipe
+from .plugins import *
+
 
 __all__ = [
     # Safe ops

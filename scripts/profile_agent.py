@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""cProfile wrapper for the agent loop: locate hotspots in flywheel.step().
 
-Writes pstats top-30 (cumulative) to result/llm/profile/profile_<ts>.txt
-so we can verify whether the bottleneck is discover_fsm_pattern (stumpy DTW)
-vs gRPC fetch vs Polars panel building.
-
-Usage:
-    python scripts/profile_agent.py
-"""
 import cProfile
 import io
 import os

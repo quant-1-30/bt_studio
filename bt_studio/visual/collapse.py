@@ -27,15 +27,12 @@ except ImportError:
 # re-exported here so existing imports keep working.
 from bt_studio.utils.diagnostics.collapse import (  # noqa: F401
     detect_space_collapse,
-    print_collapse_report,
-    build_collapse_report,
-    save_collapse_report,
     _to_pandas,
     _get_param_columns,
     _clean_param_name,
-    _is_discrete_param,
+    is_discrete_param,
 )
-
+from bt_studio.utils.diagnostics.recorder import print_collapse_report, build_collapse_report, save_collapse_report
 
 # ============================================================================
 # CJK Font
@@ -245,7 +242,7 @@ def plot_collapse_dashboard(results_df, target="metrics_score", search_bounds=No
             continue
 
         vals = valid[col_name].dropna().values
-        is_disc = _is_discrete_param(vals)
+        is_disc = is_discrete_param(vals)
         if is_disc:
             unique, counts = np.unique(vals, return_counts=True)
             ax_d.bar(unique.astype(str), counts, color='steelblue', edgecolor='black')

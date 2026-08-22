@@ -454,7 +454,6 @@ class TwoStageAgentHarness:
                     pl.col(name).null_count().alias(f"{name}_null"),
                     pl.col(name).std().alias(f"{name}_std"),
                 ])
-
             stats_row = hf_enhanced.select(agg_exprs).collect(engine="streaming").row(0, named=True)
             total_len = stats_row["_total_len"]
 

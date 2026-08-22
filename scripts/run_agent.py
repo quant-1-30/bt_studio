@@ -10,10 +10,9 @@ import polars as pl
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from bt_studio.pipeline.preprocess import prepare_macro, prepare_tick, universe_sample
-from bt_studio.factor_mining_agent.mining_agent import TwoStageAgentHarness
-from bt_studio.factor_mining_agent.llm_loop import RLFeatureFlywheel
+from bt_studio.agent import TwoStageAgentHarness, RLFeatureFlywheel
 from bt_studio.constant import LLM_PENDING_DIR
-
+from bt_studio.utils.months import calc_warmup_start_date
 
 # --------------------------------------------------------------------------- #
 # Stage 3 → spool: agent loop stays self-contained.
@@ -66,26 +65,6 @@ def real_hpo_trigger(feature_name, ast_recipe, common_config, persisted_paths=No
         print(f"  [Stage3] spool failed: {e}")
         return False
 
-# --------------------------------------------------------------------------- #
-# Dummy LLM: returns a fixed OFI-reconstruction recipe (markdown-wrapped)
-# --------------------------------------------------------------------------- #
-def dummy_llm_call(system_prompt: str, user_prompt: str) -> str:
-    return """```json
-{
-    "hypothesis_id": "hyp_reconstructed_ofi",
-    "economic_reasoning": "sign(close.diff)*amount 累计占比,截面去均值还原 OFI。",
-    "sub_features": [
-        [
-            {"name": "ofi_dir", "ast": {"op": "sign", "args": [{"op": "delta", "args": [{"col": "close"}, 1]}]}},
-            {"name": "ofi_signed_amt", "ast": {"op": "mul", "args": [{"col": "ofi_dir"}, {"col": "amount"}]}},
-            {"name": "ofi_cum_sa", "ast": {"op": "cum_sum", "args": [{"col": "ofi_signed_amt"}]}},
-            {"name": "ofi_cum_amt", "ast": {"op": "cum_sum", "args": [{"col": "amount"}]}},
-            {"name": "final_ofi", "ast": {"op": "cs_demean", "args": [{"op": "div", "args": [{"col": "ofi_cum_sa"}, {"col": "ofi_cum_amt"}]}]}}
-        ]
-    ]
-}
-```"""
-
 
 def main():
     """End-to-end agent demo: RLFeatureFlywheel drives the whole loop.
@@ -95,47 +74,76 @@ def main():
     """
 
     common_config = {
-        "start_date": 20221001, "end_date": 20221231,
+        "start_date": 20221001, 
+        "end_date": 20221231,
         "benchmark": b"1A0001",
-        "eps": 1e-8, "min_factor_weight": 0.05,
-        "top_k_ratio": 0.25, "days_since_ipo": 120,
+        "warmup_months": 3, 
+
+        "eps": 1e-8, 
+        "min_factor_weight": 0.05,
+
+        "days_since_ipo": 120,
+
         "exclude_bars": 10,
-        "T1_rets": {"open_5m": 5, "open_15m": 15},
-        "ranking_window": 5, "ranking_ratio": 0.25,
-        "trigger": 30, "topk": 5, "alternative": "greater",
-        "decay_minutes": 15, "dtw_window_frac": 0.1,
+        "T1_rets": 
+            {
+            "open_5m": 5,
+             "open_15m": 15
+             },
+
+        "ranking_window": 5, 
+        "ranking_ratio": 0.25,
+
+        "trigger": 30, 
+        "topk": 5, 
+        "alternative": "greater",
+
+        "decay_minutes": 15, 
+        "dtw_window_frac": 0.1,
+
         "regime_filter": {"ma_window": 5},
         # walk-forward verdict knob consumed by the harness
         "min_window_pass_ratio": 0.6,
     }
 
+    raw_start_date = calc_warmup_start_date(
+    common_config["start_date"], 
+    common_config.get("warmup_months", 1)
+    )
+
     print("[run_agent] fetching macro data...")
     universe_lf, daily_lf = prepare_macro(
-        start_date=common_config["start_date"],
+        start_date=raw_start_date,
         end_date=common_config["end_date"],
         benchmark=common_config["benchmark"],
     )
     filtered = universe_sample(universe_lf, daily_lf, common_config)
-    sids = (filtered.select(pl.col("sid").cast(pl.Binary)).unique()
-            .collect().to_series().to_list())
-    print(f"[run_agent] universe sids: {len(sids)}")
+    valid_sids = (
+        filtered.select(pl.col("sid")
+        .cast(pl.Binary))
+        .unique()
+        .collect()
+        .to_series()
+        .to_list()
+    )
+
+    print(f"[run_agent] universe sids: {len(valid_sids)}")
 
     snapshot = prepare_tick(
-        start_date=common_config["start_date"],
+        start_date=raw_start_date,
         end_date=common_config["end_date"],
-        sids=sids[:50],          # cap for demo speed
+        sids=valid_sids[:50],          # cap for demo speed
     )
     if not snapshot:
         print("[run_agent] no tick data; abort")
         return
-    hf_lf = (pl.concat(list(snapshot.values()))
-             .rename({"minute_idx": "bar_idx"}).lazy())
+    hf_lf = pl.concat(list(snapshot.values())).lazy()
 
     harness = TwoStageAgentHarness(
         common_config=common_config,
         stage3_callback=real_hpo_trigger,
     )
-    flywheel = RLFeatureFlywheel(llm_call_fn=dummy_llm_call, harness=harness)
+    flywheel = RLFeatureFlywheel(harness=harness)
 
     target = ("挖掘 A 股尾盘 (14:30 后) 的微观结构 alpha: "
               "偏好 order-flow imbalance / momentum / volatility 类因子")

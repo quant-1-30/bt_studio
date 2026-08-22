@@ -31,6 +31,8 @@ tensorboard = "^2.21.0"
 protobuf = ">=7.35.1"
 watchdog = "^6.0.0"
 networkx = "^3.6.1"
+openai = "^3.3.1"
+google = "^3.0.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

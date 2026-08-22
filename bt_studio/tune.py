@@ -1,32 +1,29 @@
 #! /usr/bin/env python3
+
 from __future__ import annotations
 
 import gc
 import os
 import pickle
-import re
-import shutil
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import mlflow
 import numpy as np
+import optuna
 import polars as pl
 import ray
 from ray import train, tune
 from ray.air.integrations.mlflow import MLflowLoggerCallback
 from ray.tune.search.optuna import OptunaSearch
 
-import optuna
-import mlflow
-
+from bt_studio.compiler.ast import compile_ast, compile_recipe
 from bt_studio.constant import (
     BASE_MARKET_COLS,
     FEATURE_DIR,
     TUNE_BASE_DIR,
     TUNE_MODEL_DIR,
     TUNE_SCORE_DIR,
-    TUNE_COLLAPSE_DIR,
 )
-from bt_studio.compiler.ast import compile_ast, compile_recipe
 from bt_studio.pipeline.inference import FSMPredictor
 from bt_studio.pipeline.metrics import (
     find_pareto_front,
@@ -43,51 +40,31 @@ from bt_studio.pipeline.preprocess import (
     build_static_panel,
     extract_curves_from_panel,
     prepare_macro,
-    universe_sample,
     prepare_tick,
+    universe_sample,
 )
 from bt_studio.utils.diagnostics.hpo_check import run_collapse_check
-from bt_studio.utils.months import paths_for_months
 from bt_studio.utils.io import atomic_save_parquet, atomic_save_pickle
-
-# ==============================================================================
-# Date and Int32 
-# ==============================================================================
-
-def _expr_month_id(col_name: str = "day") -> pl.Expr:
-    """
-        Int32 YYYYMM ---> Date, Datetime, Int32/Int64 (20210101) and  Utf8 ('2021-01-01')
-    """
-    col = pl.col(col_name)
-    # fixbug SafeExpr
-    return (
-        pl.coalesce([
-            # 1. Date/Datetime
-            col.dt.year() * 100 + col.dt.month(),
-            # 2. YYYYMMDD -> YYYYMM
-            col.cast(pl.Int64) // 100,
-            # 3. 'YYYY-MM-DD' -> YYYYMM
-            col.cast(pl.Utf8).str.replace_all("-", "").str.slice(0, 6).cast(pl.Int64),
-        ])
-        .cast(pl.Int32)
-        .alias("_month_id")
-    )
+from bt_studio.utils.months import paths_for_months, calc_warmup_start_date, _expr_month_id
 
 
 # ==============================================================================
-# Node 1: Macro & Universe 
+# Node 1: Macro & Universe
 # ==============================================================================
 
-def node_prepare_macro(common_config: dict, warm: int = 10000) -> Dict[str, Any]:
+def node_prepare_macro(common_config: dict) -> Dict[str, Any]:
     os.makedirs(TUNE_BASE_DIR, exist_ok=True)
     dret_path = f"{TUNE_BASE_DIR}/global_daily.parquet"
 
     if os.path.exists(dret_path):
         print(f"✅ [Cache Hit] Daily Universe: {dret_path}")
     else:
-        print("🚀 [Cache Miss] generate daily ret...")
+        print("🚀 [Cache Miss] regenerate Universe...")
+        warmup_months = common_config.get("warmup_months", 12)
+        fetch_start = calc_warmup_start_date(common_config["start_date"], warmup_months=warmup_months)
+
         universe_lf, daily_lf = prepare_macro(
-            start_date=common_config["start_date"] - warm,
+            start_date=fetch_start,
             end_date=common_config["end_date"],
             benchmark=str(common_config["benchmark"]).encode(),
         )
@@ -115,25 +92,28 @@ def node_prepare_macro(common_config: dict, warm: int = 10000) -> Dict[str, Any]
 # Node 2: Feature Extraction & PIT Partitioning
 # ==============================================================================
 
-def _prepare_tick_for_months(missing_ymonths: List[int], universe_sids: Dict[int, List[Any]]) -> Optional[pl.LazyFrame]:
-    start_date = min(missing_ymonths) * 100 + 1
+def _prepare_tick_for_months(
+    missing_ymonths: List[int],
+    universe_sids: Dict[int, List[Any]],
+    common_config: dict,
+) -> Optional[pl.LazyFrame]:
+    raw_start_date = min(missing_ymonths) * 100 + 1
     end_date = max(missing_ymonths) * 100 + 31
 
-    sids = []
+    warmup_months = common_config.get("warmup_months", 0)
+    fetch_start_date = calc_warmup_start_date(raw_start_date, warmup_months=warmup_months)
+
+    sids: List[bytes] = []
     for ym in missing_ymonths:
         sids.extend(universe_sids.get(ym, []))
-    sids = list(set(sids))
-    if not sids:
+    unique_sids = list(set(sids))
+    if not unique_sids:
         return None
 
-    tick_dict = prepare_tick(start_date, end_date, sids, warm=0)
+    tick_dict = prepare_tick(fetch_start_date, end_date, unique_sids)
 
-    lazy_frames = []
-    for sid, lf in tick_dict.items():
-        if "minute_idx" in lf.collect_schema().names():
-            lf = lf.rename({"minute_idx": "bar_idx"})
-        lazy_frames.append(lf)
-        
+    lazy_frames: List[pl.LazyFrame] = list(tick_dict.values())
+
     if not lazy_frames:
         return None
 
@@ -155,7 +135,6 @@ def node_extract_feature_monthly(
     generated_paths: List[str] = []
     missing_ymonths: List[int] = []
 
-    # fixbug to determin real feature_col
     if feature_col is None:
         feature_col = common_config.get("feature_col")
 
@@ -163,13 +142,12 @@ def node_extract_feature_monthly(
     if feature_col is None:
         if isinstance(ast_recipe, list):
             compiled_exprs = compile_recipe(ast_recipe, check_causal=True)
-            feature_col = ast_recipe[-1].get("name", f"recipe_feat")
+            feature_col = ast_recipe[-1].get("name", "recipe_feat")
         else:
             single_expr, inferred_name = compile_ast(ast_recipe, check_causal=True)
             feature_col = inferred_name
             compiled_exprs = [single_expr.alias(feature_col)]
 
-    # check cache
     for ym in ymonths:
         p = f"{FEATURE_DIR}/hf_{feature_col}_{ym}.parquet"
         if os.path.exists(p):
@@ -181,7 +159,7 @@ def node_extract_feature_monthly(
         return sorted(list(set(generated_paths)))
 
     if raw_hf_lf is None:
-        raw_hf_lf = _prepare_tick_for_months(missing_ymonths, universe_sids)
+        raw_hf_lf = _prepare_tick_for_months(missing_ymonths, universe_sids, common_config)
         if raw_hf_lf is None:
             return sorted(list(set(generated_paths)))
 
@@ -233,14 +211,14 @@ def node_extract_feature_monthly(
 # ==============================================================================
 
 def node_check_decay_monthly(
-    prev_model_id: Optional[int],  # train_month[-1]
+    prev_model_id: Optional[int],
     prev_oos_yms: List[int],
     dret_path: str,
     train_paths: List[str],
     common_config: dict,
 ) -> bool:
     if prev_model_id is None:
-        print(f"Cold start (prev_model_id is None) -> Trigger Tune")
+        print("Cold start (prev_model_id is None) -> Trigger Tune")
         return True
 
     prev_model_path = f"{TUNE_MODEL_DIR}/model_{prev_model_id}.pkl"
@@ -257,7 +235,7 @@ def node_check_decay_monthly(
 
     prev_oos_paths = paths_for_months(train_paths, prev_oos_yms)
     aligned_lfs = [pl.scan_parquet(p) for p in prev_oos_paths if os.path.exists(p)]
-    
+
     if not aligned_lfs:
         print(f"⚠️ OOS ({prev_oos_yms}) NotFound -> Trigger Tune")
         return True
@@ -364,13 +342,12 @@ def trainable_fsm_worker(config: dict, hf_ref: Any, dret_ref: Any, static_ref: A
 
 def node_tune_monthly(
     prev_model_id: Optional[Union[int, str]],
-    model_id: int,  # train_months[-1] 
+    model_id: int,
     train_data: dict,
     exp_config: dict,
 ) -> Optional[int]:
     os.makedirs(TUNE_MODEL_DIR, exist_ok=True)
 
-    # fixbug None  
     common_config = exp_config.get("common_config") or exp_config.get("common_params", {})
     search_config = exp_config.get("search_bounds") or exp_config.get("search_config", {})
 
@@ -384,7 +361,6 @@ def node_tune_monthly(
         "threshold_r": tune.uniform(r_bounds[0], r_bounds[-1]) if isinstance(r_bounds, (list, tuple)) and len(r_bounds) >= 2 else tune.choice(r_bounds),
     }
 
-    # Prior Warm Start
     points_to_evaluate = None
     if prev_model_id:
         prev_model_path = f"{TUNE_MODEL_DIR}/model_{prev_model_id}.pkl"
@@ -429,7 +405,7 @@ def node_tune_monthly(
                 experiment_name="FSM_Production_Models",
                 save_artifact=False,
             )
-    except Exception as _e:
+    except Exception:
         pass
 
     num_trials = common_config.get("num_trials") or search_config.get("num_trials", 300)
@@ -455,7 +431,7 @@ def node_tune_monthly(
     results = tuner.fit()
     df_results = pl.from_pandas(results.get_dataframe())
 
-    # Space Collapse Gating
+    # collapse detect
     is_healthy, verdict, _ = run_collapse_check(df_results, exp_config, model_id)
     if not is_healthy:
         print(f"❌ [HPO Gating] Model {model_id} rejected due to {verdict.upper()}")
@@ -478,13 +454,11 @@ def node_tune_monthly(
     best_valid_score = best_valid_row["metrics_score"]
     best_valid_config = {k.replace("config/", ""): v for k, v in best_valid_row.items() if k.startswith("config/")}
 
-    # fANOVA Stability Check
     is_plateau = validate_parameter_plateau_fanova(df_results, best_valid_config, best_valid_score)
     if not is_plateau:
         print(f"❌ {model_id} fANOVA spike detected")
         return None
 
-    # Pareto
     pareto_front_df = find_pareto_front(stats_valid_trials, common_config)
     best_model_dict = select_best_model_from_pareto(pareto_front_df)
     if not best_model_dict:
@@ -496,7 +470,6 @@ def node_tune_monthly(
     if "threshold_d" not in best_config:
         best_config["threshold_d"] = float(np.sqrt(2 * best_config["m"] * (1.0 - best_config["threshold_r"])))
 
-    # Motif
     final_panel_lf = build_fsm_panel(hf_lazy, dret_lazy, best_config, common_config, is_train=True)
     final_result = discover_fsm_pattern(final_panel_lf, best_config, common_config)
 
@@ -514,7 +487,7 @@ def node_tune_monthly(
     pkl_path = f"{TUNE_MODEL_DIR}/model_{model_id}.pkl"
     atomic_save_pickle(model_ckpt, pkl_path)
 
-    print(f"✅ 模型成功落盘: {pkl_path}")
+    print(f"model save to: {pkl_path}")
     return model_id
 
 
@@ -523,8 +496,8 @@ def node_tune_monthly(
 # ==============================================================================
 
 def node_update_fsm_matrix(
-    model_id: int,       
-    prev_model_id: int, 
+    model_id: int,
+    prev_model_id: int,
     dret_path: str,
     train_paths: List[str],
     common_config: dict,
@@ -564,28 +537,28 @@ def node_update_fsm_matrix(
         "config": prev_tune_config,
         "motif": prev_motif,
         "fsm_matrix": result["fsm_matrix"],
-        "train_end_month": model_id,  
+        "train_end_month": model_id,
         "feature_col": common_config.get("feature_col"),
     }
     pkl_path = f"{TUNE_MODEL_DIR}/model_{model_id}.pkl"
     atomic_save_pickle(new_ckpt, pkl_path)
 
-    print(f"✅ {model_id} inherit {prev_model_id} Motif and Update Fsm Matrix")
+    print(f"{model_id} inherit {prev_model_id} Motif and Update Fsm Matrix")
     return model_id
 
 
 # ==============================================================================
-# Node 6: OOS Inference
+# Node 6: OOS Inference 
 # ==============================================================================
 
 def node_oos_inference_monthly(
-    model_id: int,  
+    model_id: int,
     dret_path: str,
     oos_yms: List[int],
     oos_paths: List[str],
-    warmup_paths: List[str],
     common_config: dict,
 ) -> None:
+    
     os.makedirs(TUNE_SCORE_DIR, exist_ok=True)
     model_path = f"{TUNE_MODEL_DIR}/model_{model_id}.pkl"
     if not os.path.exists(model_path):
@@ -595,12 +568,12 @@ def node_oos_inference_monthly(
     with open(model_path, "rb") as f:
         model_ckpt = pickle.load(f)
 
-    all_paths = [p for p in (warmup_paths + oos_paths) if os.path.exists(p)]
-    if not all_paths:
+    valid_paths = [p for p in oos_paths if os.path.exists(p)]
+    if not valid_paths:
         return
 
     panel_lf = build_fsm_panel(
-        pl.concat([pl.scan_parquet(p) for p in all_paths]),
+        pl.concat([pl.scan_parquet(p) for p in valid_paths]),
         pl.scan_parquet(dret_path),
         model_ckpt["config"],
         common_config,
@@ -619,4 +592,4 @@ def node_oos_inference_monthly(
         if scored_df.height > 0:
             out_path = f"{TUNE_SCORE_DIR}/scores_{model_id}.parquet"
             atomic_save_parquet(scored_df, out_path)
-            print(f"{model_id} OOS ({oos_yms[0]} ~ {oos_yms[-1]}) Saved to {out_path}, Rows: {scored_df.height}")
+            print(f"✅ {model_id} OOS ({oos_yms[0]} ~ {oos_yms[-1]}) Saved to {out_path}, Rows: {scored_df.height}")

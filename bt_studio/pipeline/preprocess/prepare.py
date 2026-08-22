@@ -8,7 +8,7 @@ from bt_protocol.constant import RpcTopic
 from bt_studio.pipeline.utils import _collect_stream_sync
 
 
-def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
+def prepare_macro(start_date: int, end_date: int, benchmark: bytes):
     from bt_sdk.ctx import external_mdapi_context
     
     with external_mdapi_context() as mdapi:
@@ -27,7 +27,7 @@ def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
         # Universe Daily
         # =======================================================
         universe = valid_meta["sid"].cast(pl.Binary).to_list()
-        body = QueryBody(start_date=start_date - warm, end_date=end_date, sid=universe) 
+        body = QueryBody(start_date=start_date, end_date=end_date, sid=universe) 
     
         obs = mdapi.subscribe(body, RpcTopic.Daily) 
         raw = _collect_stream_sync(obs)
@@ -51,8 +51,8 @@ def prepare_macro(start_date: int, end_date: int, benchmark: bytes, warm=10000):
         return universe_lazy, daily_lazy 
  
 
-def prepare_tick(start_date: int, end_date: int, sids: list[bytes], warm=10000):
-    body = QueryBody(start_date=start_date -warm, end_date=end_date, sid=sids)
+def prepare_tick(start_date: int, end_date: int, sids: list[bytes]):
+    body = QueryBody(start_date=start_date, end_date=end_date, sid=sids)
 
     with external_mdapi_context() as mdapi:
         obs = mdapi.subscribe(body, RpcTopic.Tick)
@@ -101,12 +101,13 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
         ((pl.col("to_minutes") >= 13 * 60) & (pl.col("to_minutes") < 15 * 60))
     )
 
-    # timestamp to minute_idx
+    # delta timestamp to bar_idx
     processed_lf = processed_lf.with_columns(
-        minute_idx=pl.when(pl.col("to_minutes") < 11 * 60 + 30)
+        pl.when(pl.col("to_minutes") < 11 * 60 + 30)
         .then(pl.col("to_minutes") - (9 * 60 + 30))
         .otherwise((pl.col("to_minutes") - (13 * 60)) + 120)
         .cast(pl.Int32)
+        .alias("bar_idx")
     )
 
     # ====================================================================
@@ -115,17 +116,17 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
     unique_pairs = processed_lf.select(["sid", "day"]).unique()
 
     skeleton_lf = unique_pairs.with_columns(
-        pl.int_ranges(0, 240, dtype=pl.Int32).alias("minute_idx")
-    ).explode("minute_idx")
+        pl.int_ranges(0, 240, dtype=pl.Int32).alias("bar_idx")
+    ).explode("bar_idx")
 
     # ====================================================================
-    # padding
+    # fillna and padding ensure skeleton size
     # ====================================================================
     padded_lf = (
         skeleton_lf.join(
-            processed_lf, on=["day", "sid", "minute_idx"], how="left"
+            processed_lf, on=["day", "sid", "bar_idx"], how="left"
         )
-        .sort(["day", "sid", "minute_idx"])
+        .sort(["day", "sid", "bar_idx"])
         # [FIX P0-L1] forward_fill only: use prior bar price for gaps.
         # backward_fill was REMOVED — it filled opening nulls with FUTURE
         # prices (e.g. 09:30 null → filled from 09:31), causing lookahead.
@@ -146,6 +147,9 @@ def align_skeleton(tick_lf: pl.LazyFrame) -> pl.LazyFrame:
                 pl.col("volume").fill_null(0.0),
             ]
         )
-        .drop(["to_minutes", "tick_dt", "tick"])
+        # .drop(["to_minutes", "tick_dt", "tick"])
+       .select([
+            "sid", "day", "bar_idx", "open", "high", "low", "close", "volume", "amount"
+       ]) 
     )
     return padded_lf

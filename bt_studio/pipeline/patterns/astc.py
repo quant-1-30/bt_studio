@@ -1,3 +1,5 @@
+#! /usr/bin/env python3
+
 import polars as pl
 import numpy as np
 import stumpy

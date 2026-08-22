@@ -4,7 +4,7 @@ import polars as pl
 
 
 def _demean_expr(col_name: str) -> pl.Expr:
-    median = pl.col(col_name).median().over(["day", "minute_idx"])
+    median = pl.col(col_name).median().over(["day", "bar_idx"])
     return pl.col(col_name) - median
 
 
@@ -20,7 +20,7 @@ def build_vol(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
 
     step1_lf = (
         aligned_lf
-        .sort(["day", "sid", "minute_idx"])
+        .sort(["day", "sid", "bar_idx"])
         .with_columns([
             ((pl.col("high") - pl.col("low")) / (pl.col("close") + eps)).alias("bar_range"),
         ])
@@ -38,7 +38,7 @@ def build_vol(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
         .with_columns([
             _demean_expr("cum_vol").alias("vol_ratio"),
         ])
-        .rename({"minute_idx": "bar_idx"})
+        .rename({"bar_idx": "bar_idx"})
         .select(["day", "sid", "bar_idx", "open", "close", "vol_ratio"])
         .sort(["day", "sid", "bar_idx"])
     )

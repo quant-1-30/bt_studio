@@ -37,6 +37,7 @@ RL_TOPK = 3
 # Fixed behaviour constants (owned here — do not redefine elsewhere)
 # --------------------------------------------------------------------------- #
 MAX_AST_DEPTH = 4                 # AST depth cap (overfitting / cyclic guard)
+MAX_RECIPE_DEPTH = 6              # Recipe List[AST]
 MIN_WINDOW_PASS_RATIO = 0.6       # walk-forward verdict threshold (Stage 2)
 
 # --------------------------------------------------------------------------- #

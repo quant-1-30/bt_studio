@@ -10,7 +10,7 @@ from typing import Any, Dict, Tuple, List
 from .ops import SAFE_OPS, _to_expr
 from .plugins.talib_hook import talib_validate_hook
 
-from bt_studio.constant import MAX_AST_DEPTH
+from bt_studio.constant import MAX_AST_DEPTH, MAX_RECIPE_DEPTH
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -310,7 +310,7 @@ def compile_ast(
 def compile_recipe(
     recipe: List[Dict[str, Any]],
     check_causal: bool = True,
-    max_depth: int | None = 4,
+    max_depth: int | None = 6,
 ) -> List[pl.Expr]:
     """Compile a multi-step recipe (Let-binding) into a list of Polars expressions.
     
@@ -344,7 +344,7 @@ def compile_recipe(
         else:
             canonical_recipe.append(step)
 
-    effective_limit = max_depth if max_depth is not None else MAX_AST_DEPTH
+    effective_limit = max_depth if max_depth is not None else MAX_RECIPE_DEPTH
     symbol_depths: Dict[str, int] = {}
     compiled_exprs: List[pl.Expr] = []
 

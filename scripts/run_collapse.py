@@ -14,11 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bt_studio.visual import (
     load_ray_results,
     detect_space_collapse,
-    print_collapse_report,
     plot_tune_contour,
     plot_tune_landscape_3d,
     plot_collapse_dashboard,
 )
+from bt_studio.utils.diagnostics.recorder import print_collapse_report
 
 
 def main():

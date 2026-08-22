@@ -4,14 +4,14 @@ import numpy as np
 
 # Cross-Sectional Demean Only (preserves time-series shape for STUMPY/DTW)
 def demean_expr(col_name: str) -> pl.Expr:
-    median = pl.col(col_name).median().over(["day", "minute_idx"])
+    median = pl.col(col_name).median().over(["day", "bar_idx"])
     return pl.col(col_name) - median
 
 
 # MAD Normalize (used for correlation/weight calculation only)
 def robust_zscore_expr(col_name: str) -> pl.Expr:
-    median = pl.col(col_name).median().over(["day", "minute_idx"])
-    mad = (pl.col(col_name) - median).abs().median().over(["day", "minute_idx"])
+    median = pl.col(col_name).median().over(["day", "bar_idx"])
+    mad = (pl.col(col_name) - median).abs().median().over(["day", "bar_idx"])
     robust_scale = 1.4826 * mad + 1e-6
     return (pl.col(col_name) - median) / robust_scale
 
@@ -20,7 +20,7 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
     eps = common_config["eps"]
     min_w = common_config.get("min_factor_weight", 0.05)
 
-    # [VALIDATION] build_ofi uses cross-sectional demean over ["day", "minute_idx"].
+    # [VALIDATION] build_ofi uses cross-sectional demean over ["day", "bar_idx"].
     # If only 1 sid is provided, median == value, producing all-zero ofi_ratio.
     # This is the root cause of "STUMPY returned no valid motifs".
     _n_sids = aligned_lf.select(pl.col("sid").n_unique()).collect().item()
@@ -30,7 +30,7 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
               f"Must concat ALL sids BEFORE calling build_ofi.")
     
     step1_lf = (
-        aligned_lf.sort(["day", "sid", "minute_idx"])
+        aligned_lf.sort(["day", "sid", "bar_idx"])
         .with_columns([
             # (pl.col("close") - pl.col("close").over(["day", "sid"]).shift(1)).alias("close_diff"), 
             (pl.col("close") - pl.col("close").shift(1).over(["day", "sid"])).alias("close_diff"),
@@ -110,9 +110,9 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
         ])
         .with_columns([
             # E(X)=0, E(Y)=0,Cov(X,Y) = E(XY)
-            (pl.col("sa_z_tmp") * pl.col("imp_z_tmp")).mean().over(["day", "minute_idx"]).alias("rho_sa_imp"),
-            (pl.col("sa_z_tmp") * pl.col("liq_z_tmp")).mean().over(["day", "minute_idx"]).alias("rho_sa_liq"),
-            (pl.col("imp_z_tmp") * pl.col("liq_z_tmp")).mean().over(["day", "minute_idx"]).alias("rho_imp_liq")
+            (pl.col("sa_z_tmp") * pl.col("imp_z_tmp")).mean().over(["day", "bar_idx"]).alias("rho_sa_imp"),
+            (pl.col("sa_z_tmp") * pl.col("liq_z_tmp")).mean().over(["day", "bar_idx"]).alias("rho_sa_liq"),
+            (pl.col("imp_z_tmp") * pl.col("liq_z_tmp")).mean().over(["day", "bar_idx"]).alias("rho_imp_liq")
         ])
         .with_columns([
             (
@@ -150,7 +150,7 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
                 pl.col("w_liq") * pl.col("liq_demean")
             ).alias("raw_score")
         ])
-        .select(["day", "sid", "minute_idx","open", "close", "raw_score"])
+        .select(["day", "sid", "bar_idx","open", "close", "raw_score"])
     )
 
     final_lf = (
@@ -159,7 +159,7 @@ def build_ofi(aligned_lf: pl.LazyFrame, common_config: dict) -> pl.LazyFrame:
             # STUMPY z-normalization avoid tanh
             demean_expr("raw_score").alias("ofi_ratio")
         ])
-        .rename({"minute_idx": "bar_idx"})
+        .rename({"bar_idx": "bar_idx"})
         .select(["day", "sid", "bar_idx", "open", "close", "ofi_ratio"])
         .sort(["day", "sid", "bar_idx"])
     )

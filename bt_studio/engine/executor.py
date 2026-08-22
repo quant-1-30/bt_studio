@@ -160,8 +160,9 @@ def run_dag(dag: PipelineDag, exp_config: dict, ast_recipe=None) -> EngineResult
     for idx in _window_indexes(dag, yms, common_config):
         # yms[n_months - train_window : n_months]
         train_yms = yms[idx - train_window : idx]
-        oos_yms = yms[idx : min(idx + step, len(yms))]
         warmup_yms = [train_yms[-1]] if train_yms else []
+
+        oos_yms = yms[idx : min(idx + step, len(yms))]
         prev_oos_yms = train_yms[-step:] if len(train_yms) >= step else train_yms
 
         # Information Cutoff 

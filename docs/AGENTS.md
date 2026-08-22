@@ -283,7 +283,6 @@ discover_fsm_pattern()              evaluate_and_build_fsm()
 | `ranking_ratio` | 收益四分位切割比例 |
 | `exclude_bars` | 尾端屏蔽 bar 数,防止 lookahead |
 | `days_since_ipo` | 上市时间过滤阈值 |
-| `top_k_ratio` | 各板块按成交额保留比例 |
 | `alternative` | MWU 检验方向:`"greater"` / `"less"` / `"two-sided"` |
 | `win_rate` | HPO 评分硬阈值 |
 | `max_points` | `stumpy` 采样预算,默认 20000 |

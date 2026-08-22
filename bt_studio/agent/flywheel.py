@@ -4,11 +4,11 @@ import json
 import os
 import re
 import traceback
+import numpy as np
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-import numpy as np
-
+from .vendors import get_llm_provider
 from .prompt import build_system_prompt, build_rl_context_prompt
 from .harness import TwoStageAgentHarness, FeatureMiningResult
 from bt_studio.compiler.ast import ast_fingerprint
@@ -89,12 +89,14 @@ class RLFeatureFlywheel:
 
     def __init__(
         self,
-        llm_call_fn: Callable[[str, str], str],
+        # llm_call_fn: Callable[[str, str], str],
         harness: TwoStageAgentHarness,
+        vendor: str=None,
         max_depth: int = 4,
     ):
-        self.llm_call_fn = llm_call_fn
+        # self.llm_call_fn = llm_call_fn
         self.harness = harness
+        self.llm_vendor = get_llm_provider(vendor) 
         self.max_depth = max_depth
         self.buffer = ReplayBuffer()
         self._step_counter = 0
@@ -155,7 +157,8 @@ class RLFeatureFlywheel:
         )
 
         try:
-            raw_output = self.llm_call_fn(system_prompt, user_prompt)
+            # raw_output = self.llm_call_fn(system_prompt, user_prompt)
+            raw_output = self.llm_vendor.generate(user_prompt, system_prompt)
         except Exception as e:
             print(f"[Flywheel] LLM 调用异常: {e}")
             return []

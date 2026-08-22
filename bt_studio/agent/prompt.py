@@ -7,8 +7,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from .safeops import SAFE_OPS
-from .plugins import talib_ops
+from bt_studio.compiler import SAFE_OPS
+from bt_studio.compiler.plugins import talib_ops
 from bt_studio.constant import RL_TOPK
 
 
