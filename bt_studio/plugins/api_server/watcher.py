@@ -15,10 +15,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from bt_studio.constant import (
     FEATURE_DIR,
     LLM_RUN_DIR,
-    TUNE_COLLAPSE_DIR,
-    TUNE_MODEL_DIR,
-    TUNE_SCORE_DIR,
+    TUNE_BASE_DIR,
 )
+from bt_studio.utils.io import read_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +33,9 @@ class ArtifactKind(str, Enum):
 
 
 WATCH_SPECS: Dict[ArtifactKind, Tuple[str, str]] = {
-    ArtifactKind.MODEL: (TUNE_MODEL_DIR, ".pkl"),
-    ArtifactKind.SCORE: (TUNE_SCORE_DIR, ".parquet"),
-    ArtifactKind.COLLAPSE: (TUNE_COLLAPSE_DIR, ".json"),
+    ArtifactKind.MODEL: (TUNE_BASE_DIR, ".pkl"),
+    ArtifactKind.SCORE: (TUNE_BASE_DIR, ".parquet"),
+    ArtifactKind.COLLAPSE: (TUNE_BASE_DIR, ".json"),
     ArtifactKind.LLM_RUN: (LLM_RUN_DIR, ".json"),
     ArtifactKind.FEATURE: (FEATURE_DIR, ".parquet"),
 }
@@ -44,6 +43,7 @@ WATCH_SPECS: Dict[ArtifactKind, Tuple[str, str]] = {
 # re match avoid heavy io
 _RE_MODEL = re.compile(r"^model_(\d+)\.pkl$")
 _RE_SCORE = re.compile(r"^scores_(\d+)\.parquet$")
+_RE_COLLAPSE = re.compile(r"^collapse_(\d+)_.+\.json$")
 _RE_FEATURE = re.compile(r"^hf_(.+)_\d{6}\.parquet$")
 
 
@@ -74,8 +74,7 @@ class ArtifactRecord:
 def _parse_summary_sync(kind: ArtifactKind, name: str, path: str) -> Optional[Dict[str, Any]]:
     try:
         if kind == ArtifactKind.COLLAPSE:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = read_json_safe(path, default={}) or {}
             return {
                 "verdict": data.get("verdict"),
                 "feature_col": data.get("feature_col"),
@@ -84,8 +83,7 @@ def _parse_summary_sync(kind: ArtifactKind, name: str, path: str) -> Optional[Di
             }
 
         elif kind == ArtifactKind.LLM_RUN:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = read_json_safe(path, default={}) or {}
             features = data.get("features", []) or []
             return {
                 "hypothesis_id": data.get("hypothesis_id"),
@@ -120,69 +118,94 @@ def _parse_summary_sync(kind: ArtifactKind, name: str, path: str) -> Optional[Di
     return None
 
 
-def _scan_directory_sync(
-    kind: ArtifactKind,
+def _matches_kind(kind: ArtifactKind, filename: str) -> bool:
+    if kind == ArtifactKind.MODEL:
+        return bool(_RE_MODEL.match(filename))
+    if kind == ArtifactKind.SCORE:
+        return bool(_RE_SCORE.match(filename))
+    if kind == ArtifactKind.COLLAPSE:
+        return bool(_RE_COLLAPSE.match(filename))
+    if kind == ArtifactKind.LLM_RUN:
+        return filename.startswith("step_") and filename.endswith(".json")
+    if kind == ArtifactKind.FEATURE:
+        return bool(_RE_FEATURE.match(filename))
+    return True
+
+
+def _scan_root_multi_kinds_sync(
     directory: str,
-    suffix: str,
-    prev_registry: Dict[str, ArtifactRecord],
-) -> Tuple[Dict[str, ArtifactRecord], List[Tuple[str, ArtifactRecord]], List[str]]:
-
+    kinds: List[ArtifactKind],
+    prev_registries: Dict[ArtifactKind, Dict[str, ArtifactRecord]],
+) -> Dict[ArtifactKind, Tuple[Dict[str, ArtifactRecord], List[Tuple[str, ArtifactRecord]], List[str]]]:
+    """对同一个物理根目录 (如 TUNE_BASE_DIR) 只执行 1 次 os.walk 与 1 次 os.stat，
+    在内存内按 ArtifactKind 分类分发，消除多 kind 共享目录时的 3 倍重复磁盘遍历。"""
     if not os.path.isdir(directory):
-        return {}, [], []
+        return {k: ({}, [], list(prev_registries.get(k, {}).keys())) for k in kinds}
 
-    new_registry: Dict[str, ArtifactRecord] = {}
-    events: List[Tuple[str, ArtifactRecord]] = []
-    seen: Set[str] = set()
+    new_regs: Dict[ArtifactKind, Dict[str, ArtifactRecord]] = {k: {} for k in kinds}
+    events_by_k: Dict[ArtifactKind, List[Tuple[str, ArtifactRecord]]] = {k: [] for k in kinds}
+    seen_by_k: Dict[ArtifactKind, Set[str]] = {k: set() for k in kinds}
 
     try:
-        entries = os.listdir(directory)
+        walk_iter = list(os.walk(directory))
     except OSError as e:
         logger.debug(f"[Watcher] Scan ({directory}) Failure: {e}")
-        return prev_registry, [], []
+        return {k: (prev_registries.get(k, {}), [], []) for k in kinds}
 
-    for name in entries:
-        # 1. filter .tmp and .* 
-        if name.startswith(".") or name.endswith(".tmp") or not name.endswith(suffix):
-            continue
+    for dirpath, dirnames, filenames in walk_iter:
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "__pycache__"]
+        for fname in filenames:
+            if fname.startswith(".") or ".tmp" in fname:
+                continue
 
-        path = os.path.join(directory, name)
-        try:
-            st = os.stat(path)
-        except OSError:
-            continue
+            matched_kind: Optional[ArtifactKind] = None
+            for k in kinds:
+                suffix = WATCH_SPECS[k][1]
+                if fname.endswith(suffix) and _matches_kind(k, fname):
+                    matched_kind = k
+                    break
+            if matched_kind is None:
+                continue
 
-        seen.add(name)
-        prev = prev_registry.get(name)
+            path = os.path.join(dirpath, fname)
+            rel_key = os.path.relpath(path, directory).replace(os.sep, "/")
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
 
-        is_new = prev is None
-        is_modified = (
-            not is_new
-            and (st.st_mtime > prev.mtime + 1e-6 or st.st_size != prev.size)
-        )
+            seen_by_k[matched_kind].add(rel_key)
+            prev_reg = prev_registries.get(matched_kind, {})
+            prev = prev_reg.get(rel_key)
 
-        if is_new or is_modified:
-            # 原子写入保证此时解析读取 100% 安全
-            summary = _parse_summary_sync(kind, name, path)
-            record = ArtifactRecord(
-                kind=kind,
-                name=name,
-                path=path,
-                mtime=st.st_mtime,
-                size=st.st_size,
-                summary=summary,
+            is_new = prev is None
+            is_modified = (
+                not is_new
+                and (st.st_mtime > prev.mtime + 1e-6 or st.st_size != prev.size)
             )
-            new_registry[name] = record
-
-            if is_new:
-                events.append(("artifact_created", record))
+            if is_new or is_modified:
+                summary = _parse_summary_sync(matched_kind, fname, path)
+                record = ArtifactRecord(
+                    kind=matched_kind,
+                    name=rel_key,
+                    path=path,
+                    mtime=st.st_mtime,
+                    size=st.st_size,
+                    summary=summary,
+                )
+                new_regs[matched_kind][rel_key] = record
+                events_by_k[matched_kind].append(
+                    ("artifact_created" if is_new else "artifact_updated", record)
+                )
             else:
-                events.append(("artifact_updated", record))
-        else:
-            new_registry[name] = prev
+                new_regs[matched_kind][rel_key] = prev
 
-    deleted_names = [name for name in prev_registry if name not in seen]
-
-    return new_registry, events, deleted_names
+    out = {}
+    for k in kinds:
+        prev_reg = prev_registries.get(k, {})
+        deleted = [name for name in prev_reg if name not in seen_by_k[k]]
+        out[k] = (new_regs[k], events_by_k[k], deleted)
+    return out
 
 
 # ============================================================================
@@ -235,25 +258,30 @@ class ResultWatcher:
             await asyncio.sleep(self._interval)
 
     async def _scan_all(self, quiet: bool = False) -> None:
-        for kind, (directory, suffix) in WATCH_SPECS.items():
-            await self._scan_single_kind(kind, directory, suffix, quiet=quiet)
+        # 按物理目录分组: 同一目录 (如 TUNE_BASE_DIR) 每轮仅 walk 1 次
+        by_dir: Dict[str, List[ArtifactKind]] = {}
+        for kind, (directory, _suffix) in WATCH_SPECS.items():
+            by_dir.setdefault(directory, []).append(kind)
 
-    async def _scan_single_kind(
+        for directory, kinds in by_dir.items():
+            prev_slice = {k: self._registry[k] for k in kinds}
+            batch_res = await asyncio.to_thread(
+                _scan_root_multi_kinds_sync, directory, kinds, prev_slice
+            )
+            for kind in kinds:
+                updated_reg, event_records, deleted_names = batch_res[kind]
+                await self._apply_scan_results(
+                    kind, updated_reg, event_records, deleted_names, quiet=quiet
+                )
+
+    async def _apply_scan_results(
         self,
         kind: ArtifactKind,
-        directory: str,
-        suffix: str,
+        updated_reg: Dict[str, ArtifactRecord],
+        event_records: List[Tuple[str, ArtifactRecord]],
+        deleted_names: List[str],
         quiet: bool = False,
     ) -> None:
-        # avoid I/O and Parser Block
-        updated_reg, event_records, deleted_names = await asyncio.to_thread(
-            _scan_directory_sync,
-            kind,
-            directory,
-            suffix,
-            self._registry[kind],
-        )
-
         self._registry[kind] = updated_reg
 
         if quiet:
@@ -288,6 +316,24 @@ class ResultWatcher:
             }
             await self._safe_broadcast(del_payload)
 
+    async def _scan_single_kind(
+        self,
+        kind: ArtifactKind,
+        directory: str,
+        suffix: str,
+        quiet: bool = False,
+    ) -> None:
+        batch_res = await asyncio.to_thread(
+            _scan_root_multi_kinds_sync,
+            directory,
+            [kind],
+            {kind: self._registry[kind]},
+        )
+        updated_reg, event_records, deleted_names = batch_res[kind]
+        await self._apply_scan_results(
+            kind, updated_reg, event_records, deleted_names, quiet=quiet
+        )
+
     async def _safe_broadcast(self, message: Dict[str, Any]) -> None:
         try:
             await self._manager.broadcast_to_all(message)
@@ -320,14 +366,11 @@ class ResultWatcher:
         detail = record.to_payload()
 
         if k in (ArtifactKind.COLLAPSE, ArtifactKind.LLM_RUN):
-            def _read_json():
-                with open(record.path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-
-            try:
-                detail["data"] = await asyncio.to_thread(_read_json)
-            except Exception as e:
-                detail["data_error"] = str(e)
+            data = await asyncio.to_thread(read_json_safe, record.path)
+            if data is not None:
+                detail["data"] = data
+            else:
+                detail["data_error"] = "failed to read json"
 
         return detail
 

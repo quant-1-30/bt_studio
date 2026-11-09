@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Deque, Dict, List, Optional, Set
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .monitor_api import router as monitor_v2_router, ws_router as monitor_ws_router
 from .watcher import ArtifactKind, ResultWatcher, WATCH_SPECS
 
 logging.basicConfig(
@@ -108,14 +111,97 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS 
+# M0 shadow: index-first read-only monitor; legacy watcher endpoints remain untouched.
+app.include_router(monitor_v2_router, prefix="/api/v2", tags=["monitor-v2"])
+app.include_router(monitor_ws_router, tags=["monitor-v2-ws"])
+
+# CORS / Auth (生产默认收紧; BT_STUDIO_ENV=prod 时强制要求 BT_STUDIO_API_TOKEN)
+_API_TOKEN = os.environ.get("BT_STUDIO_API_TOKEN", "")
+if os.environ.get("BT_STUDIO_ENV", "").lower() == "prod" and not _API_TOKEN:
+    raise RuntimeError(
+        "[api_server] BT_STUDIO_ENV=prod 模式下必须显式配置 BT_STUDIO_API_TOKEN 环境变量"
+    )
+_CORS_ORIGINS = [
+    o.strip() for o in os.environ.get(
+        "BT_STUDIO_CORS_ORIGINS", "http://localhost,http://127.0.0.1"
+    ).split(",") if o.strip()
+]
+_ALLOW_CREDENTIALS = _CORS_ORIGINS != ["*"]  # credentials 与 wildcard 不共存
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
-    allow_credentials=True,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _http_authorized(headers) -> bool:
+    if not _API_TOKEN:
+        return True
+    return headers.get("authorization", "") == f"Bearer {_API_TOKEN}"
+
+
+def _ws_authorized(websocket: WebSocket) -> bool:
+    if _http_authorized(websocket.headers):
+        return True
+    # 浏览器/客户端不便设 header 时允许 ?token=; 仅在显式配置 token 时生效
+    return bool(_API_TOKEN) and websocket.query_params.get("token") == _API_TOKEN
+
+
+# 轻量内存滑动窗口限流器 (默认 120 req / 60s per client IP, 可通过 BT_STUDIO_RATE_LIMIT_PER_MIN 配置)
+_RATE_LIMIT_PER_MIN = int(os.environ.get("BT_STUDIO_RATE_LIMIT_PER_MIN", "120") or 120)
+_RATE_BUCKETS: Dict[str, Deque[float]] = defaultdict(deque)
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    if _RATE_LIMIT_PER_MIN <= 0:
+        return True
+    now = time.monotonic()
+    q = _RATE_BUCKETS.get(client_ip)
+    if q is not None:
+        while q and now - q[0] > 60.0:
+            q.popleft()
+        if not q:
+            _RATE_BUCKETS.pop(client_ip, None)
+            q = None
+    if len(_RATE_BUCKETS) > 4096:
+        # 周期性全局清理过期空桶，防海量随机 IP 导致字典无限膨胀
+        stale_ips = [ip for ip, dq in _RATE_BUCKETS.items() if not dq or now - dq[-1] > 60.0]
+        for ip in stale_ips:
+            _RATE_BUCKETS.pop(ip, None)
+    if q is None:
+        q = _RATE_BUCKETS[client_ip]
+    if len(q) >= _RATE_LIMIT_PER_MIN:
+        return False
+    q.append(now)
+    return True
+
+
+def _extract_client_ip(request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first_ip = xff.split(",")[0].strip()
+        if first_ip:
+            return first_ip
+    return request.client.host if request.client else "unknown"
+
+
+@app.middleware("http")
+async def api_auth_middleware(request, call_next):
+    path = request.url.path
+    client_ip = _extract_client_ip(request)
+    if path != "/api/health" and not _check_rate_limit(client_ip):
+        return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
+    if (
+        _API_TOKEN
+        and (path.startswith("/api/") or path == "/metrics")
+        and path != "/api/health"
+        and not _http_authorized(request.headers)
+    ):
+        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    return await call_next(request)
 
 # =============================================================================
 # REST API 
@@ -150,6 +236,46 @@ async def health_check():
     }
 
 
+@app.get("/metrics")
+def prometheus_metrics():
+    """Prometheus 文本格式指标端点 (同步 def 由 FastAPI 线程池执行，不阻塞事件循环)。"""
+    from fastapi.responses import PlainTextResponse
+    from .monitor_api import get_index
+
+    idx = get_index()
+    idx.scan_if_stale(min_interval=2.0)
+    ov = idx.overview()
+    usage = ov.get("usage") or {}
+    all_time = ov.get("usage_all_time") or {}
+    alerts_list = ov.get("alerts") or []
+    raw_pit = ov.get("raw_pit") or {}
+
+    lines = [
+        "# HELP bt_studio_active_runs_24h Active LLM feature mining runs in the last 24h",
+        "# TYPE bt_studio_active_runs_24h gauge",
+        f"bt_studio_active_runs_24h {int(ov.get('active_runs_24h') or 0)}",
+        "# HELP bt_studio_viable_features_total Total viable features passing Stage 2",
+        "# TYPE bt_studio_viable_features_total gauge",
+        f"bt_studio_viable_features_total {int(ov.get('viable_features') or 0)}",
+        "# HELP bt_studio_llm_tokens_today Today LLM total tokens consumed",
+        "# TYPE bt_studio_llm_tokens_today gauge",
+        f"bt_studio_llm_tokens_today {int(usage.get('total_tokens') or 0)}",
+        "# HELP bt_studio_llm_calls_today Today LLM total API calls",
+        "# TYPE bt_studio_llm_calls_today gauge",
+        f"bt_studio_llm_calls_today {int(usage.get('calls') or 0)}",
+        "# HELP bt_studio_llm_tokens_all_time All-time LLM total tokens consumed",
+        "# TYPE bt_studio_llm_tokens_all_time counter",
+        f"bt_studio_llm_tokens_all_time {int(all_time.get('total_tokens') or 0)}",
+        "# HELP bt_studio_raw_pit_coverage Raw PIT minute bar cache coverage ratio",
+        "# TYPE bt_studio_raw_pit_coverage gauge",
+        f"bt_studio_raw_pit_coverage {float(raw_pit.get('coverage') or 0.0):.4f}",
+        "# HELP bt_studio_alerts_active Active monitor alerts count",
+        "# TYPE bt_studio_alerts_active gauge",
+        f"bt_studio_alerts_active {len(alerts_list)}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
 
 # -----------------------------------------------------------------------------
 # Artficat Registry
@@ -181,7 +307,7 @@ async def list_results(kind: str):
     return watcher.snapshot(kind)
 
 
-@app.get("/api/results/{kind}/{name}")
+@app.get("/api/results/{kind}/{name:path}")
 async def get_result_detail(kind: str, name: str):
     detail = await watcher.get_detail(kind, name)
     if detail is None:
@@ -195,6 +321,9 @@ async def get_result_detail(kind: str, name: str):
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    if not _ws_authorized(websocket):
+        await websocket.close(code=4401)
+        return
     await manager.connect(websocket, client_id)
 
     try:
@@ -245,10 +374,12 @@ def get_application() -> FastAPI:
 
 
 if __name__ == "__main__":
+    is_dev = os.getenv("BT_STUDIO_ENV", "dev").lower() == "dev"
+    bind_host = os.getenv("BT_STUDIO_BIND_HOST") or os.getenv("HOST") or "127.0.0.1"
     uvicorn.run(
         "bt_studio.plugins.api_server.main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        reload=True,
+        host=bind_host,
+        port=int(os.getenv("PORT", 8800)),
+        reload=is_dev and os.getenv("UVICORN_RELOAD", "0") == "1",
         log_level="info",
     )

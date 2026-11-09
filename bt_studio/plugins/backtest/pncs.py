@@ -29,8 +29,8 @@ from bt_core.pnc import Pnc
 
 class TestPnc(Pnc):
 
-    def on_risk(self, snapshot: SnapshotBody, stats: Dict[str, float], execType:int =0):
+    def on_risk(self, snapshot: SnapshotBody, stats: Dict[str, float], execType: int = 0):
         pass
-    
-    def generate_plan(self, current_day:int , topk_info: Dict[bytes: Any], snapshot: SnapshotBody, execType:int =0):
-        pass 
+
+    def generate_plan(self, current_day: int, topk_info: Dict[bytes, Any], snapshot: SnapshotBody, execType: int = 0):
+        pass

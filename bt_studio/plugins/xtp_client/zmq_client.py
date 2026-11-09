@@ -25,7 +25,7 @@ class XtpClient:
         self._socket = self._ctx.socket(zmq.DEALER)
         self._socket.setsockopt(zmq.IDENTITY, f"bt-{uuid.uuid4()}".encode())
         self._socket.setsockopt(zmq.LINGER, 0)
-        self._socket.setsockopt(42, 1)
+        self._socket.setsockopt(getattr(zmq, "IMMEDIATE", 42), 1)
         self._socket.set_hwm(1000)
         self._socket.connect(self.endpoint)
         self._recv_task = asyncio.create_task(self._recv_loop())
