@@ -1,23 +1,23 @@
+#! /usr/bin/env python3
+
+from .flywheel import ReplayBuffer, RLFeatureFlywheel
 from .harness import (
     EvalResult,
-    evaluate_feature,
-    TwoStageAgentHarness,
     FeatureMiningResult,
     PrefilterResult,
+    TwoStageAgentHarness,
+    evaluate_feature,
 )
-from .prompt import build_system_prompt, build_rl_context_prompt
-from .flywheel import RLFeatureFlywheel, ReplayBuffer
+from .prompt import build_rl_context_prompt, build_system_prompt
 
 __all__ = [
-    # Evaluator & Harness
-    "EvalResult",
-    "evaluate_feature",
-    "TwoStageAgentHarness",
-    "FeatureMiningResult",
     "PrefilterResult",
-    # Prompt & RL Loop
+    "EvalResult",
+    "FeatureMiningResult",
+    "TwoStageAgentHarness",
+    "evaluate_feature",
+    "ReplayBuffer",
+    "RLFeatureFlywheel",
     "build_system_prompt",
     "build_rl_context_prompt",
-    "RLFeatureFlywheel",
-    "ReplayBuffer",
 ]
