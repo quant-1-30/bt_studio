@@ -1,10 +1,5 @@
-"""Plotting layer for Ray Tune parameter-space diagnostics.
-
-Detection logic (spread_ratio / KDE entropy / landscape variance /
-worst-neighbor drop) lives in ``bt_studio.utils.diagnostics.collapse``
-and is re-exported here for backward compatibility. This module keeps
-only matplotlib rendering + Ray results loading.
-"""
+#! /usr/bin/env python3
+# -*- encoding: utf-8 -*-
 
 import os
 import glob
@@ -27,12 +22,13 @@ except ImportError:
 # re-exported here so existing imports keep working.
 from bt_studio.utils.diagnostics.collapse import (  # noqa: F401
     detect_space_collapse,
+    print_collapse_report,
+    build_collapse_report,
     _to_pandas,
     _get_param_columns,
     _clean_param_name,
     is_discrete_param,
 )
-from bt_studio.utils.diagnostics.recorder import print_collapse_report, build_collapse_report, save_collapse_report
 
 # ============================================================================
 # CJK Font
@@ -202,13 +198,14 @@ def plot_collapse_dashboard(results_df, target="metrics_score", search_bounds=No
     if len(param_cols) < 2:
         raise ValueError(f"至少需要 2 个参数,当前: {param_cols}")
 
-    # 💥 降级保护:确保选出的 param_x 和 param_y 不是同一个列!
     if param_pair is None:
         scored = [(p, diagnostics[p]["landscape_variance_ratio"]) for p in param_cols if p in diagnostics and isinstance(diagnostics[p], dict)]
-        scored = [s for s in scored if not np.isnan(s[1])]
+        scored = [s for s in scored if np.isfinite(s[1])]
         scored.sort(key=lambda x: x[1], reverse=True)
-        param_x = scored[0][0]
-        param_y = scored[1][0] if len(scored) > 1 and scored[1][0] != param_x else param_cols[1]
+        # landscape 全 NaN (trial 数少): 回退前两个参数列, 不得 IndexError
+        param_x = scored[0][0] if scored else param_cols[0]
+        param_y = (scored[1][0] if len(scored) > 1 and scored[1][0] != param_x
+                   else (param_cols[1] if len(param_cols) > 1 else param_cols[0]))
     else:
         param_x, param_y = param_pair
 
@@ -242,7 +239,7 @@ def plot_collapse_dashboard(results_df, target="metrics_score", search_bounds=No
             continue
 
         vals = valid[col_name].dropna().values
-        is_disc = is_discrete_param(vals)
+        is_disc, _is_cat = is_discrete_param(col_name, valid[col_name], search_bounds)
         if is_disc:
             unique, counts = np.unique(vals, return_counts=True)
             ax_d.bar(unique.astype(str), counts, color='steelblue', edgecolor='black')
