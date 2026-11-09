@@ -5,17 +5,18 @@ from __future__ import annotations
 import os
 import re
 import xml.etree.ElementTree as ET
+
 import networkx as nx
 
-from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Dict, List, Optional, Tuple
 
 from bt_studio.constant import DAGS_DIR
-from bt_studio.utils.paths import list_dags
+from bt_studio.schema import DagWindow, Dep, DepTerm, PipelineDag
 
 
-_ROLES = {"train", "oos", "warmup", "prev_oos"}
+_ROLES = {"train", "oos", "prev_oos", "warmup"}
 _WINDOW_FROM_VALUES = {"first", "last-trainable"}
+_CTX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # node_id [> ctx_key] [?|?! cond_node]
 _TERM_RE = re.compile(
@@ -26,42 +27,7 @@ _TERM_RE = re.compile(
 
 
 class DagValidationError(Exception):
-    """Malformed or semantically invalid DAG XML."""
-
-
-@dataclass(frozen=True)
-class DepTerm:
-    node: str
-    key: Optional[str] = None
-    cond: Optional[str] = None  
-    negated: bool = False       
-
-
-@dataclass(frozen=True)
-class Dep:
-    alternatives: Tuple[DepTerm, ...]
-
-    def terms(self) -> Tuple[DepTerm, ...]:
-        return self.alternatives
-
-
-@dataclass(frozen=True)
-class DagWindow:
-    from_: str = "first"
-    step_key: str = "oss_step"          
-    train_key: str = "train_window"
-
-
-@dataclass(frozen=True)
-class PipelineDag:
-    name: str
-    graph: nx.MultiDiGraph            
-    window: DagWindow
-    source_path: str
-
-    @property
-    def nodes(self):
-        return self.graph.nodes
+    """Raised when a DAG XML file is malformed or fails semantic validation."""
 
 
 def _resolve_path(ref: str) -> str:
@@ -77,13 +43,13 @@ def _parse_deps(raw: str, path: str, nid: str) -> Tuple[Dep, ...]:
     for slot in raw.split(","):
         slot = slot.strip()
         if not slot:
-            raise DagValidationError(f"{path}: node {nid}: empty dep term")
+            raise DagValidationError(f"{path}: node {nid}: 存在空的依赖槽位")
         alts: List[DepTerm] = []
         for part in slot.split("|"):
             part = part.strip()
             m = _TERM_RE.match(part)
             if not m:
-                raise DagValidationError(f"{path}: node {nid}: bad dep term {part!r}")
+                raise DagValidationError(f"{path}: node {nid}: 非法依赖语法 {part!r}")
             alts.append(
                 DepTerm(
                     node=m.group("node"),
@@ -96,99 +62,115 @@ def _parse_deps(raw: str, path: str, nid: str) -> Tuple[Dep, ...]:
     return tuple(deps)
 
 
+def list_dags() -> list[str]:
+    if not os.path.isdir(DAGS_DIR):
+        return []
+    return sorted(os.path.splitext(f)[0] for f in os.listdir(DAGS_DIR)
+                  if f.endswith(".xml"))
+
+
 def parse_dag(ref: str) -> PipelineDag:
     path = _resolve_path(ref)
     if not os.path.exists(path):
-        raise DagValidationError(f"DAG not found: {ref} (resolved {path})")
+        raise DagValidationError(f"DAG 文件不存在: {ref} (解析路径: {path})")
 
     try:
         root = ET.parse(path).getroot()
     except ET.ParseError as e:
-        raise DagValidationError(f"{path}: XML parse error: {e}") from e
+        raise DagValidationError(f"{path}: XML 解析异常: {e}") from e
 
-    if root.tag != "pipeline" or not root.get("name"):
-        raise DagValidationError(f"{path}: root must be <pipeline name=...>")
+    dag_name = root.get("name")
+    if root.tag != "pipeline" or not dag_name:
+        raise DagValidationError(f"{path}: 根节点必须为带有有效 name 属性的 <pipeline>")
 
-    # 1. parse window with xml
     window = DagWindow()
     w_el = root.find("window")
     if w_el is not None:
         from_ = w_el.get("from", "first")
         if from_ not in _WINDOW_FROM_VALUES:
             raise DagValidationError(
-                f"{path}: window from={from_!r} invalid (allowed: {sorted(_WINDOW_FROM_VALUES)})"
+                f"{path}: window from={from_!r} 非法 (允许值: {sorted(_WINDOW_FROM_VALUES)})"
             )
         window = DagWindow(
             from_=from_,
-            step_key=w_el.get("step-key", "oss_step"),
+            step_key=w_el.get("step-key", "oos_step"),
             train_key=w_el.get("train-window-key", "train_window"),
         )
 
-    # 2. accumulate nodes
     g = nx.MultiDiGraph()
-    deps_by_node: dict[str, Tuple[Dep, ...]] = {}
+    deps_by_node: Dict[str, Tuple[Dep, ...]] = {}
 
     for el in root.findall("node"):
         nid, fn = el.get("id"), el.get("fn")
         if not nid or not fn:
-            raise DagValidationError(f"{path}: <node> requires id and fn")
+            raise DagValidationError(f"{path}: <node> 必须具备 id 与 fn 属性")
         if nid in g:
-            raise DagValidationError(f"{path}: duplicate node id: {nid!r}")
+            raise DagValidationError(f"{path}: 发现重复节点 id: {nid!r}")
 
         role = el.get("role")
         if role is not None and role not in _ROLES:
-            raise DagValidationError(f"{path}: node {nid}: role={role!r} invalid")
+            raise DagValidationError(f"{path}: node {nid}: role={role!r} 不合法")
+
+        output = el.get("output")
+        if output is not None and not _CTX_KEY_RE.match(output):
+            raise DagValidationError(
+                f"{path}: node {nid}: output={output!r} 必须为合法的上下文标识符"
+            )
 
         raw_deps = (el.get("deps") or "").strip()
         node_deps = _parse_deps(raw_deps, path, nid) if raw_deps else ()
 
-        g.add_node(nid, fn=fn, role=role, deps=node_deps)
+        g.add_node(nid, fn=fn, role=role, output=output, deps=node_deps)
         deps_by_node[nid] = node_deps
 
-    # 3. deps and topologic
     for nid, deps in deps_by_node.items():
         for dep in deps:
             for t in dep.terms():
+                if t.node == nid or t.cond == nid:
+                    raise DagValidationError(
+                        f"{path}: 节点 {nid!r} 不允许依赖自身 (Self-dependency forbidden)"
+                    )
+
                 if t.node not in g:
                     raise DagValidationError(
-                        f"{path}: node {nid}: dep on unknown node {t.node!r}"
+                        f"{path}: node {nid}: 依赖了未定义的节点 {t.node!r}"
                     )
-                
-                # cond prior
+
                 if t.cond:
                     if t.cond not in g:
                         raise DagValidationError(
-                            f"{path}: node {nid}: condition depends on unknown node {t.cond!r}"
+                            f"{path}: node {nid}: 条件门控依赖了未定义的节点 {t.cond!r}"
                         )
-                    g.add_edge(t.cond, nid, edge_type="control_cond")
+                    ctrl_key = f"ctrl_{t.cond}"
+                    if nid not in g[t.cond] or ctrl_key not in g[t.cond][nid]:
+                        g.add_edge(
+                            t.cond,
+                            nid,
+                            key=ctrl_key,
+                            edge_type="control_cond",
+                        )
 
+                neg_flag = "not_" if t.negated else ""
+                data_key = f"data_{t.node}_{t.key or 'all'}_{neg_flag}{t.cond or 'direct'}"
                 g.add_edge(
                     t.node,
                     nid,
+                    key=data_key,
                     edge_type="data",
-                    key=t.key,
+                    key_alias=t.key,
                     cond=t.cond,
                     negated=t.negated,
                 )
 
-    # 4. recycle detection
     if not nx.is_directed_acyclic_graph(g):
-        cycle = list(nx.find_cycle(g))
-        raise DagValidationError(f"{path}: dependency cycle detected: {cycle}")
-
-    # 5. config examine 
-    try:
-        from bt_studio.default_config import PRODUCTION_COMMON_PARAMS
-        if (
-            window.train_key not in PRODUCTION_COMMON_PARAMS
-            or window.step_key not in PRODUCTION_COMMON_PARAMS
-        ):
-            pass # Relaxed the strict condition to avoid test failures if default changes or for mock testing. We could just emit a warning instead or verify against actual exp_config during runtime execution.
-    except ImportError:
-        pass  
+        cycle = list(nx.find_cycle(g, orientation="original"))
+        raise DagValidationError(f"{path}: 检测到静态依赖闭环: {cycle}")
 
     return PipelineDag(
-        name=root.get("name"), graph=g, window=window, source_path=path
+        name=str(dag_name),
+        graph=g,
+        window=window,
+        source_path=path,
     )
 
 
