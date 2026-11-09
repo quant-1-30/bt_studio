@@ -1,374 +1,203 @@
 # AGENTS.md — bt_studio 项目指南
 
+> 面向编码智能体/新成员的**操作型**指南:怎么装、怎么测、怎么跑、改哪里。
+> 项目概览与架构叙事见仓库根 `README.md`;架构专题(挖掘环路/可视化/DAG 引擎决策)见
+> `docs/architecture.md`;文档索引见 `docs/README.md`。
+
 ---
 
 ## 1. 项目概述
 
-`bt_studio` 是一个基于 Python 的量化研究与回测工作室,聚焦中国 A 股市场日内/个股的预测性模式挖掘。核心研究范式为:
+`bt_studio` 是量化研究工作室(v5 双环路架构),聚焦 A 股日内/个股预测模式挖掘:
 
-- 使用 **矩阵轮廓(`stumpy`)** 与 **DTW(`dtaidistance`)** 发现时序 motif;
-- 基于 **OFI(Order Flow Imbalance)** 曲线构建每日宏观状态,并建立有限状态机(FSM)转移网络;
-- 通过 **Prefect** 编排、**Ray Tune + Optuna** 进行滚动超参优化;
-- 使用 `FSMPredictor` 对样本外数据打分,输出 Parquet;
-- 通过 **Bokeh / Matplotlib / Streamlit** 可视化结果;
-- 通过 `bt_sdk` / `bt_protocol` 市场数据 RPC 接口获取行情。
+- **特征智能体环路**:LLM 产出因子 AST/Recipe → `compiler` 编译为 Polars 表达式 →
+  `wfo_hpo` DAG 滚动检验 → 胜出特征经 `LLM_PENDING_DIR` 落盘契约 spool 给执行环路;
+- **执行环路**:`dags/*.xml` 声明式 DAG → `engine` 滚动窗口执行 →
+  Ray Tune + Optuna HPO(含塌陷检测/衰减门控)→ FSM 模型与 OOS 打分。
 
-项目当前为研究与实验性质,部分文档与代码存在过期、损坏或未完成的模块(详见第 8 节“已知问题”)。
-
----
-
-## 2. 技术栈与关键依赖
-
-| 层级 | 库 / 工具 |
-|------|----------|
-| 语言 | Python `>=3.11,<3.15` |
-| 包管理 | Poetry |
-| 核心数据 | Polars、NumPy、PyArrow、pandas、joblib |
-| 统计 / 机器学习 | scikit-learn、statsmodels、scipy、stumpy、dtaidistance、optuna |
-| 分布式超参优化 | Ray(`ray[tune]`),配合 `OptunaSearch` 与 `ASHAScheduler` |
-| 工作流 / MLOps | Prefect 3、MLflow 3、prometheus-client |
-| 可视化 | Bokeh 3、Matplotlib、Streamlit、duckdb |
-| 行情数据 RPC | `bt-sdk`、`bt-protocol`、`bt-core`、ZeroMQ、asyncio、uvloop、reactivex |
-| 部署 | Docker Compose(Postgres、Prefect、MLflow、Prometheus、Grafana) |
-| 其他 | coremltools、graphviz、dotenv、asitop、mlops |
-
-`pyproject.toml` 中配置的 PyPI 源:
-
-- 主源:清华 TUNA 镜像 `https://pypi.tuna.tsinghua.edu.cn/simple/`
-- 辅助源:本地 devpi 服务器 `http://localhost:3141/bt_sdk/dev/+simple/`
-
-> 注意:仓库根目录存在一个 `_version.py`,它是遗留的 versioneer 文件,但末尾被混入了一段无关代码(`subprocess.run(...)`),当前不可作为版本工具使用。
+核心方法:有监督正样本矩阵轮廓(`stumpy`)发现 motif → Numba `nogil=True` 编译核(`astc.py`)执行带 LB_Keogh 剪枝的子序列 DTW 匹配 →
+贝叶斯 FSM 转移网络打分;行情经 `bt_sdk`/`bt_protocol` RPC 获取。
 
 ---
 
-## 3. 仓库结构与代码组织
+## 2. 环境与常用命令
+
+```bash
+poetry install                      # 安装依赖 (Python >=3.11,<3.14)
+
+# 全量测试套件 (7 个模块, 224 个用例)
+poetry run python -m pytest tests/ -q -p no:cacheprovider
+
+# 生产 WFO 跑批 (wfo_production DAG, mlflow 落本地 sqlite)
+poetry run python scripts/run_tune.py                       # 默认取 viable_features.json 首个特征
+poetry run python scripts/run_tune.py --feature f_a1b2c3d4e5f6 --dag wfo_hpo \
+    --start-date 20200101 --end-date 20221231               # 特征指纹/名 + DAG + 区间覆盖
+
+# LLM 特征挖掘飞轮 (agent 循环 + Stage3 落盘 spool)
+poetry run python scripts/run_agent.py
+
+# 只验证特征挖掘 + RL、不触发 tune/HPO 契约 (不写 result/artifacts/pending)
+AGENT_STAGE3=off poetry run python scripts/run_agent.py
+
+# 可视化看板 / 回测 / 塌陷诊断 / 漂移诊断
+poetry run python scripts/run_streamlit.py
+poetry run python scripts/run_backtest.py
+poetry run python scripts/run_collapse.py
+poetry run python scripts/run_drift_diagnose.py
+```
+
+基础设施(Postgres/MLflow/Prometheus/Grafana)可选,`docker-compose up -d`;
+数据库密码经环境变量注入,compose 内默认值仅用于本地开发。
+
+**测试确定性**:两个逐进程随机源都会沿「行序 → 曲线堆叠 → stumpy → 分数 →
+门控」链路放大为离散翻转,新代码必须遵守:
+- `tests/conftest.py` 在任何 polars/numba import 之前把
+  `NUMBA_NUM_THREADS`/`POLARS_MAX_THREADS`/`OMP_NUM_THREADS` 钉为 1
+  (浮点归约并行求和顺序);
+- **不要用 `set` 决定顺序**:去重用 `dict.fromkeys`(保序),LazyFrame
+  collect / group_by 之后如顺序影响下游,显式 `sort` 规范化
+  (`PYTHONHASHSEED` 令 set 迭代序逐进程随机)。
+
+---
+
+## 3. 仓库结构
 
 ```
+dags/                    # XML DAG 声明 (注意: 仓库根目录, 非 bt_studio/ 下)
+├── wfo_production.xml   #   生产全量 Walk-Forward 编排
+├── wfo_hpo.xml          #   单窗口强制 HPO 筛选 (Agent 评估专用)
+└── README.md            #   DAG 语法 (v2: 显式依赖边) 说明
+
 bt_studio/
-├── bt_trade/           # 交易原语(Pnc / Sizer)
-│   ├── __init__.py
-│   ├── pncs.py         # TestPnc:PnC 空实现占位
-│   └── sizers.py       # FixedSize / WeightedSizer / TurtleSizer / KellySizer
-├── pipeline/           # 核心流水线
-│   ├── features/       # ofi.py — 从 tick/分钟线构建 OFI ratio 特征
-│   ├── inference/      # predict.py — FSMPredictor,样本外打分
-│   ├── metrics/        # score.py / pareto.py / fanova.py — HPO 评分与模型选择
-│   ├── patterns/       # astc.py / fsm.py / pattern.py — motif 发现、FSM 构建
-│   └── preprocess/     # macro.py / sample.py / panel.py — 数据获取、对齐、建面板
-├── plugins/            # 数据接入插件
-│   ├── tcp_client.pyx  # Cython 异步 TCP 客户端(bt_sdk RPC)
-│   ├── zmq_client.pyx  # Cython 异步 ZMQ DEALER 客户端
-│   └── zmq_svr.py      # Python 异步 ZMQ ROUTER→DEALER 代理服务器
-├── utils/              # 公共工具
-│   ├── common.py       # 稳健 z-norm、DTW 参数计算、流收集器、decay 权重
-│   └── util.py         # 计时装饰器 + z-normalize
-├── visual/             # 可视化
-│   ├── app.py          # Streamlit 日志分析应用(当前不可用,见第 8 节)
-│   ├── board.py        # 仅含注释,无实际代码
-│   ├── vis.py          # Matplotlib 3D 超参数地形图
-│   ├── bkh/            # Bokeh 绘图(Plot 类、主题、工具)
-│   └── mpl/            # Matplotlib 绘图(类 backtrader 的 Plot、主题、finance 等)
-├── sim_engine.py       # 基于 bt_core 的回测/仿真入口
-└── tune_train.py       # 当前 Walk-Forward Optimization(WFO)训练与推理入口
+├── agent/               # LLM 特征智能体 (高内聚 3 核心模块 + vendors)
+│   ├── harness.py       #   TwoStageAgentHarness 编排 (Stage1 物理初筛 + Stage2 滚动窗口网格评估)
+│   ├── flywheel.py      #   ReplayBuffer + FlywheelRunStore + RLFeatureFlywheel 经验回放循环
+│   ├── prompt.py        #   系统提示词 (算子清单由 SAFE_OPS 注册表动态渲染)
+│   └── vendors/         #   LLM 供应商适配 + base.py (含 LlmUsageMeter/MeteredProvider)
+├── compiler/            # 因子 AST → Polars 表达式编译器
+│   ├── ast.py           #   compile_ast/compile_recipe, 因果守卫, 跨族嵌套禁令
+│   ├── ops.py           #   SAFE_OPS 注册表 (含 Numba 加速 _rank 等算子)
+│   └── plugins/         #   TA-Lib C 底层白名单桥接
+├── engine/              # 声明式 DAG 执行引擎 (高内聚 4 核心模块)
+│   ├── parser.py        #   XML → networkx 图, 依赖边/循环校验
+│   ├── executor.py      #   NODE_REGISTRY/run_dag 滚动窗口编排 + task_id 分桶 + 签名/条件依赖求值
+│   ├── ctx.py           #   Ray 生命周期与平台自适应并发 (ensure_ray)
+│   └── task_manager.py  #   异步 FIFO 队列 + 契约预检 + LLM_PENDING_DIR intake
+├── pipeline/            # 核心算法
+│   ├── preprocess/      #   prepare/sample/panel/macro (Tick 因果后复权、曲线提取、静态面板)
+│   ├── patterns/        #   astc/fsm/pattern (有监督正样本 Motif 发现 → Numba DTW → FSM)
+│   ├── metrics/         #   score/gates/pareto/fanova (奥卡姆精简 HPO 评分与自适应 plateau 校验)
+│   └── inference/       #   predict.py FSMPredictor (OOS 打分)
+├── plugins/             # api_server (FastAPI/WS + monitor_api + indexer.py), backtest (Pnc/Sizer), xtp_client
+├── utils/               # months/io/math_func/manifest + diagnostics/{collapse,hpo_check}
+├── visual/              # _streamlit.py (A/B/C 多屏工作台), collapse.py 绘图, bkh.py Bokeh 组件
+├── constant.py          # 全部路径常量与固定业务阈值 (RESULT_ROOT 可由 BT_STUDIO_RESULT_DIR 覆盖)
+├── schema.py            # 全框架统一 dataclass/Enum 数据契约 (Dep/PipelineDag/EngineResult/TaskResult/EvalResult 等)
+├── default_config.py    # 生产参数基线 (Single Source of Truth)
+└── tune.py              # 7 大节点函数 (node_prepare_macro ... node_oos_inference_monthly)
 
-contrib/                # 实验性多维 FSM 重写(当前不可直接运行)
-├── mastc.py            # 多维 ASTC 辅助
-├── mfsm.py             # 多维 FSM 构建
-├── mpattern.py         # 多维 motif 发现
-└── mpredict.py         # 多维 FSMPredictor
-
-scripts/
-└── start_env.sh        # 设置 AIRFLOW_HOME/PYTHONPATH 并迁移 Airflow 数据库
-
-tests/                  # 测试目录(当前内容有限且部分损坏)
-├── logs/
-├── test.py
-├── test_plot.html
-├── test_plot.py
-└── test_prefect_fsm.py
+scripts/                 # 全部运行入口 (见第 2 节; profile_agent.py 为 cProfile 采样工具)
+tests/                   # pytest 套件: agent/compiler/engine/misc/monitor/pipeline/tune 七个子目录 + conftest.py 确定性环境
+result/                  # 输出根目录, 按 task_id 分桶 (见 4.2)
 ```
-
-### 3.1 模块导出约定
-
-每个子包通过 `__init__.py` 重新导出公共符号。例如:
-
-- `bt_studio.pipeline.preprocess` 导出 `prepare_macro`、`prepare_tick`、`universe_sample`、`build_fsm_panel`;
-- `bt_studio.pipeline.patterns` 导出 `evaluate_and_build_fsm`、`discover_fsm_pattern`;
-- `bt_studio.pipeline.inference` 导出 `FSMPredictor`。
-
-### 3.2 代码风格约定
-
-- **标识符语言**:变量、函数、类名为英文;注释主要为中文。
-- **惰性求值**:大量使用 `polars.LazyFrame` 与 `scan_parquet`。
-- **函数式风格**:流水线步骤多为纯函数,输入 `pl.LazyFrame` / `pl.DataFrame` 与 `config: dict`。
-- **配置驱动**:超参数、日期、阈值等均通过嵌套字典 `common_config` / `tune_config` 传入。
-- **文件规模**:流水线代码较紧凑;`visual/mpl/plot.py`(约 899 行)为最大单文件。
 
 ---
 
-## 4. 构建、测试与运行命令
+## 4. 关键机制
 
-项目未在 `pyproject.toml` 中配置 Poetry scripts、Makefile 或 pytest 选项。
+### 4.1 配置与 DAG
 
-### 4.1 安装依赖
+- 配置单一来源 `bt_studio/default_config.py::build_exp_config(overrides)`;
+  `scripts/run_tune.py` 只做覆盖与 `run_dag(parse_dag("wfo_production"), exp_config)`。
+- 节点签名由 executor 经 `engine/tasking.py::analyze_signature` 依 DAG 声明自动注入
+  (`ctx_key` / 条件边 `?`/`?!`),节点函数本身是纯函数,注册于
+  `engine/executor.py::NODE_REGISTRY`。
+- Agent 落盘任务契约:Stage3 胜出特征写 `result/artifacts/pending/*.json`(含
+  `"dag": "wfo_hpo"`),`BT_STUDIO_LLM_INTAKE=1` 启动时 task_manager 每 5s
+  消费一批,处理后移 `.consumed`/`.invalid`。
 
-```bash
-poetry install
+### 4.2 结果目录按 task_id 分桶 (布局 v2: artifacts/ + cache/)
+
+`engine/tasking.py::attach_task_dirs`(由 executor 调用)按
+`feature_col + ast_recipe + 日期/基准 + 产物语义 common 键 + search_spec`
+的 sha1 派生 task_id,向 `common_config` setdefault 注入;task_manager 的队列
+uuid 只用于状态跟踪,不写入 `common_params.task_id`,同实验重跑仍命中同一分桶:
+
+```
+result/artifacts/features/<task_id>/                 # 特征 parquet (feature_dir)
+result/artifacts/tune/<task_id>/models|scores|collapse/   # _tune_*_dir
+result/artifacts/runs/<run_id>/                      # agent 挖掘 run 状态与 step
+result/cache/bars/v2/ym={YYYYMM}.parquet             # 分钟 PIT 月包缓存
+result/cache/evals/v2/                               # EvalResult 窗口缓存
 ```
 
-### 4.2 启动基础设施服务
+无 task_id(缺 feature_col 等)时回落旧的扁平布局,行为与旧版一致;
+agent 预计算特征经 `FEATURE_DIR/{fp12}/` 纯 12 位指纹目录约定复用(由 `ast_fingerprint(ast_recipe)[:12]` 推导)。
 
-```bash
-docker-compose up -d
-```
+### 4.3 有监督 Motif 提纯、贝叶斯 FSM 与评分门控链路 (2026-11 重构)
 
-服务清单见 `docker-compose.yml`:
+`pattern.py::discover_fsm_pattern` → `fsm.py::evaluate_and_build_fsm` → `metrics/score.py`:
 
-| 服务 | 镜像 | 端口 | 说明 |
-|------|------|------|------|
-| `postgres` | postgres:15 | 5432 | 用户 `quant_user`,密码 `quant_password`,数据库 `studio_db` |
-| `prefect-server` | prefecthq/prefect:3-latest | 4200 | 指向本地 Postgres 连接字符串(注意:配置中的密码 `yourTopSecretPassword` 与 postgres 服务不一致) |
-| `mlflow` | ghcr.io/mlflow/mlflow:v2.10.0 | 5000 | 使用 Postgres 后端,本地 artifact 挂载 `/mnt/data/mlflow_artifacts` |
-| `prometheus` | prom/prometheus:latest | 9090 | 抓取 `host.docker.internal:8080` 的 Ray 指标 |
-| `grafana` | grafana/grafana:latest | 3000 | 默认管理员密码 `admin` |
+- **有监督正样本 Motif 提纯 (Stage A)**: 训练期内不再对全市场盲抽(`get_balanced_samples` 与 `max_points` 已退役)，而是通过 `_select_positive_motif_curves` 直接筛选 `rank_trajectory >= 0.70` 且 `raw_trajectory > 0` 的真实爆发正样本子集 $S^+$ 送入 STUMPY 提取候选 Motif $P(\text{Motif} \mid \text{Win})$，随后回到包含全部正负样本的全集 `panel_df` 上执行无偏 DTW 匹配与门控验证;
+- **贝叶斯 Dirichlet 基率平滑与经验贝叶斯收缩 (`fsm.py::extract_fsm_matrix`)**:
+  - 状态转移矩阵采用匹配 5 档分位宽度的 Dirichlet 先验 $\alpha_0 = [0.5, 1.0, 2.0, 1.0, 0.5]$，小样本下自动向真实横截面基率 $[10\%, 20\%, 40\%, 20\%, 10\%]$ 收缩;
+  - 状态期望收益向量 `state_return_vectors` 采用经验贝叶斯收缩 $\hat{\mu}_s = \frac{n_s}{n_s + \nu_0} \text{median}(R_s)$（$\nu_0 = 3.0$），抑制稀疏分箱单样本极值噪音;
+- **统计分与显著性检验**: `daily_paired_pval` 按日配对 Wilcoxon; p 值项软饱和 `cap·(1−e^(−x/cap))`(`max_neg_ln_p`, 默认 10);
+- **经济门控与结局截断守卫**: `min_excess_ret` 硬门控原始收益中位数超额; `t1_missing_ratio <= 0.25` 拦截次日停牌/缺失造成的结局截断偏差;
+- **衰减遥测与塌陷诊断**: `node_check_decay_monthly` 自动落盘 `decay_{model_id}_{feature_col}.json` 跟踪 OOS $u$-pval、触发率与得分漂移; `collapse.py` 单因子扰动邻域检测空间塌陷。
 
-### 4.3 启动 Prefect 服务
+### 4.4 编译器约束 (改动 prompt/agent 前必读)
 
-```bash
-prefect server start --host 0.0.0.0
-```
-
-### 4.4 启动 MLflow 服务
-
-`docker-compose.yml` 已内置 mlflow 服务;若需独立启动:
-
-```bash
-mlflow server --host 0.0.0.0 --port 5000 \
-  --backend-store-uri postgresql://quant_user:quant_password@localhost:5432/studio_db \
-  --default-artifact-root /opt/mlflow/artifacts
-```
-
-> 注意:`bt_studio/tune_train.py` 当前硬编码 `MLFLOW_TRACKING_URI=http://127.0.0.1:5001`,与 docker-compose 暴露的 5000 端口不一致。
-
-### 4.5 启动 Ray 集群(本地开发示例)
-
-```bash
-export RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=1
-ray start --head --port=6379 --include-dashboard=false --metrics-export-port=8080 \
-  --num-cpus=8 --object-store-memory 21474836480 --memory 34359738368 \
-  --system-config='{"automatic_object_spilling_enabled": false, "metrics_export_port": 8080}'
-```
-
-### 4.6 运行核心训练/推理流水线
-
-当前实际入口是 `bt_studio/tune_train.py`,而非 `README.md` 中提到的 `bt_studio/pipeline/tune/train.py`(该路径不存在):
-
-```bash
-poetry run python bt_studio/tune_train.py
-```
-
-`tune_train.py` 实现了一个滚动月度训练/OOS 循环:
-
-1. `node_prepare_macro`:构建/读取日线股票池 Parquet;
-2. `node_extract_feature_monthly`:按月获取 tick 数据并构建 OFI 特征;
-3. `node_check_decay_monthly`:检验旧模型在近期样本外数据上是否仍有效;
-4. `node_tune_monthly`:使用 Ray Tune + Optuna TPE 进行 HPO,经 fANOVA 与 Pareto 筛选后保存最佳模型;
-5. `node_update_fsm_matrix`:复用历史 motif,仅在新数据上更新 FSM 转移矩阵;
-6. `node_oos_inference_monthly`:使用 `FSMPredictor` 输出样本外打分 Parquet。
-
-结果默认写入 `result/fsm/{models,features,scores}/`。
-
-### 4.7 启动可视化
-
-- **Streamlit 应用(当前不可用)**:
-  ```bash
-  streamlit run bt_studio/visual/app.py
-  ```
-  该文件存在导入错误(`from plot import Plot` 及不存在的 `plot_from_integrated_df`)。
-
-- **Bokeh 独立绘图**:
-  ```bash
-  python bt_studio/visual/bkh/plot.py
-  # 或
-  python tests/test_plot.py
-  ```
-  两者均依赖本地 parquet 路径。
-
-- **Matplotlib 策略绘图**:
-  ```python
-  from bt_studio.visual.mpl.plot import Plot
-  p = Plot()
-  figs = p.plot(strategy)
-  p.show()
-  ```
-
-### 4.8 测试
-
-当前未配置测试运行器,也无 `pytest.ini`/`[tool.pytest.ini_options]`/CI 配置。
-
-```bash
-# 可手动安装 pytest(已通过传递依赖存在于 poetry.lock)后运行:
-poetry run pytest tests/
-```
-
-但现有 `tests/` 内容基本不是有效测试:
-
-- `tests/test.py`:仅加载两个硬编码 parquet 并打印行数/日期,无断言。
-- `tests/test_plot.py`:是 `bt_studio/visual/bkh/plot.py` 的可执行脚本副本。
-- `tests/test_prefect_fsm.py`:7 行,引用不存在的 `bt_studio.pipeline.dags.fsm`,且配置占位符语法无效。
-
-### 4.9 Airflow 环境初始化(如使用)
-
-```bash
-export AIRFLOW_HOME=$(pwd)/airflow_home
-export PYTHONPATH=$(pwd)
-export AIRFLOW__CORE__DAGS_FOLDER=$(pwd)/bt_studio/pipeline/dags
-export AIRFLOW__CORE__LOAD_EXAMPLES=False
-poetry run airflow db migrate
-```
-
-> 注意:`bt_studio/pipeline/dags/` 目录在当前仓库中不存在。
+- 算子唯一注册于 `compiler/ops.py::SAFE_OPS`(TA-Lib 桥接算子由插件注入),
+  prompt 的算子清单**从注册表动态渲染**,不允许手抄名单;
+- 单棵 AST 内**禁止跨族嵌套**:时序族(按 sid 分区)与截面族(按 day×bar
+  分区)算子互相包裹会被 `_family_nesting_violation` 拒绝(polars 跨分区
+  窗口嵌套会静默输出全 null);跨族组合唯一合法方式是 recipe 分步
+  (时序在前、截面最后);
+- `tests/agent/test_prompt_examples.py` 锁定 prompt 范例与编译器的一致性:
+  改 prompt 范例或编译器约束,先跑该文件。
 
 ---
 
-## 5. 运行时与流水线架构
+## 5. 开发约定
 
-### 5.1 数据流
-
-```
-外部 MDAPI(bt_sdk/bt_protocol)
-        |
-        v
-prepare_macro() / prepare_tick()      # pipeline/preprocess/macro.py
-        |
-        v
-universe_sample()                     # pipeline/preprocess/sample.py
-        |
-        v
-build_ofi()                           # pipeline/features/ofi.py
-        |
-        v
-build_fsm_panel()                     # pipeline/preprocess/panel.py
-        |
-        +-- 训练 ----------------------------------+
-        |                                         |
-        v                                         v
-discover_fsm_pattern()              evaluate_and_build_fsm()
-# pipeline/patterns/pattern.py      # pipeline/patterns/fsm.py
-        |                                         |
-        +---> stumpy/DTW 候选 motif               +---> FSM 矩阵 + bin_weights + p-value + score
-        |                                         |
-        +-----------------------------------------+
-                                                      |
-                                              metrics.pareto / fanova
-                                                      |
-                                              模型 checkpoint(pickle)
-                                                      |
-                                              FSMPredictor.predict()
-                                              # pipeline/inference/predict.py
-```
-
-### 5.2 关键配置字典
-
-#### `common_config`(跨模块通用)
-
-| Key | 含义 |
-|-----|------|
-| `start_date`, `end_date` | 研究日期范围 |
-| `benchmark` | 基准指数代码 |
-| `dtw_window_frac` | DTW Sakoe-Chiba band 占 motif 长度比例 |
-| `stats_windows` | 前向收益窗口,如 `[1, 2, 3]` |
-| `decay` | 轨迹 decay 权重半衰期 |
-| `ranking_window` | 宏观状态分位数滚动窗口 |
-| `ranking_ratio` | 收益四分位切割比例 |
-| `exclude_bars` | 尾端屏蔽 bar 数,防止 lookahead |
-| `days_since_ipo` | 上市时间过滤阈值 |
-| `alternative` | MWU 检验方向:`"greater"` / `"less"` / `"two-sided"` |
-| `win_rate` | HPO 评分硬阈值 |
-| `max_points` | `stumpy` 采样预算,默认 20000 |
-
-#### `tune_config`(Optuna 搜索)
-
-| Key | 含义 |
-|-----|------|
-| `cross_days` | 每条曲线拼接的天数 |
-| `motif_minutes` | motif 长度(分钟) |
-| `downsample` | 降采样因子 |
-| `threshold_r` | DTW 相似度阈值 |
-| `m` | 派生:`motif_minutes // downsample` |
-| `threshold_d` | 派生:`sqrt(2*m*(1-threshold_r))` |
-
-### 5.3 模型 checkpoint 结构
-
-```python
-{
-    "config": tune_config,
-    "motif": np.ndarray,
-    "fsm_matrix": {
-        "P(T1|Macro)": list,     # 3 × 4
-        "P(T2|T1)": list,        # 4 × 4
-        "P(T3|T2)": list,        # 4 × 4
-        "bin_weights": {window: [w0, w1, w2, w3]}
-    }
-}
-```
-
-### 5.4 插件 / RPC
-
-- `zmq_svr.py`:ZMQ ROUTER→DEALER 代理,带工作池与连接统计;
-- `tcp_client.pyx` / `zmq_client.pyx`:Cython 异步客户端,使用 `uvloop`、PyArrow IPC 流和 `reactivex` subjects;
-- 这两个 `.pyx` 文件未在 `pyproject.toml` 中声明构建配置,需要外部 Cython 构建步骤或手动编译。
+- Poetry 管理依赖;不手改 `poetry.lock`,用 `poetry add/lock`。
+- 优先 Polars LazyFrame;`group_by().agg()` 内列表列必须 `sort_by` 保序。
+- 配置走 `common_config`/`tune_config` 字典,路径一律读 `constant.py`,
+  禁止在节点里硬编码输出目录(应 `common_config.get("_xxx", 模块常量)`)。
+- 改 `pipeline/patterns/` 的 FSM 逻辑时同步检查 `pipeline/inference/predict.py`。
+- 注释清晰一致，标识符英文。
+- 涉及随机性的新增代码:显式 `np.random.RandomState(seed)`/`default_rng(seed)`,
+  不要依赖全局 numpy 状态(测试套件已按可复现设计)。
 
 ---
 
-## 6. 安全与敏感信息注意事项
+## 6. 安全与敏感信息
 
-- `.env` 文件存在且被系统标记为敏感文件,不要将其内容提交或打印到日志;
-- `docker-compose.yml` 中硬编码了数据库密码(`quant_password`、`yourTopSecretPassword`),仅适用于本地开发;
-- `tune_train.py` 硬编码 `MLFLOW_TRACKING_URI=http://127.0.0.1:5001`;
-- 多处测试文件与可视化脚本包含本地绝对路径或硬编码文件名,不具可移植性;
-- 当前代码未对 RPC 输入、Parquet 路径、反序列化对象做输入校验,生产环境需补充;
-- 项目使用 GPL v3 许可证(见 `LICENSE`)。
-
----
-
-## 7. 开发约定清单
-
-- 使用 **Poetry** 管理依赖;不要直接修改 `poetry.lock`,应通过 `poetry add/lock` 更新。
-- 优先使用 **Polars LazyFrame**;需要在 `collect()` 时考虑 `engine="streaming"`。
-- 配置通过 `common_config` / `tune_config` 字典传递,避免硬编码阈值。
-- 修改 `pipeline/patterns/` 中的 FSM 逻辑时,需同时检查 `pipeline/inference/predict.py` 与 `contrib/` 中对应的多维实现是否同步。
-- 新增 Cython 模块时,需要在构建系统中补充 `setup.py` 或 `pyproject.toml` 的 build-ext 配置;当前 `.pyx` 文件无自动构建。
-- 注释以中文为主,保持与现有代码一致。
+- `.env` 是敏感文件:**不要提交、不要打印其内容**;
+- `docker-compose.yml` 通过环境变量注入数据库密码，生产请勿使用弱口令;
+- 生产 API 必须显式配置 `BT_STUDIO_API_TOKEN` 与 `BT_STUDIO_CORS_ORIGINS`(默认已收紧为 localhost);
+  pending `dag` 仅允许 `DAGS_DIR` basename 白名单,绝对路径会被隔离为 `.invalid`;
+- RPC 输入、Parquet 路径、反序列化对象仍需按零信任对待;result 卷生产建议防写/签名 manifest;
+- 项目采用 GPL v3 许可证(见 `LICENSE`)。
 
 ---
 
-## 8. 已知问题与注意事项
+## 7. 已知问题与历史修复记录
 
-1. **README.md 过期且末尾损坏**:`README.md` 第 167–193 行混入了一段 Python 注释(来自 `tune_train.py` 或类似文件),且描述的目录结构(如 `pipeline/tune/`、`contrib/preprocess.py`)与当前文件树不符。
-2. **`bt_studio/tune_train.py` 是当前工作入口**,但为未提交修改状态(`git status` 显示 `M`),且代码中大量 Prefect `@task`/`@flow` 装饰器被注释掉。
-3. **`pipeline/inference/predict.py` 中 `_calculate_fsm_score` 重复定义**:第一次定义存在 `stats_windows` 未定义及 `bin_weights` 索引错误,第二次定义覆盖第一次,但需清理。**(已修复:删除重复实现、补充 `calculate_decay_weights` 导入、`bin_weights` 保持 dict 类型。)**
-4. **`contrib/` 多维实现当前不可导入**:存在多处导入错误、未定义变量(如 `search_config`、`sample_size`、`.m_astc` 等)。
-5. **`visual/app.py` 损坏**:引用不存在的函数与类。
-6. **`tests/test_prefect_fsm.py` 损坏**:引用不存在的 `bt_studio.pipeline.dags.fsm`。
-7. **`_version.py` 末尾混入无关代码**:不可作为版本工具使用。
-8. **单元测试覆盖不足**:核心 FSM 数学、DTW、OFI 等已有初步 pytest 覆盖(见 `tests/test_pipeline.py`),ZMQ 插件等仍无测试。
-9. **Docker Compose 配置不一致**:`prefect-server` 中的 Postgres 密码与 `postgres` 服务环境变量不匹配。
-10. **`tune_train.py` 模型 checkpoint 曾缺少 `m` / `threshold_d`**:`node_tune_monthly` 从 Ray Tune 结果提取的 `best_config` 原本只含搜索空间原始参数,导致 `FSMPredictor` / `build_fsm_panel` 在 OOS 阶段 KeyError。**(已修复:保存前补全派生参数;同时增加 `warmup_paths` 为空保护。)**
+1. ~~`tests/tune/test_hpo_full_chain.py` 全量套件低概率抖动~~ **已修复 (2026-08)**。
+   根因: `list(set(sids))` 的 set 迭代序受 `PYTHONHASHSEED` 逐进程随机化 →
+   tick 帧 concat 顺序 → 特征 parquet 行序 → `prepare_curves` 按行序 vstack
+   曲线 → stumpy 输入排列变化 → 同一 trial 分数逐进程漂移 (20.1~21.9),
+   离散翻转被塌陷门控 (1.5×IQR) 边界放大为 `models_produced==[]` 级联失败。
+   修复: 三处规范化——`tune.py` 与测试 mock 改用 `dict.fromkeys` 保序去重,
+   `pipeline/patterns/pattern.py` 在 collect 后 `sort(["day","sid"])` 规范行序。
+   修复后 collapse-first ×6 / 单文件 ×3 / 全量 ×2 全绿, 且 trial 分数跨进程
+   bit-identical。
 
----
+## 8. 性能与资源 (2026-10)
 
-## 9. 推荐的路径
+- **内存**: prepare_tick 分批订阅 (TICK_BATCH_SIDS, 单月×批), 月包缓存消化全量 Tick; POLARS/NUMBA/OMP=1 单线程确定性 + 防 Mach 风暴。
+- **CPU**: stumpy/numba workqueue 非线程安全 —— 窗口内串行, 并行走窗口级进程池 (eval_procs); DTW 线程预算单一权威 resolve_dtw_workers (显式注入 > ray 配额 > 满核)。
+- **磁盘**: 月度 PIT parquet 严格缓存 (缺失月才 RPC); 消费者剪枝经 dep-term 绑定 (decay/oos 复用 train 月份特征文件)。
 
-1. 阅读 `README.md` 
-2. 按顺序阅读核心流水线:
-   - `bt_studio/pipeline/preprocess/macro.py`
-   - `bt_studio/pipeline/preprocess/sample.py`
-   - `bt_studio/pipeline/features/ofi.py`
-   - `bt_studio/pipeline/preprocess/panel.py`
-   - `bt_studio/pipeline/patterns/astc.py`、`pattern.py`、`fsm.py`
-   - `bt_studio/pipeline/inference/predict.py`
-   - `bt_studio/pipeline/metrics/*.py`
-3. 阅读 `bt_studio/tune_train.py` 了解 WFO 编排。
-4. 在本地启动 Docker Compose 与 Ray,再运行 `poetry run python bt_studio/tune_train.py`。
-5. 可视化部分优先使用 `bt_studio/visual/bkh/plot.py` 或 `bt_studio/visual/vis.py`;`app.py` 需要修复后才能使用。

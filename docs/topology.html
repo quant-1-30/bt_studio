@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>bt_studio 拓扑 · 模块视图 / 模块内 DAG</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:100%; height:100%; overflow:hidden; background:#0d1117; color:#c9d1d9;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+#app { display:flex; flex-direction:column; height:100%; }
+header { display:flex; align-items:center; gap:12px; padding:8px 14px; background:#161b22;
+  border-bottom:1px solid #30363d; flex-wrap:wrap; }
+header h1 { font-size:15px; color:#58a6ff; font-weight:600; white-space:nowrap; }
+#bc { font-size:12px; color:#8b949e; white-space:nowrap; }
+#bc .seg { cursor:pointer; }
+#bc .seg:hover { color:#58a6ff; }
+#bc .cur { color:#58a6ff; cursor:default; }
+#backBtn { display:none; font-size:11px; padding:3px 10px; border:1px solid #30363d; border-radius:6px;
+  background:#21262d; color:#c9d1d9; cursor:pointer; }
+#backBtn:hover { border-color:#58a6ff; }
+.toolbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-left:auto; }
+.fbtn { font-size:11px; padding:3px 9px; border:1px solid #30363d; border-radius:11px;
+  background:#0d1117; color:#8b949e; cursor:pointer; user-select:none; }
+.fbtn.on { color:#0d1117; font-weight:600; }
+.fbtn:hover { border-color:#58a6ff; }
+.zbtn { font-size:12px; width:26px; height:26px; border:1px solid #30363d; border-radius:6px;
+  background:#21262d; color:#c9d1d9; cursor:pointer; }
+.zbtn:hover { border-color:#58a6ff; }
+#search { font-size:12px; padding:4px 8px; width:150px; background:#0d1117; color:#c9d1d9;
+  border:1px solid #30363d; border-radius:6px; outline:none; }
+#search:focus { border-color:#58a6ff; }
+#stage { flex:1; position:relative; overflow:hidden; cursor:grab; }
+#stage.panning { cursor:grabbing; }
+svg { display:block; }
+#gworld { transform-origin:0 0; }
+.lane-band { fill:#10161f; stroke:#21262d; stroke-width:1; }
+.lane-band.alt { fill:#0d1117; }
+.lane-label { fill:#8b949e; font-size:12px; font-weight:600; }
+.modbox { fill:#161b22; stroke:#3d444d; stroke-width:1.4; cursor:pointer; }
+.modbox:hover { stroke:#58a6ff; }
+.modbox.hl { stroke:#58a6ff; stroke-width:2.2; }
+.modbox.dim { opacity:0.14; }
+.mtitle { fill:#e6edf3; font-size:13px; font-weight:700; cursor:pointer; }
+.mfile { fill:#768390; font-size:9.5px; cursor:pointer; }
+.mcount { fill:#58a6ff; font-size:10px; font-family:ui-monospace,Menlo,monospace; cursor:pointer; }
+.edge { fill:none; stroke-width:1.6; opacity:0.8; }
+.edge.control { stroke:#58a6ff; }
+.edge.data { stroke:#7ee787; }
+.edge.spool { stroke:#d29922; stroke-dasharray:7 4; }
+.edge.cache { stroke:#bc8cff; stroke-dasharray:2 4; }
+.edge.rpc { stroke:#ff7b72; stroke-dasharray:10 3 2 3; }
+.edge.hl { stroke-width:3; opacity:1; }
+#gworld.showinfra .edge.infra { opacity:.8; stroke-width:1.5; }
+#gworld.showinfra .elabel.infra { opacity:.9; }
+.modbox.on { stroke:#d29922; stroke-width:2; }
+.edge.infra { opacity:0.32; stroke-width:1.1; }
+.edge.dim { opacity:0.06; }
+.edge.hidden { display:none; }
+.elabel { font-size:9.5px; fill:#8b949e; paint-order:stroke; stroke:#0d1117; stroke-width:3px; pointer-events:none; }
+.elabel.hl { fill:#e6edf3; }
+.elabel.infra { opacity:0.45; }
+.elabel.dim { opacity:0.08; }
+.elabel.hidden { display:none; }
+.subnode rect { fill:#1c2128; stroke:#3d444d; stroke-width:1.1; cursor:pointer; }
+.subnode:hover rect { stroke:#58a6ff; }
+.subnode.hl rect { stroke:#58a6ff; stroke-width:2; }
+.subnode.dim { opacity:0.15; }
+.subnode text { fill:#9ecbff; font-size:11.5px; font-family:ui-monospace,Menlo,monospace; pointer-events:none; }
+.subnode .sd { fill:#768390; font-size:9px; }
+.subhead { fill:#e6edf3; font-size:14px; font-weight:700; }
+.subsub { fill:#768390; font-size:10.5px; }
+.grouplbl { fill:#8b949e; font-size:11px; font-weight:600; letter-spacing:1px; }
+.portbox { cursor: pointer; }
+.portbox rect { fill:#0d1117; stroke:#30363d; stroke-dasharray:4 3; stroke-width:1.1; rx:6; }
+.portbox text { fill:#d29922; font-size:10px; font-family:ui-monospace,Menlo,monospace; }
+.portbox.hl rect { stroke:#d29922; }
+.portbox.dim { opacity:0.15; }
+#panel { position:absolute; top:10px; right:10px; width:310px; max-height:calc(100% - 20px);
+  overflow-y:auto; background:#161b22ee; border:1px solid #30363d; border-radius:10px;
+  padding:14px; font-size:12px; display:none; }
+#panel h3 { color:#58a6ff; font-size:13px; margin-bottom:2px; word-break:break-all; }
+#panel .pf { color:#768390; font-size:10.5px; font-family:ui-monospace,Menlo,monospace; margin-bottom:8px; }
+#panel .pd { color:#c9d1d9; line-height:1.55; margin-bottom:8px; }
+#panel .sec { color:#8b949e; font-size:10.5px; margin:8px 0 3px; border-top:1px solid #21262d; padding-top:7px; }
+#panel .rel { color:#9ecbff; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; line-height:1.7; }
+#panel .close { position:absolute; top:8px; right:10px; color:#8b949e; cursor:pointer; font-size:14px; }
+#legend { position:absolute; left:10px; bottom:10px; background:#161b22dd; border:1px solid #30363d;
+  border-radius:8px; padding:8px 12px; font-size:10.5px; color:#8b949e; }
+#legend .li { display:flex; align-items:center; gap:7px; margin:3px 0; }
+#legend .sw { width:26px; height:0; border-top:2.5px solid; }
+#hint { position:absolute; left:10px; top:10px; background:#161b22cc; border:1px solid #30363d;
+  border-radius:8px; padding:6px 10px; font-size:10.5px; color:#768390; }
+#badge { position:absolute; right:10px; bottom:10px; font-size:10px; color:#f85149; display:none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>bt_studio 拓扑</h1>
+    <span id="bc"><span class="seg cur" id="bcRoot">维度一 · 模块关系</span></span>
+    <button id="backBtn">← 返回模块视图</button>
+    <div class="toolbar">
+      <input id="search" type="text" placeholder="搜索…">
+      <button class="fbtn on" data-t="control" style="background:#58a6ff">控制流</button>
+      <button class="fbtn on" data-t="data" style="background:#7ee787">数据流</button>
+      <button class="fbtn on" data-t="spool" style="background:#d29922">落盘契约</button>
+      <button class="fbtn on" data-t="cache" style="background:#bc8cff">缓存</button>
+      <button class="fbtn on" data-t="rpc" style="background:#ff7b72">RPC</button>
+      <button class="fbtn" id="infraBtn" style="opacity:.35;color:#d29922;border-color:#d29922">通用连线</button>
+      <button class="zbtn" id="zoomOut">−</button>
+      <button class="zbtn" id="zoomIn">+</button>
+      <button class="zbtn" id="fitBtn" style="width:auto;padding:0 7px;font-size:10.5px">适配</button>
+    </div>
+  </header>
+  <div id="stage">
+    <svg id="svg"><g id="gworld"><g id="gmod"></g><g id="gsub" style="display:none"></g></g></svg>
+    <div id="hint">维度一：模块间逻辑关系 · 点击模块进入维度二（模块内 DAG）</div>
+    <div id="legend">
+      <div class="li"><span class="sw" style="border-color:#58a6ff"></span>控制流（调用/编排）</div>
+      <div class="li"><span class="sw" style="border-color:#7ee787"></span>数据流（帧/矩阵/结果）</div>
+      <div class="li"><span class="sw" style="border-color:#d29922;border-top-style:dashed"></span>落盘契约（spool/parquet/pkl）</div>
+      <div class="li"><span class="sw" style="border-color:#bc8cff;border-top-style:dotted"></span>缓存（命中/写入）</div>
+      <div class="li"><span class="sw" style="border-color:#ff7b72"></span>RPC（行情订阅）</div>
+      <div class="li" style="margin-top:5px;color:#d29922">┄ 虚线框 = 外部模块端口（维度二）</div>
+      <div class="li" style="color:#8b949e">侧弧 = 回路/引用/跨层长边（矩阵区仅相邻层短边）· infra 弱化</div>
+      <div class="li" style="color:#8b949e">WFO 执行（组）= tune+pipeline 全家桶 · 点击进组 DAG · 可再下钻节点级</div>
+    </div>
+    <div id="panel"><span class="close" id="pclose">✕</span><div id="pbody"></div></div>
+    <div id="badge"></div>
+  </div>
+</div>
+<script>
+"use strict";
+var GRAPH = {
+lanes: [
+ {id:"L1", name:"L1 决策层 · Decision"},
+ {id:"L2", name:"L2 编译层 · Compile"},
+ {id:"L3", name:"L3 评估层 · Evaluate (Stage1/2)"},
+ {id:"L4", name:"L4 触发层 · Trigger"},
+ {id:"L5", name:"L5 引擎层 · Engine"},
+ {id:"L6", name:"L6 执行层 · Execute (HPO)"},
+ {id:"L7", name:"L7 挖掘核 · Mining Core"},
+ {id:"L8", name:"L8 推断层 · Inference"},
+ {id:"L9", name:"L9 存储与契约 · Storage & API"}
+],
+components: [
+ {id:"vendors", lane:"L1", x:30, title:"LLM 供应商", file:"agent/vendors/",
+  nodes:[
+   {id:"openai", label:"openai_compatible", desc:"OpenAI 兼容协议适配, 生成候选因子 JSON"},
+   {id:"google", label:"google", desc:"Gemini/Google 原生适配"},
+   {id:"dummy", label:"dummy", desc:"哑供应商, 测试注入点"},
+   {id:"metering", label:"metering", desc:"用量计量·预算·台账·文件锁"}]},
+ {id:"prompt", lane:"L1", x:370, title:"提示词", file:"agent/prompt.py",
+  nodes:[
+   {id:"sys_prompt", label:"build_system_prompt", desc:"系统提示词, 算子清单由 SAFE_OPS 注册表动态渲染"},
+   {id:"rl_ctx", label:"build_rl_context_prompt", desc:"ReplayBuffer 经验注入 RL 上下文"}]},
+ {id:"flywheel", lane:"L1", x:700, title:"RL 飞轮", file:"agent/flywheel.py",
+  nodes:[
+   {id:"step_loop", label:"step 循环", desc:"LLM 调用 → JSON 三级解析 → Harness 评估"},
+   {id:"replay_buf", label:"ReplayBuffer", desc:"成功 Top-K 去重 / 失败 O(1) FIFO"},
+   {id:"resume", label:"pending/state 恢复", desc:"步号+配置指纹双校验断点续跑"},
+   {id:"viable", label:"viable_features 导出", desc:"胜出特征清单, warm-start 种子"},
+   {id:"spool_w", label:"spool 落盘", desc:"胜者写 LLM_PENDING_DIR 契约"}]},
+ {id:"compiler", lane:"L2", x:370, title:"AST 编译器", file:"compiler/ast.py",
+  nodes:[
+   {id:"canon", label:"canonicalize_ast", desc:"默认参数回填 / kwargs 按名吸收 / 数值归一"},
+   {id:"causal", label:"因果守卫", desc:"负窗口(args/kwargs)/center/bfill/列名黑名单"},
+   {id:"family", label:"跨族守卫", desc:"时序族×截面族互相包裹拒绝(polars 跨分区静默 null)"},
+   {id:"compile_n", label:"compile_ast/recipe", desc:"JSON AST → Polars 表达式, let-binding 改写"},
+   {id:"fp", label:"ast_fingerprint", desc:"规范化后 SHA-256 前 12 位, 特征目录键"}]},
+ {id:"opsreg", lane:"L2", x:700, title:"算子注册表", file:"compiler/ops.py + plugins/",
+  nodes:[
+   {id:"builtin", label:"SAFE_OPS 内置算子", desc:"arity (min,max) 区间 + 缺省窗口 + family 标注"},
+   {id:"talib", label:"talib 桥接", desc:"160+ C 函数白名单, map_batches 保持惰性链"}]},
+ {id:"harness", lane:"L3", x:370, title:"两段式评估", file:"agent/harness.py",
+  nodes:[
+   {id:"compile_asts", label:"_compile_asts", desc:"多候选编译挂载, 命名空间隔离防覆盖"},
+   {id:"stage1", label:"Stage1 物理预筛", desc:"std/null-ratio 流式聚合过滤"},
+   {id:"persist", label:"Stage1.5 落盘", desc:"幸存特征按月 parquet + 磁盘水位守卫"},
+   {id:"s2ser", label:"Stage2 串行", desc:"逐月回放, 数学不可达早停"},
+   {id:"s2par", label:"Stage2 进程池", desc:"月份间并行, 批间剪枝, 与串行等价"},
+   {id:"evfeat", label:"evaluate_feature", desc:"单窗口单特征评估(panel_lf 单路径)"},
+   {id:"evgrid", label:"eval_feature_on_grid", desc:"离散网格遍历, 命中即短路"},
+   {id:"agg", label:"aggregate 判定", desc:"pass-ratio ≥ 0.6 聚合"},
+   {id:"stage3", label:"stage3 回调", desc:"胜者 → submit_dag_task 触发 HPO"}]},
+ {id:"evalcache", lane:"L3", x:700, title:"评估缓存", file:"result/cache/evals/v2",
+  nodes:[
+   {id:"dfp", label:"data_fp 指纹", desc:"scope+dret 签名+RAW_PIT_VERSION"},
+   {id:"ghash", label:"grid_hash", desc:"EVAL_SEMANTIC_KEYS + 网格语义键"},
+   {id:"cio", label:"缓存读写", desc:"原子写 json, 键不含门控值"}]},
+ {id:"taskman", lane:"L4", x:370, title:"异步任务管理", file:"engine/task_manager.py",
+  nodes:[
+   {id:"intake", label:"intake_loop", desc:"5s 扫描 LLM_PENDING_DIR"},
+   {id:"whitelist", label:"DAG 白名单", desc:"basename 校验, 绝对路径拒绝→.invalid"},
+   {id:"fifo", label:"FIFO 单 worker", desc:"串行队列 = Ray 集群独占"},
+   {id:"treg", label:"TaskRegistry", desc:"状态机 + load shedding"},
+   {id:"snap", label:"snapshot", desc:"统一状态查询入口"}]},
+ {id:"dags", lane:"L4", x:700, title:"DAG 声明", file:"dags/wfo_production.xml · wfo_hpo.xml",
+  nodes:[
+   {id:"dag_prod", label:"wfo_production", desc:"生产全量 WFO, 条件依赖 ?decay/?!decay 分支"},
+   {id:"dag_hpo", label:"wfo_hpo", desc:"单窗口强制 HPO, last-trainable, agent 评估用"}]},
+ {id:"parser", lane:"L5", x:30, title:"DAG 解析", file:"engine/parser.py",
+  nodes:[
+   {id:"pdag", label:"parse_dag", desc:"XML → MultiDiGraph, deps 边/output 属性"},
+   {id:"pval", label:"环/依赖校验", desc:"自依赖/未知节点/循环检测 fail-fast"},
+   {id:"plist", label:"list_dags", desc:"DAGS_DIR 清单, 白名单数据源"}]},
+ {id:"executor", lane:"L5", x:370, title:"执行引擎", file:"engine/executor.py",
+  nodes:[
+   {id:"nreg", label:"NODE_REGISTRY", desc:"7 个 tune 节点函数注册表"},
+   {id:"topo", label:"拓扑循环", desc:"deps_satisfied/bind_dep_keys 条件依赖求值"},
+   {id:"invk", label:"签名注入", desc:"inspect.signature 按 ctx 参数名注入"},
+   {id:"win", label:"窗口切分/水位", desc:"train/oos/prev_oos/warmup + last_model_id 续跑"},
+   {id:"tdirs", label:"task_id 分桶", desc:"attach_task_dirs → artifacts 隔离"}]},
+ {id:"ctx", lane:"L5", x:700, grp:"wfo", title:"运行时上下文", file:"engine/ctx.py",
+  nodes:[
+   {id:"ray", label:"ensure_ray", desc:"双检锁单例, atexit 关闭, executor 去 ray 化"},
+   {id:"plat", label:"平台并发预算", desc:"HPO_NUM_WORKERS/EVAL_PROCS/TICK_BATCH_SIDS"}]},
+ {id:"tune", lane:"L6", x:180, grp:"wfo", title:"WFO 执行节点", file:"tune.py (7 节点)",
+  nodes:[
+   {id:"n_macro", label:"node_prepare_macro", desc:"宇宙/日线缓存, warmup 回看"},
+   {id:"n_extract", label:"node_extract_feature_monthly", desc:"tick→特征编译→月度 PIT parquet"},
+   {id:"n_decay", label:"node_check_decay_monthly", desc:"旧模型 OOS 健康检查→bool 门控"},
+   {id:"n_train", label:"node_prepare_train", desc:"全窗口 Arrow 物化 + ray.put 共享"},
+   {id:"n_tune", label:"node_tune_monthly", desc:"Ray Tune HPO 编排 + 统计门控选模"},
+   {id:"n_work", label:"trainable_fsm_worker", desc:"每 trial: 曲线→挖掘→打分上报"},
+   {id:"n_update", label:"node_update_fsm_matrix", desc:"继承旧 motif 重估转移矩阵"},
+   {id:"n_oos", label:"node_oos_inference_monthly", desc:"OOS 推断与打分落盘"}]},
+ {id:"hpo", lane:"L6", x:700, grp:"wfo", title:"HPO 选模/诊断", file:"utils/diagnostics/ + metrics/",
+  nodes:[
+   {id:"tpe", label:"Optuna TPE", desc:"种子固定, warm-start points_to_evaluate"},
+   {id:"colchk", label:"塌陷检测", desc:"1.5×IQR 单因子扰动邻域"},
+   {id:"fpar", label:"fANOVA+Pareto", desc:"高原校验防孤立尖刺, 多目标选模"},
+   {id:"mlf", label:"MLflow 记录", desc:"trial 参数/指标追踪"}]},
+ {id:"prep", lane:"L7", x:30, grp:"wfo", title:"预处理", file:"pipeline/preprocess/",
+  nodes:[
+   {id:"tick", label:"prepare tick", desc:"分批订阅→月包缓存, UTC+8 归一"},
+   {id:"univ", label:"universe_sample", desc:"PIT: T 月筛选→T+1 生效, 活跃/次新/流动性"},
+   {id:"spanel", label:"build_static_panel", desc:"T+1 前瞻收益标签 raw_*/intra_*"},
+   {id:"curves", label:"extract_curves", desc:"lag_0 降采样+因果 ffill+有效比过滤"},
+   {id:"mstate", label:"compute_macro_states", desc:"前值 shift(1)+滚动分位, 三态宏观"}]},
+ {id:"pats", lane:"L7", x:370, grp:"wfo", title:"形态挖掘", file:"pipeline/patterns/",
+  nodes:[
+   {id:"possel", label:"正样本选样", desc:"rank≥0.70 & raw>0 & 动量守卫, 上限 topk×30"},
+   {id:"stumpy", label:"stumpy Top-K", desc:"正样本池矩阵轮廓, 排除半径去重"},
+   {id:"dtwb", label:"compute_dtw_distances", desc:"Numba nogil 分块线程, LB_Keogh 剪枝"},
+   {id:"bdtw", label:"_banded_dtw_sq", desc:"带限 DTW+行早停, 与 dtaidistance 等价"},
+   {id:"fsmev", label:"evaluate_and_build_fsm", desc:"阈值触发+全集无偏门控"},
+   {id:"fsmx", label:"extract_fsm_matrix", desc:"Dirichlet 平滑+经验贝叶斯收缩"}]},
+ {id:"mets", lane:"L7", x:700, grp:"wfo", title:"度量", file:"pipeline/metrics/",
+  nodes:[
+   {id:"gates", label:"gates 门控", desc:"按日配对 Wilcoxon + 经济超额硬门"},
+   {id:"score", label:"score 复合分", desc:"超额/胜率/p值软饱和 - k/√n"},
+   {id:"fanm", label:"fANOVA", desc:"超参重要性分析"},
+   {id:"parm", label:"Pareto", desc:"多目标前沿"}]},
+ {id:"pred", lane:"L8", x:370, grp:"wfo", title:"生产推断", file:"pipeline/inference/predict.py",
+  nodes:[
+   {id:"fsmP", label:"FSMPredictor", desc:"DTW 距离≤阈值触发"},
+   {id:"mscore", label:"宏观态期望收益", desc:"P 链式传播×折扣权重预计算"},
+   {id:"rank", label:"fsm_score 排序", desc:"期望收益×(1-d/threshold)"},
+   {id:"sio", label:"scores 落盘", desc:"按月过滤写 _tune_score_dir"}]},
+ {id:"store", lane:"L9", x:30, infra:1, title:"存储与契约", file:"result/ + constant.py",
+  nodes:[
+   {id:"pspool", label:"LLM_PENDING_DIR", desc:"pending spool: .json → .consumed/.invalid"},
+   {id:"fdir", label:"FEATURE_DIR/{fp12}", desc:"内容寻址月度特征 parquet"},
+   {id:"bcache", label:"cache/bars/v2", desc:"分钟 PIT 月包缓存, 缺失才 RPC"},
+   {id:"ecache", label:"cache/evals/v2", desc:"EvalResult 窗口缓存"},
+   {id:"arts", label:"artifacts/{task_id}", desc:"models/scores/collapse 三产物桶"},
+   {id:"mpkl", label:"model pkl+manifest", desc:"原子落盘 + HMAC 完整性签名"}]},
+ {id:"apis", lane:"L9", x:700, title:"服务", file:"plugins/api_server/ · monitor/",
+  nodes:[
+   {id:"rest", label:"REST API", desc:"任务/产物查询, token+CORS 收紧"},
+   {id:"wsw", label:"watcher WS", desc:"实时快照推送"},
+   {id:"mon", label:"monitor 只读索引", desc:"sqlite 索引, 不触发 LLM/tune"}]}
+],
+edges: [
+ {f:"flywheel.step_loop", t:"vendors.openai", ty:"control", lb:"generate()"},
+ {f:"vendors.metering", t:"flywheel.step_loop", ty:"data", lb:"预算/用量"},
+ {f:"prompt.rl_ctx", t:"flywheel.step_loop", ty:"data", lb:"RL 上下文"},
+ {f:"opsreg.builtin", t:"prompt.sys_prompt", ty:"data", lb:"算子清单渲染"},
+ {f:"flywheel.step_loop", t:"harness.compile_asts", ty:"data", lb:"candidate ASTs"},
+ {f:"harness.compile_asts", t:"compiler.compile_n", ty:"control", lb:"compile"},
+ {f:"compiler.compile_n", t:"opsreg.builtin", ty:"data", lb:"SAFE_OPS 查表", ref:1},
+ {f:"compiler.fp", t:"store.fdir", ty:"data", lb:"fp12 目录键"},
+ {f:"harness.stage1", t:"harness.persist", ty:"data", lb:"幸存特征"},
+ {f:"harness.persist", t:"store.fdir", ty:"spool", lb:"月度 parquet"},
+ {f:"harness.s2par", t:"evalcache.dfp", ty:"cache", lb:"缓存键"},
+ {f:"harness.s2ser", t:"evalcache.dfp", ty:"cache", lb:"缓存键"},
+ {f:"evalcache.cio", t:"store.ecache", ty:"cache", lb:"读写"},
+ {f:"harness.evgrid", t:"harness.evfeat", ty:"control", lb:"短路遍历"},
+ {f:"harness.evfeat", t:"pats.possel", ty:"control", lb:"discover_fsm_pattern"},
+ {f:"harness.agg", t:"flywheel.replay_buf", ty:"data", lb:"reward 回灌"},
+ {f:"harness.stage3", t:"taskman.fifo", ty:"control", lb:"submit_dag_task"},
+ {f:"flywheel.spool_w", t:"store.pspool", ty:"spool", lb:"pending/*.json"},
+ {f:"store.pspool", t:"taskman.intake", ty:"spool", lb:"intake 消费"},
+ {f:"dags.dag_prod", t:"parser.pdag", ty:"data", lb:"deps/?cond"},
+ {f:"taskman.intake", t:"parser.pdag", ty:"control", lb:"白名单后解析"},
+ {f:"taskman.fifo", t:"executor.nreg", ty:"control", lb:"run_dag"},
+ {f:"parser.pval", t:"executor.topo", ty:"data", lb:"拓扑序"},
+ {f:"executor.invk", t:"tune.n_macro", ty:"control", lb:"签名注入"},
+ {f:"tune.n_macro", t:"prep.tick", ty:"rpc", lb:"tick 订阅"},
+ {f:"store.bcache", t:"prep.tick", ty:"cache", lb:"月包命中"},
+ {f:"prep.tick", t:"store.bcache", ty:"spool", lb:"缺失月缓存"},
+ {f:"tune.n_macro", t:"prep.univ", ty:"control", lb:"PIT 选样"},
+ {f:"tune.n_extract", t:"compiler.compile_n", ty:"control", lb:"compile_feature_lazy"},
+ {f:"tune.n_extract", t:"store.fdir", ty:"spool", lb:"特征落盘"},
+ {f:"tune.n_decay", t:"store.mpkl", ty:"data", lb:"find_model_path"},
+ {f:"tune.n_decay", t:"pred.fsmP", ty:"control", lb:"旧模型 OOS"},
+ {f:"tune.n_train", t:"ctx.ray", ty:"control", lb:"ray.put 共享"},
+ {f:"tune.n_tune", t:"hpo.tpe", ty:"control", lb:"Optuna 采样"},
+ {f:"tune.n_tune", t:"hpo.mlf", ty:"data", lb:"trial 指标"},
+ {f:"tune.n_work", t:"pats.possel", ty:"control", lb:"每 trial 挖掘"},
+ {f:"hpo.colchk", t:"tune.n_tune", ty:"data", lb:"塌陷 verdict"},
+ {f:"hpo.fpar", t:"tune.n_tune", ty:"data", lb:"best_config"},
+ {f:"tune.n_tune", t:"store.mpkl", ty:"spool", lb:"pkl+manifest"},
+ {f:"tune.n_update", t:"store.mpkl", ty:"data", lb:"继承旧 motif"},
+ {f:"tune.n_oos", t:"pred.fsmP", ty:"control", lb:"FSMPredictor"},
+ {f:"tune.n_oos", t:"store.arts", ty:"spool", lb:"scores 落盘"},
+ {f:"executor.tdirs", t:"store.arts", ty:"spool", lb:"task_id 分桶"},
+ {f:"ctx.plat", t:"tune.n_tune", ty:"data", lb:"并发预算"},
+ {f:"prep.spanel", t:"pats.fsmev", ty:"data", lb:"T+1 标签"},
+ {f:"prep.curves", t:"pats.dtwb", ty:"data", lb:"lag_0 曲线"},
+ {f:"prep.mstate", t:"pats.fsmev", ty:"data", lb:"macro_state"},
+ {f:"pats.possel", t:"pats.stumpy", ty:"control", lb:"正样本池"},
+ {f:"pats.stumpy", t:"pats.dtwb", ty:"data", lb:"Top-K motif"},
+ {f:"pats.dtwb", t:"pats.bdtw", ty:"control", lb:"分块内核"},
+ {f:"pats.fsmev", t:"mets.gates", ty:"data", lb:"Wilcoxon/经济门"},
+ {f:"pats.fsmev", t:"mets.score", ty:"data", lb:"复合分"},
+ {f:"pats.fsmx", t:"pred.mscore", ty:"data", lb:"转移矩阵"},
+ {f:"pred.fsmP", t:"pats.dtwb", ty:"control", lb:"compute_dtw"},
+ {f:"pred.fsmP", t:"prep.mstate", ty:"control", lb:"宏观态"},
+ {f:"pred.rank", t:"store.arts", ty:"spool", lb:"fsm_score"},
+ {f:"apis.rest", t:"taskman.snap", ty:"data", lb:"任务状态"},
+ {f:"apis.mon", t:"store.arts", ty:"data", lb:"只读索引"}
+]
+};
+
+// ---- 模块组: WFO = tune 编排 + pipeline 挖掘核 + ctx/hpo (维度一聚合为单一复合模块) ----
+var GROUPS = { wfo: { title: "WFO 执行", file: "tune.py + pipeline/* · engine/ctx · diagnostics" } };
+var COMPS = {};
+GRAPH.components.forEach(function (c) { COMPS[c.id] = c; });
+function gidOf(cid) { return (COMPS[cid] && COMPS[cid].grp) ? COMPS[cid].grp : cid; }
+
+var SVG_NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, parent) {
+  var e = document.createElementNS(SVG_NS, tag);
+  for (var k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function bounds(x, y, w, h) { return { x: x + w / 2, y: y + h / 2, l: x, r: x + w, t: y, b: y + h }; }
+function bezier(a, b, off) {
+  var x1, y1, x2, y2, cx1, cy1, cx2, cy2;
+  var vert = Math.abs(b.y - a.y) > Math.abs(b.x - a.x) + 20;
+  off = off || 0;
+  if (vert) {
+    var down = b.y > a.y;
+    x1 = a.x + off; y1 = down ? a.b : a.t;
+    x2 = b.x + off; y2 = down ? b.t : b.b;
+    var k = Math.max(30, Math.abs(y2 - y1) / 2);
+    cx1 = x1; cy1 = y1 + (down ? k : -k); cx2 = x2; cy2 = y2 + (down ? -k : k);
+  } else {
+    var right = b.x > a.x;
+    x1 = right ? a.r : a.l; y1 = a.y + off;
+    x2 = right ? b.l : b.r; y2 = b.y + off;
+    var k2 = Math.max(36, Math.abs(x2 - x1) / 2);
+    cx1 = x1 + (right ? k2 : -k2); cy1 = y1; cx2 = x2 + (right ? -k2 : k2); cy2 = y2;
+  }
+  return "M" + x1 + " " + y1 + " C" + cx1 + " " + cy1 + " " + cx2 + " " + cy2 + " " + x2 + " " + y2;
+}
+
+// ============================ 维度一: 模块 DAG ============================
+var MOD_W = 250, MOD_H = 46, COL_GAP = 56, ROW_GAP = 104, LEFT_PAD = 70;
+var gmod, mode = "mod", curSub = null;
+var MODS = {}, MOD_EDGES = [], modW = 0, modH = 0;
+
+function buildModuleView() {
+  gmod = document.getElementById("gmod");
+  var comps = GRAPH.components;
+  var main = comps.filter(function (c) { return !c.infra && !c.grp; });
+  var infras = comps.filter(function (c) { return !!c.infra; });
+  for (var gk in GROUPS) {
+    var gmem = comps.filter(function (c) { return c.grp === gk; });
+    if (!gmem.length) continue;
+    var gflat = [];
+    gmem.forEach(function (m) { gflat = gflat.concat(m.nodes); });
+    main.push({ id: gk, pseudo: true, title: GROUPS[gk].title + "（组）", file: GROUPS[gk].file, nodes: gflat });
+  }
+  var agg = {}, list = [];
+  GRAPH.edges.forEach(function (e) {
+    var fc = gidOf(e.f.split(".")[0]), tc = gidOf(e.t.split(".")[0]);
+    if (fc === tc) return;
+    var k = fc + ">" + tc;
+    if (!agg[k]) { agg[k] = { f: fc, t: tc, ty: e.ty, lb: e.lb, n: 0, back: false, ref: false }; list.push(agg[k]); }
+    agg[k].n++;
+    if (e.ref) agg[k].ref = true;
+  });
+  // DFS 断环: 标记反馈边
+  var color = {};
+  function dfs(u) {
+    color[u] = 1;
+    list.forEach(function (a) {
+      if (a.f !== u || a.ref) return;
+      if (!color[a.t]) dfs(a.t);
+      else if (color[a.t] === 1) a.back = true;
+    });
+    color[u] = 2;
+  }
+  main.forEach(function (c) { if (!color[c.id]) dfs(c.id); });
+  // 长路径分层 (DAG 边; 引用边/infra 边除外)
+  var infraSet = {};
+  infras.forEach(function (c) { infraSet[c.id] = 1; });
+  var dagE = list.filter(function (a) {
+    return !a.back && !a.ref && !infraSet[a.f] && !infraSet[a.t];
+  });
+  var layer = {}, indeg = {}, adj = {};
+  main.forEach(function (c) { layer[c.id] = 0; indeg[c.id] = 0; adj[c.id] = []; });
+  dagE.forEach(function (a) { adj[a.f].push(a.t); indeg[a.t]++; });
+  var q = main.filter(function (c) { return indeg[c.id] === 0; }).map(function (c) { return c.id; });
+  var qi = 0;
+  while (qi < q.length) {
+    var u = q[qi++];
+    adj[u].forEach(function (v) {
+      layer[v] = Math.max(layer[v], layer[u] + 1);
+      if (--indeg[v] === 0) q.push(v);
+    });
+  }
+  // 层内重心排序 (两遍)
+  // 源点下沉: 无入边的模块贴近其最近下游 (缩短边跨度, 避免横穿多层)
+  var moved = true, guard = 0;
+  while (moved && guard++ < 24) {
+    moved = false;
+    main.forEach(function (c) {
+      var hasIn = false, minT = Infinity;
+      dagE.forEach(function (a) {
+        if (a.t === c.id) hasIn = true;
+        if (a.f === c.id) minT = Math.min(minT, layer[a.t]);
+      });
+      if (!hasIn && minT !== Infinity && layer[c.id] < minT - 1) {
+        layer[c.id] = minT - 1; moved = true;
+      }
+    });
+  }
+  var rows = {};
+  main.forEach(function (c) { (rows[layer[c.id]] = rows[layer[c.id]] || []).push(c.id); });
+  var maxL = 0; for (var r in rows) maxL = Math.max(maxL, +r);
+  var order = {};
+  function bary() {
+    for (var L = 1; L <= maxL; L++) {
+      rows[L].sort(function (x, y) {
+        var sx = 0, nx = 0, sy = 0, ny = 0;
+        dagE.forEach(function (a) {
+          if (a.t === x && order[a.f] !== undefined) { sx += order[a.f]; nx++; }
+          if (a.t === y && order[a.f] !== undefined) { sy += order[a.f]; ny++; }
+        });
+        return (nx ? sx / nx : 9e9) - (ny ? sy / ny : 9e9);
+      });
+      rows[L].forEach(function (id, i) { order[id] = i; });
+    }
+    for (var L2 = maxL - 1; L2 >= 0; L2--) {
+      rows[L2].sort(function (x, y) {
+        var sx = 0, nx = 0, sy = 0, ny = 0;
+        dagE.forEach(function (a) {
+          if (a.f === x && order[a.t] !== undefined) { sx += order[a.t]; nx++; }
+          if (a.f === y && order[a.t] !== undefined) { sy += order[a.t]; ny++; }
+        });
+        return (nx ? sx / nx : 9e9) - (ny ? sy / ny : 9e9);
+      });
+      rows[L2].forEach(function (id, i) { order[id] = i; });
+    }
+  }
+  rows[0].forEach(function (id, i) { order[id] = i; });
+  bary(); bary();
+  // 几何 (主流 DAG + 右侧通用组件列 + 侧弧区)
+  var maxRowN = 0;
+  for (var r2 in rows) maxRowN = Math.max(maxRowN, rows[r2].length);
+  var contentW = maxRowN * (MOD_W + COL_GAP) - COL_GAP;
+  var infraX = LEFT_PAD + contentW + 210;
+  var sideBase = infras.length ? infraX + MOD_W + 60 : LEFT_PAD + contentW + 40;
+  var sideN = 0;
+  list.forEach(function (a) {
+    var sp = (layer[a.t] !== undefined && layer[a.f] !== undefined) ? layer[a.t] - layer[a.f] : 9;
+    if (a.back || a.ref || infraSet[a.f] || infraSet[a.t] || sp >= 2) sideN++;
+  });
+  var sideW = 60 + Math.ceil(sideN / 8) * 46 + 150;
+  modW = Math.max(1060, LEFT_PAD + contentW + 360, sideBase + sideW);
+  var mainH = 60 + (maxL + 1) * (MOD_H + ROW_GAP);
+  var infraColH = infras.length ? 64 + infras.length * (MOD_H + 22) + 20 : 0;
+  modH = Math.max(mainH, infraColH + 40);
+  // 层背景
+  for (var L3 = 0; L3 <= maxL; L3++) {
+    el("rect", { x: 10, y: 40 + L3 * (MOD_H + ROW_GAP), width: modW - 20,
+      height: MOD_H + 52, rx: 10, "class": "lane-band" + (L3 % 2 ? " alt" : "") }, gmod);
+    var lt = el("text", { x: 24, y: 58 + L3 * (MOD_H + ROW_GAP), "class": "lane-label" }, gmod);
+    lt.textContent = "层 " + L3 + " · " + rows[L3].length + " 模块";
+  }
+  main.forEach(function (c) {
+    var L = layer[c.id], i = order[c.id], n = rows[L].length;
+    var rowW = n * (MOD_W + COL_GAP) - COL_GAP;
+    var x = LEFT_PAD + (contentW - rowW) / 2 + i * (MOD_W + COL_GAP);
+    var y = 40 + L * (MOD_H + ROW_GAP) + 34;
+    var g = el("g", { "data-c": c.id }, gmod);
+    var box = el("rect", { x: x, y: y, width: MOD_W, height: MOD_H, rx: 10, "class": "modbox" }, g);
+    var ti = el("text", { x: x + 12, y: y + 18, "class": "mtitle" }, g);
+    ti.textContent = c.title;
+    var fi = el("text", { x: x + 12, y: y + 34, "class": "mfile" }, g);
+    fi.textContent = c.file;
+    var ct = el("text", { x: x + MOD_W - 10, y: y + 18, "class": "mcount", "text-anchor": "end" }, g);
+    ct.textContent = c.nodes.length + " 节点";
+    MODS[c.id] = { g: g, box: box, a: bounds(x, y, MOD_W, MOD_H), c: c };
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); openSub(c.id); });
+    g.addEventListener("mouseenter", function () { focusMod(c.id, true); });
+    g.addEventListener("mouseleave", function () { focusMod(c.id, false); });
+  });
+  // 右侧通用组件列 (横切契约/存储, 不参与主流分层)
+  if (infras.length) {
+    el("rect", { x: infraX - 14, y: 40, width: MOD_W + 28, height: infraColH,
+      rx: 10, "class": "lane-band" }, gmod);
+    var gl = el("text", { x: infraX - 4, y: 62, "class": "lane-label" }, gmod);
+    gl.textContent = "通用组件 · 横切";
+    infras.forEach(function (c, k) {
+      var x = infraX, y = 84 + k * (MOD_H + 22);
+      var g = el("g", { "data-c": c.id }, gmod);
+      var box = el("rect", { x: x, y: y, width: MOD_W, height: MOD_H, rx: 10,
+        "class": "modbox", "stroke-dasharray": "5 3" }, g);
+      var ti = el("text", { x: x + 12, y: y + 18, "class": "mtitle" }, g);
+      ti.textContent = c.title;
+      var fi = el("text", { x: x + 12, y: y + 34, "class": "mfile" }, g);
+      fi.textContent = c.file;
+      var ct = el("text", { x: x + MOD_W - 10, y: y + 18, "class": "mcount", "text-anchor": "end" }, g);
+      ct.textContent = c.nodes.length + " 节点";
+      MODS[c.id] = { g: g, box: box, a: bounds(x, y, MOD_W, MOD_H), c: c };
+      g.addEventListener("click", function (ev) { ev.stopPropagation(); setShowInfra(!showInfra); });
+      g.addEventListener("dblclick", function (ev) { ev.stopPropagation(); openSub(c.id); });
+      g.addEventListener("mouseenter", function () { focusMod(c.id, true); });
+      g.addEventListener("mouseleave", function () { focusMod(c.id, false); });
+    });
+  }
+  // 边: 前向边直连, 回路/引用/infra 边右侧弧(infra 弱化)
+  var eg = el("g", {}, gmod);
+  var backIdx = 0;
+  list.forEach(function (a) {
+    var infraE = infraSet[a.f] || infraSet[a.t];
+    var sp = (layer[a.t] !== undefined && layer[a.f] !== undefined) ? layer[a.t] - layer[a.f] : 9;
+    var longE = sp >= 2 && !infraE && !a.back && !a.ref;
+    var pa, lx, ly, side = a.back || a.ref || infraE || sp >= 2;
+    if (!side) {
+      pa = el("path", { d: bezier(MODS[a.f].a, MODS[a.t].a, 0),
+        "class": "edge " + a.ty, "data-ty": a.ty }, eg);
+      lx = (MODS[a.f].a.x + MODS[a.t].a.x) / 2;
+      ly = (MODS[a.f].a.b + MODS[a.t].a.t) / 2;
+    } else {
+      var bowX = sideBase + 36 + (backIdx % 8) * 46;
+      var s = MODS[a.f].a, t = MODS[a.t].a;
+      pa = el("path", {
+        d: "M" + s.r + " " + s.y + " C" + bowX + " " + s.y + " " + bowX + " " + t.y + " " + t.r + " " + t.y,
+        "class": "edge " + a.ty + (infraE ? " infra" : ""), "data-ty": a.ty,
+        "data-infra": infraE ? "1" : "" }, eg);
+      if (!longE) pa.style.strokeDasharray = "3 3";
+      lx = bowX - 6; ly = (s.y + t.y) / 2; backIdx++;
+    }
+    var lt2 = el("text", { x: lx, y: ly,
+      "class": "elabel" + (side && infraE ? " infra" : ""),
+      "text-anchor": side ? "end" : "middle", "data-ty": a.ty,
+      "data-infra": infraE ? "1" : "" }, eg);
+    lt2.textContent = (a.ref ? "引用·" : a.back ? "回路·" : longE ? "跨层·" : "") + a.lb + (a.n > 1 ? " ×" + a.n : "");
+    MOD_EDGES.push({ f: a.f, t: a.t, path: pa, label: lt2 });
+  });
+}
+
+function focusMod(cid, on) {
+  if (!on) {
+    for (var m in MODS) { MODS[m].box.classList.remove("hl"); MODS[m].box.classList.remove("dim"); }
+    MOD_EDGES.forEach(function (e) { e.path.classList.remove("hl"); e.path.classList.remove("dim");
+      e.label.classList.remove("hl"); e.label.classList.remove("dim"); });
+    applySearchDim();
+    return;
+  }
+  MOD_EDGES.forEach(function (e) {
+    var hit = e.f === cid || e.t === cid;
+    e.path.classList.add(hit ? "hl" : "dim");
+    e.label.classList.add(hit ? "hl" : "dim");
+    if (hit) { MODS[e.f].box.classList.add("hl"); MODS[e.t].box.classList.add("hl"); }
+  });
+  for (var m2 in MODS) if (!MODS[m2].box.classList.contains("hl")) MODS[m2].box.classList.add("dim");
+}
+
+// ============================ 维度二: 模块内 DAG 子图 ============================
+var gsub, SUB = { nodes: {}, edges: [], w: 0, h: 0 };
+function maxLayer(layer) { var m = -1; for (var k in layer) m = Math.max(m, layer[k]); return m < 0 ? 0 : m; }
+
+var navStack = [];
+function openSub(cid) {
+  navStack.push(mode === "mod" ? "__mod__" : curSub);
+  renderSub(cid);
+}
+function closeSub() {
+  if (navStack.length) {
+    var prev = navStack.pop();
+    if (prev === "__mod__") renderMod();
+    else renderSub(prev);
+  } else renderMod();
+}
+function renderSub(cid) {
+  if (GROUPS[cid]) { renderGroup(cid); return; }
+  renderComponent(cid);
+}
+function renderComponent(cid) {
+  curSub = cid; mode = "sub";
+  var c = null;
+  GRAPH.components.forEach(function (x) { if (x.id === cid) c = x; });
+  gsub = document.getElementById("gsub");
+  while (gsub.firstChild) gsub.removeChild(gsub.firstChild);
+  SUB.nodes = {}; SUB.edges = []; SUB.w = 0; SUB.h = 0;
+  var ids = c.nodes.map(function (n) { return cid + "." + n.id; });
+  var internal = GRAPH.edges.filter(function (e) {
+    return ids.indexOf(e.f) >= 0 && ids.indexOf(e.t) >= 0;
+  });
+  var layer = {}, indeg = {}, adj = {}, seen = {};
+  ids.forEach(function (i) { indeg[i] = 0; adj[i] = []; });
+  internal.forEach(function (e) { if (!seen[e.f + ">" + e.t]) { seen[e.f + ">" + e.t] = 1; adj[e.f].push(e.t); indeg[e.t]++; } });
+  var q = ids.filter(function (i) { return indeg[i] === 0; }), L = 0;
+  while (q.length) {
+    var nq = [];
+    q.forEach(function (i) { layer[i] = L; adj[i].forEach(function (j) { if (--indeg[j] === 0) nq.push(j); }); });
+    q = nq; L++;
+  }
+  ids.forEach(function (i) { if (layer[i] === undefined) layer[i] = L; });
+  var connected = {};
+  internal.forEach(function (e) { connected[e.f] = 1; connected[e.t] = 1; });
+  var layeredIds = ids.filter(function (i) { return connected[i]; });
+  var looseIds = ids.filter(function (i) { return !connected[i]; });
+  var PORT_W = 175, PORT_H = 26, NODE_W = 250, NODE_H = 40, COL = 330, GAP = 220;
+  var leftPorts = {}, rightPorts = {};
+  GRAPH.edges.forEach(function (e) {
+    var fc = e.f.split(".")[0], tc = e.t.split(".")[0];
+    if (tc === cid && fc !== cid) {
+      var k = fc + ">" + e.t;
+      leftPorts[k] = leftPorts[k] || { comp: fc, to: e.t, ty: e.ty, lbs: [] };
+      if (leftPorts[k].lbs.indexOf(e.lb) < 0) leftPorts[k].lbs.push(e.lb);
+    }
+    if (fc === cid && tc !== cid) {
+      var k2 = e.f + ">" + tc;
+      rightPorts[k2] = rightPorts[k2] || { comp: tc, from: e.f, ty: e.ty, lbs: [] };
+      if (rightPorts[k2].lbs.indexOf(e.lb) < 0) rightPorts[k2].lbs.push(e.lb);
+    }
+  });
+  var leftList = Object.keys(leftPorts).map(function (k) { return leftPorts[k]; });
+  var rightList = Object.keys(rightPorts).map(function (k) { return rightPorts[k]; });
+  var head = el("text", { x: 60, y: 46, "class": "subhead" }, gsub);
+  head.textContent = "维度二 · " + c.title + " 内部 DAG";
+  var sub2 = el("text", { x: 60, y: 64, "class": "subsub" }, gsub);
+  sub2.textContent = c.file + " · " + c.nodes.length + " 节点 · 内部连线 " + internal.length +
+    " · 上游端口 " + leftList.length + " · 下游端口 " + rightList.length;
+  var nLayers = layeredIds.length ? maxLayer(layer) + 1 : 0;
+  var looseX = 60 + PORT_W + GAP + nLayers * COL + 40;
+  var leftX = 60, rightX = Math.max(looseIds.length ? looseX + NODE_W : 0,
+    60 + PORT_W + GAP + nLayers * COL) + GAP, py = 100;
+  leftList.forEach(function (p) {
+    var g = el("g", { "class": "portbox" }, gsub);
+    el("rect", { x: leftX, y: py, width: PORT_W, height: PORT_H, rx: 6 }, g);
+    var t = el("text", { x: leftX + 8, y: py + 17 }, g);
+    t.textContent = "↘ " + p.comp + " → " + p.to.split(".")[1];
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); openSub(p.comp); });
+    p.a = bounds(leftX, py, PORT_W, PORT_H); p.g = g; py += PORT_H + 10;
+  });
+  py = 100;
+  rightList.forEach(function (p) {
+    var g = el("g", { "class": "portbox" }, gsub);
+    el("rect", { x: rightX, y: py, width: PORT_W, height: PORT_H, rx: 6 }, g);
+    var t = el("text", { x: rightX + 8, y: py + 17 }, g);
+    t.textContent = p.from.split(".")[1] + " → " + p.comp + " ↗";
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); openSub(p.comp); });
+    p.a = bounds(rightX, py, PORT_W, PORT_H); p.g = g; py += PORT_H + 10;
+  });
+  var cols = {};
+  layeredIds.forEach(function (i) { var L2 = layer[i]; cols[L2] = cols[L2] || []; cols[L2].push(i); });
+  var nodeY = 100;
+  layeredIds.forEach(function (i) {
+    var L4 = layer[i], idx = cols[L4].indexOf(i);
+    var x = leftX + PORT_W + GAP + L4 * COL;
+    var y = 100 + idx * (NODE_H + 14);
+    SUB.nodes[i] = { a: bounds(x, y, NODE_W, NODE_H) };
+    nodeY = Math.max(nodeY, y + NODE_H);
+  });
+  var looseTop = layeredIds.length ? nodeY + 70 : 100;
+  if (layeredIds.length) {
+    var lbl = el("text", { x: looseX, y: looseTop - 24, "class": "grouplbl" }, gsub);
+    lbl.textContent = "── 其余内部节点 ──";
+  }
+  var looseBottom = 100;
+  looseIds.forEach(function (i, k) {
+    var y = looseTop + k * (NODE_H + 14);
+    SUB.nodes[i] = { a: bounds(looseX, y, NODE_W, NODE_H) };
+    looseBottom = y + NODE_H;
+  });
+  var eg = el("g", {}, gsub);
+  internal.forEach(function (e) {
+    var pa = el("path", { d: bezier(SUB.nodes[e.f].a, SUB.nodes[e.t].a, 0),
+      "class": "edge " + e.ty, "data-ty": e.ty }, eg);
+    var lt = el("text", { x: (SUB.nodes[e.f].a.x + SUB.nodes[e.t].a.x) / 2,
+      y: (SUB.nodes[e.f].a.y + SUB.nodes[e.t].a.y) / 2 - 4,
+      "class": "elabel", "text-anchor": "middle", "data-ty": e.ty }, eg);
+    lt.textContent = e.lb;
+    SUB.edges.push({ f: e.f, t: e.t, path: pa, label: lt });
+  });
+  leftList.forEach(function (p) {
+    var pa = el("path", { d: bezier(p.a, SUB.nodes[p.to].a, 0),
+      "class": "edge " + p.ty, "data-ty": p.ty }, eg);
+    var lt = el("text", { x: (p.a.x + SUB.nodes[p.to].a.x) / 2,
+      y: (p.a.y + SUB.nodes[p.to].a.y) / 2 - 4, "class": "elabel",
+      "text-anchor": "middle", "data-ty": p.ty }, eg);
+    lt.textContent = p.lbs.join("/");
+    SUB.edges.push({ f: "PORT:" + p.comp, t: p.to, path: pa, label: lt });
+  });
+  rightList.forEach(function (p) {
+    var pa = el("path", { d: bezier(SUB.nodes[p.from].a, p.a, 0),
+      "class": "edge " + p.ty, "data-ty": p.ty }, eg);
+    var lt = el("text", { x: (p.a.x + SUB.nodes[p.from].a.x) / 2,
+      y: (p.a.y + SUB.nodes[p.from].a.y) / 2 - 4, "class": "elabel",
+      "text-anchor": "middle", "data-ty": p.ty }, eg);
+    lt.textContent = p.lbs.join("/");
+    SUB.edges.push({ f: p.from, t: "PORT:" + p.comp, path: pa, label: lt });
+  });
+  ids.forEach(function (i) {
+    var n = null;
+    c.nodes.forEach(function (x) { if (cid + "." + x.id === i) n = x; });
+    var a = SUB.nodes[i].a;
+    var g = el("g", { "class": "subnode" }, gsub);
+    el("rect", { x: a.l, y: a.t, width: a.r - a.l, height: a.b - a.t, rx: 7 }, g);
+    var t = el("text", { x: a.l + 10, y: a.t + 17 }, g);
+    t.textContent = n.label;
+    var d = el("text", { x: a.l + 10, y: a.t + 32, "class": "sd" }, g);
+    d.textContent = n.desc.length > 25 ? n.desc.slice(0, 24) + "…" : n.desc;
+    SUB.nodes[i].g = g; SUB.nodes[i].n = n;
+    g.addEventListener("mouseenter", function () { focusSub(i, true); });
+    g.addEventListener("mouseleave", function () { focusSub(i, false); });
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); showNodePanel(i); });
+  });
+  SUB.w = rightX + PORT_W + 60;
+  SUB.h = Math.max(looseBottom, nodeY, py) + 40;
+  gsub.style.display = "";
+  gmod.style.display = "none";
+  document.getElementById("backBtn").style.display = "";
+  var gpre = c.grp ? " / <span class=\"seg\" id=\"bcGrp\">" + esc(GROUPS[c.grp].title) + " 组</span>" : "";
+  document.getElementById("bc").innerHTML = "<span class=\"seg\" id=\"bcBack\">维度一 · 模块关系</span>" + gpre + " / <span class=\"cur\">" + esc(c.title) + "</span>";
+  document.getElementById("bcBack").addEventListener("click", renderMod);
+  if (c.grp && document.getElementById("bcGrp")) {
+    document.getElementById("bcGrp").addEventListener("click", closeSub);
+  }
+  document.getElementById("hint").textContent = "维度二：" + c.title + " 内部 DAG · 左列=上游端口 右列=下游端口 · ESC 返回";
+  fitView();
+}
+
+function renderMod() {
+  mode = "mod"; curSub = null;
+  navStack = [];
+  gsub.style.display = "none";
+  gmod.style.display = "";
+  document.getElementById("backBtn").style.display = "none";
+  document.getElementById("bc").innerHTML = "<span class=\"seg cur\">维度一 · 模块关系</span>";
+  document.getElementById("hint").textContent = "维度一：模块间逻辑关系 · 点击模块进入维度二（模块内 DAG）";
+  fitView();
+}
+
+function renderGroup(cid) {
+  curSub = cid; mode = "sub";
+  var G = GROUPS[cid];
+  var members = GRAPH.components.filter(function (c) { return c.grp === cid; });
+  gsub = document.getElementById("gsub");
+  while (gsub.firstChild) gsub.removeChild(gsub.firstChild);
+  SUB.nodes = {}; SUB.edges = []; SUB.w = 0; SUB.h = 0;
+  var mAgg = {}, mList = [];
+  GRAPH.edges.forEach(function (e) {
+    var f = e.f.split(".")[0], t = e.t.split(".")[0];
+    if (gidOf(f) !== cid || gidOf(t) !== cid || f === t) return;
+    var k = f + ">" + t;
+    if (!mAgg[k]) { mAgg[k] = { f: f, t: t, ty: e.ty, lb: e.lb, n: 0, back: false }; mList.push(mAgg[k]); }
+    mAgg[k].n++;
+  });
+  var up = {}, dn = {};
+  GRAPH.edges.forEach(function (e) {
+    var f = e.f.split(".")[0], t = e.t.split(".")[0];
+    if (gidOf(t) === cid && gidOf(f) !== cid) {
+      var k = f + ">" + t;
+      up[k] = up[k] || { comp: f, to: t, ty: e.ty, lbs: [] };
+      if (up[k].lbs.indexOf(e.lb) < 0) up[k].lbs.push(e.lb);
+    }
+    if (gidOf(f) === cid && gidOf(t) !== cid) {
+      var k2 = f + ">" + t;
+      dn[k2] = dn[k2] || { comp: t, from: f, ty: e.ty, lbs: [] };
+      if (dn[k2].lbs.indexOf(e.lb) < 0) dn[k2].lbs.push(e.lb);
+    }
+  });
+  var upL = Object.keys(up).map(function (k) { return up[k]; });
+  var dnL = Object.keys(dn).map(function (k) { return dn[k]; });
+  var ids = members.map(function (m) { return m.id; });
+  var color = {};
+  function d(u) {
+    color[u] = 1;
+    mList.forEach(function (a) { if (a.f !== u) return; if (!color[a.t]) d(a.t); else if (color[a.t] === 1) a.back = true; });
+    color[u] = 2;
+  }
+  ids.forEach(function (i) { if (!color[i]) d(i); });
+  var dag = mList.filter(function (a) { return !a.back; });
+  var lay = {}, ind = {}, adj = {};
+  ids.forEach(function (i) { lay[i] = 0; ind[i] = 0; adj[i] = []; });
+  dag.forEach(function (a) { adj[a.f].push(a.t); ind[a.t]++; });
+  var q = ids.filter(function (i) { return ind[i] === 0; }), qi = 0;
+  while (qi < q.length) {
+    var u = q[qi++];
+    adj[u].forEach(function (v) { lay[v] = Math.max(lay[v], lay[u] + 1); if (--ind[v] === 0) q.push(v); });
+  }
+  var mv = true, gd = 0;
+  while (mv && gd++ < 10) {
+    mv = false;
+    ids.forEach(function (i) {
+      var hi = false, mt = Infinity;
+      dag.forEach(function (a) { if (a.t === i) hi = true; if (a.f === i) mt = Math.min(mt, lay[a.t]); });
+      if (!hi && mt !== Infinity && lay[i] < mt - 1) { lay[i] = mt - 1; mv = true; }
+    });
+  }
+  var cols = {}, conn = {};
+  mList.forEach(function (a) { conn[a.f] = 1; conn[a.t] = 1; });
+  var layered = ids.filter(function (i) { return conn[i]; });
+  var loose = ids.filter(function (i) { return !conn[i]; });
+  layered.forEach(function (i) { var L = lay[i]; cols[L] = cols[L] || []; cols[L].push(i); });
+  var maxL = 0;
+  for (var r in cols) maxL = Math.max(maxL, +r);
+  var PW = 180, PH = 26, BW = 300, BH = 64, CL = 390, GP = 200;
+  var nLay = layered.length ? maxL + 1 : 0;
+  var nodeX0 = 60 + PW + GP;
+  var looseX = nodeX0 + nLay * CL + 40;
+  var rightX = Math.max(loose.length ? looseX + BW : 0, nodeX0 + nLay * CL) + GP;
+  var head = el("text", { x: 60, y: 46, "class": "subhead" }, gsub);
+  head.textContent = "维度二 · " + G.title + " 组（成员模块 DAG · " + members.length + " 模块）";
+  var s2 = el("text", { x: 60, y: 64, "class": "subsub" }, gsub);
+  s2.textContent = G.file + " · 点击成员模块下钻其内部节点 DAG";
+  var nodeY = 100;
+  layered.forEach(function (i) {
+    var L = lay[i], ix = cols[L].indexOf(i);
+    SUB.nodes[i] = { a: bounds(nodeX0 + L * CL, 100 + ix * (BH + 52), BW, BH) };
+    nodeY = Math.max(nodeY, 100 + ix * (BH + 52) + BH);
+  });
+  var looseTop = layered.length ? nodeY + 60 : 100, looseBottom = 100;
+  loose.forEach(function (i, k) {
+    var y = looseTop + k * (BH + 52);
+    SUB.nodes[i] = { a: bounds(looseX, y, BW, BH) };
+    looseBottom = y + BH;
+  });
+  var py = 100;
+  upL.forEach(function (p) {
+    var g = el("g", { "class": "portbox" }, gsub);
+    el("rect", { x: 60, y: py, width: PW, height: PH, rx: 6 }, g);
+    var t = el("text", { x: 68, y: py + 17 }, g);
+    t.textContent = "↘ " + p.comp + " → " + p.to;
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); openSub(p.comp); });
+    p.a = bounds(60, py, PW, PH); p.g = g; py += PH + 14;
+  });
+  py = 100;
+  dnL.forEach(function (p) {
+    var g = el("g", { "class": "portbox" }, gsub);
+    el("rect", { x: rightX, y: py, width: PW, height: PH, rx: 6 }, g);
+    var t = el("text", { x: rightX + 8, y: py + 17 }, g);
+    t.textContent = p.from + " → " + p.comp + " ↗";
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); openSub(p.comp); });
+    p.a = bounds(rightX, py, PW, PH); p.g = g; py += PH + 14;
+  });
+  var eg = el("g", {}, gsub);
+  mList.forEach(function (a) {
+    var pa = el("path", { d: bezier(SUB.nodes[a.f].a, SUB.nodes[a.t].a, 0),
+      "class": "edge " + a.ty, "data-ty": a.ty }, eg);
+    if (a.back) pa.style.strokeDasharray = "3 3";
+    var lt = el("text", { x: (SUB.nodes[a.f].a.x + SUB.nodes[a.t].a.x) / 2,
+      y: (SUB.nodes[a.f].a.y + SUB.nodes[a.t].a.y) / 2 - 4, "class": "elabel",
+      "text-anchor": "middle", "data-ty": a.ty }, eg);
+    lt.textContent = (a.back ? "回路·" : "") + a.lb + (a.n > 1 ? " ×" + a.n : "");
+    SUB.edges.push({ f: a.f, t: a.t, path: pa, label: lt });
+  });
+  upL.forEach(function (p) {
+    var pa = el("path", { d: bezier(p.a, SUB.nodes[p.to].a, 0),
+      "class": "edge " + p.ty, "data-ty": p.ty }, eg);
+    var lt = el("text", { x: (p.a.x + SUB.nodes[p.to].a.x) / 2,
+      y: (p.a.y + SUB.nodes[p.to].a.y) / 2 - 4, "class": "elabel",
+      "text-anchor": "middle", "data-ty": p.ty }, eg);
+    lt.textContent = p.lbs.join("/");
+    SUB.edges.push({ f: "PORT:" + p.comp, t: p.to, path: pa, label: lt });
+  });
+  dnL.forEach(function (p) {
+    var pa = el("path", { d: bezier(SUB.nodes[p.from].a, p.a, 0),
+      "class": "edge " + p.ty, "data-ty": p.ty }, eg);
+    var lt = el("text", { x: (p.a.x + SUB.nodes[p.from].a.x) / 2,
+      y: (p.a.y + SUB.nodes[p.from].a.y) / 2 - 4, "class": "elabel",
+      "text-anchor": "middle", "data-ty": p.ty }, eg);
+    lt.textContent = p.lbs.join("/");
+    SUB.edges.push({ f: p.from, t: "PORT:" + p.comp, path: pa, label: lt });
+  });
+  ids.forEach(function (i) {
+    var m = COMPS[i], a = SUB.nodes[i].a;
+    var g = el("g", { "class": "subnode" }, gsub);
+    el("rect", { x: a.l, y: a.t, width: a.r - a.l, height: a.b - a.t, rx: 8 }, g);
+    var t = el("text", { x: a.l + 12, y: a.t + 24 }, g);
+    t.textContent = m.title;
+    t.setAttribute("style", "font-size:13.5px;font-weight:700;fill:#e6edf3");
+    var f = el("text", { x: a.l + 12, y: a.t + 42, "class": "sd" }, g);
+    f.textContent = m.file;
+    var c2 = el("text", { x: a.l + 12, y: a.t + 57, "class": "sd" }, g);
+    c2.textContent = m.nodes.length + " 节点 · 点击下钻";
+    SUB.nodes[i].g = g; SUB.nodes[i].n = { label: m.title, desc: m.file };
+    g.addEventListener("mouseenter", function () { focusSub(i, true); });
+    g.addEventListener("mouseleave", function () { focusSub(i, false); });
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); openSub(i); });
+  });
+  SUB.w = rightX + PW + 60;
+  SUB.h = Math.max(looseBottom, nodeY, py) + 40;
+  gsub.style.display = "";
+  gmod.style.display = "none";
+  document.getElementById("backBtn").style.display = "";
+  document.getElementById("bc").innerHTML = "<span class=\"seg\" id=\"bcBack\">维度一 · 模块关系</span> / <span class=\"cur\">" + esc(G.title) + " 组（成员 DAG）</span>";
+  document.getElementById("bcBack").addEventListener("click", closeSub);
+  document.getElementById("hint").textContent = "维度二·组：" + G.title + " · 成员模块点击下钻节点级 · ESC 返回上级";
+  fitView();
+}
+
+function focusSub(nid, on) {
+  if (!on) {
+    for (var k in SUB.nodes) { SUB.nodes[k].g.classList.remove("hl"); SUB.nodes[k].g.classList.remove("dim"); }
+    SUB.edges.forEach(function (e) { e.path.classList.remove("hl"); e.path.classList.remove("dim");
+      e.label.classList.remove("hl"); e.label.classList.remove("dim"); });
+    applySearchDim();
+    return;
+  }
+  SUB.edges.forEach(function (e) {
+    var hit = e.f === nid || e.t === nid;
+    e.path.classList.add(hit ? "hl" : "dim");
+    e.label.classList.add(hit ? "hl" : "dim");
+  });
+  for (var k2 in SUB.nodes) SUB.nodes[k2].g.classList.add(k2 === nid ? "hl" : "dim");
+}
+
+// ============================ 视口 / 工具栏 / 面板 ============================
+var stage = document.getElementById("stage"), svg = document.getElementById("svg"),
+    world = document.getElementById("gworld");
+var scale = 1, tx = 0, ty = 0;
+function viewSize() { return mode === "sub" ? { w: SUB.w, h: SUB.h } : { w: modW, h: modH }; }
+function applyView() { world.setAttribute("transform", "translate(" + tx + "," + ty + ") scale(" + scale + ")"); }
+function fitView() {
+  var r = stage.getBoundingClientRect(), s = viewSize();
+  scale = Math.max(0.12, Math.min(r.width / (s.w + 80), r.height / (s.h + 80), 1.4));
+  tx = Math.max(10, (r.width - s.w * scale) / 2); ty = Math.max(10, (r.height - s.h * scale) / 2);
+  applyView();
+}
+function zoomAt(cx, cy, f) {
+  var ns = Math.min(2.5, Math.max(0.12, scale * f));
+  tx = cx - (cx - tx) * (ns / scale); ty = cy - (cy - ty) * (ns / scale);
+  scale = ns; applyView();
+}
+stage.addEventListener("wheel", function (ev) {
+  ev.preventDefault();
+  var r = stage.getBoundingClientRect();
+  zoomAt(ev.clientX - r.left, ev.clientY - r.top, ev.deltaY < 0 ? 1.12 : 0.89);
+}, { passive: false });
+var dragOn = false, lx = 0, ly = 0;
+stage.addEventListener("mousedown", function (ev) {
+  if (ev.target.closest("#panel") || ev.target.closest("#legend") || ev.target.closest("#hint")) return;
+  dragOn = true; lx = ev.clientX; ly = ev.clientY; stage.classList.add("panning");
+});
+window.addEventListener("mousemove", function (ev) {
+  if (!dragOn) return; tx += ev.clientX - lx; ty += ev.clientY - ly; lx = ev.clientX; ly = ev.clientY; applyView();
+});
+window.addEventListener("mouseup", function () { dragOn = false; stage.classList.remove("panning"); });
+document.getElementById("zoomIn").addEventListener("click", function () {
+  var r = stage.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.25); });
+document.getElementById("zoomOut").addEventListener("click", function () {
+  var r = stage.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 0.8); });
+document.getElementById("fitBtn").addEventListener("click", fitView);
+document.getElementById("backBtn").addEventListener("click", closeSub);
+window.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && mode === "sub") closeSub(); });
+
+var activeTypes = { control: true, data: true, spool: true, cache: true, rpc: true };
+var showInfra = false;
+function setShowInfra(v) {
+  showInfra = v;
+  var w = document.getElementById("gworld");
+  w.classList.toggle("showinfra", v);
+  var btn = document.getElementById("infraBtn");
+  btn.classList.toggle("on", v);
+  btn.style.opacity = v ? 1 : 0.35;
+  GRAPH.components.forEach(function (c) {
+    if (c.infra && MODS[c.id]) MODS[c.id].box.classList.toggle("on", v);
+  });
+  applyFilters();
+}
+document.getElementById("infraBtn").addEventListener("click", function () { setShowInfra(!showInfra); });
+document.querySelectorAll(".fbtn").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var t = b.getAttribute("data-t");
+    activeTypes[t] = !activeTypes[t];
+    b.classList.toggle("on", activeTypes[t]);
+    b.style.opacity = activeTypes[t] ? 1 : 0.35;
+    applyFilters();
+  });
+});
+function applyFilters() {
+  document.querySelectorAll("#gworld .edge, #gworld .elabel").forEach(function (p) {
+    var typeOff = !activeTypes[p.getAttribute("data-ty")];
+    var infraOff = p.getAttribute("data-infra") === "1" && !showInfra;
+    p.classList.toggle("hidden", typeOff || infraOff);
+  });
+}
+
+document.getElementById("search").addEventListener("input", function (ev) {
+  lastQuery = ev.target.value.trim().toLowerCase();
+  applySearchDim();
+});
+var lastQuery = "";
+function applySearchDim() {
+  var q = lastQuery;
+  if (mode === "mod") {
+    for (var m in MODS) {
+      var c = MODS[m].c;
+      var hit = !q || (c.title + c.file + m + c.nodes.map(function (n) { return n.label; }).join(" ")).toLowerCase().indexOf(q) >= 0;
+      MODS[m].box.classList.toggle("dim", !hit);
+    }
+  } else {
+    for (var k in SUB.nodes) {
+      var N = SUB.nodes[k];
+      var hit2 = !q || ((N.n ? N.n.label + " " + N.n.desc : "") + " " + k).toLowerCase().indexOf(q) >= 0;
+      N.g.classList.toggle("dim", !hit2);
+    }
+  }
+}
+
+var panel = document.getElementById("panel"), pbody = document.getElementById("pbody");
+document.getElementById("pclose").addEventListener("click", function () { panel.style.display = "none"; });
+function relList(nid, dir) {
+  var out = [];
+  GRAPH.edges.forEach(function (e) {
+    if (dir === "up" && e.t === nid) out.push(e.f + "  (" + e.lb + ")");
+    if (dir === "down" && e.f === nid) out.push(e.t + "  (" + e.lb + ")");
+  });
+  return out.length ? out.join("<br>") : "—";
+}
+function showNodePanel(nid) {
+  var cid = nid.split(".")[0], c = null, n = null;
+  GRAPH.components.forEach(function (x) { if (x.id === cid) c = x; });
+  c.nodes.forEach(function (x) { if (cid + "." + x.id === nid) n = x; });
+  pbody.innerHTML = "<h3>" + esc(n.label) + "</h3><div class='pf'>" + esc(c.title) +
+    " · " + esc(c.file) + "</div><div class='pd'>" + esc(n.desc) + "</div>" +
+    "<div class='sec'>上游 UPSTREAM</div><div class='rel'>" + relList(nid, "up") + "</div>" +
+    "<div class='sec'>下游 DOWNSTREAM</div><div class='rel'>" + relList(nid, "down") + "</div>";
+  panel.style.display = "block";
+}
+
+(function selfCheck() {
+  var errs = [], seen = {};
+  GRAPH.components.forEach(function (c) {
+    if (!GRAPH.lanes.some(function (l) { return l.id === c.lane; })) errs.push("泳道缺失 " + c.id);
+    c.nodes.forEach(function (n) {
+      var k = c.id + "." + n.id;
+      if (seen[k]) errs.push("重复节点 " + k);
+      seen[k] = 1;
+    });
+  });
+  GRAPH.edges.forEach(function (e) {
+    if (!seen[e.f]) errs.push("边起点缺失 " + e.f);
+    if (!seen[e.t]) errs.push("边终点缺失 " + e.t);
+  });
+  if (errs.length) {
+    var b = document.getElementById("badge");
+    b.style.display = "block";
+    b.textContent = "数据自检 " + errs.length + " 处问题: " + errs.slice(0, 4).join("; ");
+  }
+})();
+
+svg.setAttribute("width", "100%"); svg.setAttribute("height", "100%");
+buildModuleView();
+applyFilters();
+fitView();
+</script>
+</body>
+</html>
