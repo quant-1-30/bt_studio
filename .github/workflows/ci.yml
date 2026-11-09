@@ -1,0 +1,46 @@
+name: bt_studio CI
+
+on:
+  push:
+    branches: [ dev, main, master ]
+  pull_request:
+    branches: [ dev, main, master ]
+
+env:
+  POLARS_MAX_THREADS: "1"
+  RAYON_NUM_THREADS: "1"
+  NUMBA_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system TA-Lib C library
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential wget
+          wget -q http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+          tar -xzf ta-lib-0.4.0-src.tar.gz
+          cd ta-lib && ./configure --prefix=/usr && make -j"$(nproc)" && sudo make install
+
+      - name: Install Poetry & dependencies
+        run: |
+          pip install poetry
+          poetry install --no-interaction
+
+      - name: Verify environment script & run pytest suite
+        run: |
+          bash scripts/start_env.sh
+          poetry run python -m pytest tests/ -q -p no:cacheprovider

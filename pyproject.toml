@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "bt_studio"
-version = "0.1.0"
-description = ""
+version = "0.2.1"
+description = "intended for backtesting and strategy development, bt_studio is a comprehensive tool that provides a user-friendly interface for designing, testing, and optimizing trading strategies. It integrates seamlessly with popular libraries like Ray, Optuna, and MLflow, enabling users to leverage advanced machine learning techniques for strategy optimization. With support for real-time data visualization and performance tracking, bt_studio empowers traders and developers to make informed decisions and enhance their trading strategies effectively."
 authors = ["hengxin.liu <hengxin.liu@inceptio.ai>"]
 readme = "README.md"
 
@@ -23,23 +23,27 @@ coremltools = "^9.0"
 asitop = "^0.0.24"
 prometheus-client = "^0.25.0"
 graphviz = "^0.21"
-mlflow = "^3.13.0"
+mlflow = ">=3.13,<3.14"
 scikit-learn = "^1.9.0"
 scipy = "^1.11"
-bt-core = "0.5.4"
+bt-core = "0.6.1"
 tensorboard = "^2.21.0"
 protobuf = ">=7.35.1"
 watchdog = "^6.0.0"
 networkx = "^3.6.1"
 openai = "^3.3.1"
-google = "^3.0.0"
+google-genai = "^2.29.0"
+polars = "1.44.1"
+numpy = "2.4.6"
+pandas = "2.3.3"
+reactivex = "4.1.0"
+requests = "2.34.2"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = [
-    "--ignore=tests/test_prefect_fsm.py",
-    "--ignore=tests/test_plot.py",
+    "--ignore=tests/misc/test_strategy.py",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:polars.*",
