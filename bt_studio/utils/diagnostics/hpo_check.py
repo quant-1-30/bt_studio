@@ -4,52 +4,26 @@ from __future__ import annotations
 import os
 import traceback
 import polars as pl
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from bt_studio.constant import TUNE_COLLAPSE_DIR
-from .collapse import detect_space_collapse
-from .recorder import (
-    build_collapse_report,
-    save_collapse_report,
-    print_collapse_report
+from bt_studio.default_config import (
+    resolve_feature_col,
+    search_spec_to_collapse_bounds,
 )
+from .collapse import (
+    detect_space_collapse,
+    build_collapse_report,
+    print_collapse_report,
+)
+
+from bt_studio.utils.io import atomic_save_json
+
 
 __all__ = ["build_search_bounds", "run_collapse_check"]
 
 
-def build_search_bounds(search_config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    HPO search_config ---> collapse bound dict
-    - string: return 
-    - int list / tuple : sort [min. max]
-    - filter num_trails
-    """
-    bounds: Dict[str, Any] = {}
-    if not isinstance(search_config, dict):
-        return bounds
-
-    for k, v in search_config.items():
-        if k in ("num_trials", "max_concurrent_trials", "metric", "mode"):
-            continue
-        if not isinstance(v, (list, tuple)) or len(v) < 2:
-            continue
-
-        raw_list = list(v)
-        
-        # 1. Categorical
-        if any(isinstance(x, str) for x in raw_list):
-            bounds[k] = list(dict.fromkeys(raw_list)) # unqiue 
-        # 2. Continuous / Discrete Int
-        else:
-            try:
-                sorted_vals = sorted(raw_list)
-                all_int = all(isinstance(x, (int, bool)) for x in sorted_vals)
-                # [min, max]
-                bounds[k] = sorted_vals if all_int else [sorted_vals[0], sorted_vals[-1]]
-            except Exception:
-                continue
-
-    return bounds
+build_search_bounds = search_spec_to_collapse_bounds
 
 
 def run_collapse_check(
@@ -57,6 +31,7 @@ def run_collapse_check(
     exp_config: Dict[str, Any],
     model_id: Any,
     strict_healthy: bool = False,
+    collapse_dir: Optional[str] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
     Parameters
@@ -83,10 +58,21 @@ def run_collapse_check(
         return True, "insufficient_samples", {}
 
     try:
-        common_cfg = exp_config.get("common_params", {})
-        search_bounds = exp_config.get("search_bounds", {})
-        feature_col = exp_config.get("feature_col", "unknown_feat")
-        run_name = exp_config.get("run_name", f"tune_{model_id}")
+        common_cfg = exp_config.get("common_params") or exp_config.get("common_config") or {}
+        search_bounds = exp_config.get("search_spec") or {}
+        try:
+            feature_col = resolve_feature_col(
+                common_cfg, exp_config.get("ast_recipe"), exp_config.get("feature_col")
+            )
+        except ValueError:
+            feature_col = common_cfg.get("_task_id") or "unknown_feat"
+
+        run_name = (
+            exp_config.get("run_name")
+            or common_cfg.get("run_name")
+            or common_cfg.get("_task_id")
+            or f"tune_{model_id}"
+        )
         
         bounds = build_search_bounds(search_bounds)
 
@@ -97,7 +83,8 @@ def run_collapse_check(
         )
         verdict = diagnostics.get("overall_verdict", "unknown")
 
-        os.makedirs(TUNE_COLLAPSE_DIR, exist_ok=True)
+        report_dir = collapse_dir or TUNE_COLLAPSE_DIR
+        os.makedirs(report_dir, exist_ok=True)
         report = build_collapse_report(
             run_name=run_name,
             feature_col=feature_col,
@@ -106,9 +93,9 @@ def run_collapse_check(
             search_bounds=search_bounds,
         )
         report_path = os.path.join(
-            TUNE_COLLAPSE_DIR, f"collapse_{model_id}_{feature_col}.json"
+            report_dir, f"collapse_{model_id}_{feature_col}.json"
         )
-        save_collapse_report(report, report_path)
+        atomic_save_json(report, report_path)
 
         print(f"📊 [Collapse Check] Model={model_id} | Feature={feature_col} | Verdict={verdict.upper()}")
         print_collapse_report(diagnostics)
