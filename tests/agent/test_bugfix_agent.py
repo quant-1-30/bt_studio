@@ -285,5 +285,27 @@ def test_eval_feature_on_grid_does_not_short_circuit_on_high_pval(monkeypatch):
     assert res.u_pval == 0.02 and res.score == 3.5
 
 
+def test_recipe_canonical_fingerprint_and_named_ast_wrapper():
+    """Verify Recipe list canonicalization, base market column shadowing guard, and named AST wrapper compilation."""
+    from bt_studio.compiler.ast import ASTCompilationError, ast_fingerprint, compile_recipe
+
+    r1 = [{"name": " s1 ", "ast": {"op": "mean", "args": [{"col": " close "}]}}]
+    r2 = [{"name": "s1", "ast": {"op": "mean", "args": [{"col": "close"}, 5.0]}}]
+    assert ast_fingerprint(r1) == ast_fingerprint(r2)
+
+    with pytest.raises(ASTCompilationError, match="shadow"):
+        compile_recipe([{"name": "close", "ast": {"op": "abs", "args": [{"col": "open"}]}}])
+
+    harness = TwoStageAgentHarness(common_config={"eps": 1e-8})
+    _, records, compiled_names = harness._compile_asts(
+        [{"name": "wrapped_alpha", "ast": {"op": "abs", "args": [{"col": "x"}]}}],
+        _tiny_hf(),
+    )
+    assert len(compiled_names) == 1
+    assert records[0]["display_name"] == "wrapped_alpha"
+    assert records[0]["error"] is None
+
+
+
 if __name__ == "__main__":
     raise SystemExit("run via pytest")

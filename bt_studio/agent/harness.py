@@ -261,6 +261,9 @@ class TwoStageAgentHarness:
         seen_names: Set[str] = set()
 
         for idx, candidate in enumerate(candidate_asts):
+            if isinstance(candidate, dict) and "ast" in candidate and "op" not in candidate and "col" not in candidate:
+                inner = candidate["ast"]
+                candidate = inner if isinstance(inner, list) else ([candidate] if "name" in candidate else inner)
             fp = ast_fingerprint(candidate)
             try:
                 if isinstance(candidate, list):

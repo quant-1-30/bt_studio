@@ -491,7 +491,10 @@ class RLFeatureFlywheel:
                 return []
 
             reasoning = agent_data.get("economic_reasoning", "")
-            candidate_asts = agent_data.get("sub_features", [])
+            raw_cands = agent_data.get("sub_features") or agent_data.get("candidates") or []
+            if isinstance(raw_cands, dict) and ("op" in raw_cands or "col" in raw_cands or "ast" in raw_cands):
+                raw_cands = [raw_cands]
+            candidate_asts = raw_cands
             hyp_id = agent_data.get("hypothesis_id", f"hyp_{self._step_counter}")
 
             # [resume] 

@@ -87,9 +87,23 @@ def ast_fingerprint(ast_node: Any) -> str:
 
 
 def canonicalize_ast(ast_node: Any) -> Any:
-    """AST recursion and  Arity validate"""
+    """Recursively canonicalize an AST dict or Recipe list (backfill defaults, normalize integer floats, strip col names)."""
+    if isinstance(ast_node, list):
+        return [
+            {"name": str(step["name"]).strip(), "ast": canonicalize_ast(step["ast"])}
+            if isinstance(step, dict) and "name" in step and "ast" in step
+            else canonicalize_ast(step)
+            for step in ast_node
+        ]
     if not isinstance(ast_node, dict):
         return ast_node
+    if "ast" in ast_node and "op" not in ast_node and "col" not in ast_node:
+        inner = ast_node["ast"]
+        if isinstance(inner, list):
+            return canonicalize_ast(inner)
+        if isinstance(inner, dict) and "name" in ast_node:
+            return [{"name": str(ast_node["name"]).strip(), "ast": canonicalize_ast(inner)}]
+        return canonicalize_ast(inner)
 
     if "col" in ast_node:
         return {"col": str(ast_node["col"]).strip()}
@@ -457,6 +471,10 @@ def compile_recipe(
         if not name:
             raise ASTCompilationError(f"Recipe step {i} has empty output name.")
 
+        if name in BASE_MARKET_COLS:
+            raise ASTCompilationError(
+                f"Recipe step '{name}' cannot shadow base market column {name!r}."
+            )
         if name in declared_names:
             raise ASTCompilationError(
                 f"Recipe step '{name}' duplicates an existing variable name in the chain."

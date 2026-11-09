@@ -49,7 +49,7 @@ def _get_ts_window_ops_list() -> List[str]:
 
 def _render_layer_one() -> str:
     """SAFE_OPS"""
-    bridge_ops = set(talib_ops.REGISTRY.keys()) | {"talib"}
+    bridge_ops = set(talib_ops.REGISTRY.keys())
 
     unary: List[str] = []
     rolling: List[str] = []
