@@ -1,73 +1,103 @@
-import polars as pl
+#! /usr/bin/env python3
+
+from typing import Any, Dict, Optional
 import numpy as np
+import polars as pl
+
+from bt_studio.utils.math_func import resolve_search_hyperparams
+from .fanova import validate_parameter_plateau_fanova
 
 
-def find_pareto_front(df_results: pl.DataFrame, common_config: dict) -> pl.DataFrame:
-    """
-        帕累托支配
-            a. 在所有指标上都不比对方差
-            b. 必须至少有一个指标严格优于对方
-    """
-    valid_df = df_results.drop_nulls(subset=["metrics_score"])
-    if valid_df.height == 0: 
-        return pl.DataFrame()
-        
-    # Complexity
+def find_pareto_front(df_results: pl.DataFrame, common_config: Optional[dict] = None) -> pl.DataFrame:
+    """Extract the non-dominated Pareto front across (efficiency, valid_sample_ratio, momentum_persistence)."""
+    valid_df = (
+        df_results
+        .filter(pl.col("metrics_score") > -500.0)
+        .drop_nulls(subset=["metrics_score", "valid_sample_ratio", "autocorr"])
+        .filter(
+            pl.col("metrics_score").is_not_nan()
+            & pl.col("valid_sample_ratio").is_not_nan()
+            & pl.col("autocorr").is_not_nan()
+        )
+    )
+    if valid_df.height <= 1:
+        return valid_df
+
+    score_floor = float(valid_df["metrics_score"].min())
     valid_df = valid_df.with_columns([
-        (
-            ((pl.col("config/motif_minutes") / pl.col("config/downsample")) * common_config["dtw_window_frac"]) * 
-            (1.0 - pl.col("config/threshold_r"))
-        ).alias("complexity")
+        (pl.col("metrics_score") - score_floor + 1.0).alias("efficiency"),
+        (1.0 - pl.col("autocorr").abs().clip(0.0, 1.0)).alias("momentum_persistence"),
     ])
-    
-    # scores = valid_df["metrics_score"].to_numpy()
-    # complexities = valid_df["complexity"].to_numpy()
-    min_score = valid_df["metrics_score"].min()
-    valid_df = valid_df.with_columns(
-        ((pl.col("metrics_score") - min_score + 1.0) / pl.col("complexity")).alias("efficiency")
-    )
-    
-    efficiency = valid_df["efficiency"].to_numpy()
-    density = valid_df["valid_sample_ratio"].to_numpy() 
-    autocorr = valid_df["autocorr"].to_numpy()          
-    
-    # row control by column ---> colj - rowi
-    Eff_diff = efficiency[None, :] - efficiency[:, None] 
-    Den_diff = density[None, :] - density[:, None]
-    Auto_diff = autocorr[None, :] - autocorr[:, None]
-    
-    dominates = (
-        (Eff_diff >= 0) & (Den_diff >= 0) & (Auto_diff >= 0) & 
-        ((Eff_diff > 0) | (Den_diff > 0) | (Auto_diff > 0))
-    )
-    
-    is_dominated = dominates.any(axis=1)
-    
-    return valid_df.filter(~is_dominated)
-    
 
-def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> dict | None:
-    if pareto_df.height == 0: 
+    target_cols = ["efficiency", "valid_sample_ratio", "momentum_persistence"]
+    obj_matrix = valid_df.select(target_cols).to_numpy()
+
+    diffs = obj_matrix[None, :, :] - obj_matrix[:, None, :]
+    j_dominates_i = np.all(diffs >= 0.0, axis=2) & np.any(diffs > 0.0, axis=2)
+    is_dominated = np.any(j_dominates_i, axis=1)
+
+    return valid_df.filter(~is_dominated)
+
+
+def select_best_model_from_pareto(pareto_df: pl.DataFrame) -> Optional[Dict[str, Any]]:
+    """Select the highest geometric utility trial from the Pareto front."""
+    if pareto_df.height == 0:
         return None
-    
-    # =========================================================================
-    # avoid score stuck in zero or negative
-    # =========================================================================
-    utility_lf = (
-        pareto_df.lazy()
+    if pareto_df.height == 1:
+        return pareto_df.to_dicts()[0]
+
+    utility_df = (
+        pareto_df
         .with_columns(
             (
-                pl.col("efficiency") * 
-                (pl.col("autocorr") + 1.1) * # [-1, 1] ---> [0.1, 2.1]
-                (pl.col("valid_sample_ratio") + 0.1) # [0, 1] ---> [0.1, 1.1]
+                pl.col("efficiency").log1p()
+                * pl.col("valid_sample_ratio").sqrt()
+                * pl.col("momentum_persistence")
             ).alias("final_utility")
         )
         .sort("final_utility", descending=True)
-        .limit(1) # heap
+        .limit(1)
     )
-    
-    final_best_df = utility_lf.collect()
-    if final_best_df.height == 0:
+    return utility_df.to_dicts()[0]
+
+
+def _extract_trial_config(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {k.replace("config/", ""): v for k, v in row.items() if k.startswith("config/")}
+
+
+def select_plateau_verified_config(
+    df_results: pl.DataFrame,
+    stats_valid_trials: pl.DataFrame,
+    common_config: dict,
+    search_spec: dict,
+) -> Optional[Dict[str, Any]]:
+    """Select a Pareto-optimal configuration verified by fANOVA neighborhood plateau stability."""
+    pareto_front_df = find_pareto_front(stats_valid_trials, common_config)
+    best_model_dict = select_best_model_from_pareto(pareto_front_df)
+    if not best_model_dict:
         return None
-        
-    return final_best_df.to_dicts()[0] # .row(n, named=True) heavy ops
+
+    best_config = _extract_trial_config(best_model_dict)
+    pareto_score = float(best_model_dict.get("metrics_score", -500.0))
+
+    best_valid_row = stats_valid_trials.sort("metrics_score", descending=True).row(0, named=True)
+    best_valid_score = float(best_valid_row["metrics_score"])
+    best_valid_config = _extract_trial_config(best_valid_row)
+
+    is_plateau = validate_parameter_plateau_fanova(
+        df_results=df_results,
+        best_config=best_config,
+        best_score=pareto_score,
+        search_spec=search_spec,
+    )
+    if not is_plateau and best_config != best_valid_config:
+        is_plateau = validate_parameter_plateau_fanova(
+            df_results=df_results,
+            best_config=best_valid_config,
+            best_score=best_valid_score,
+            search_spec=search_spec,
+        )
+        if is_plateau:
+            best_config = best_valid_config
+
+    return resolve_search_hyperparams(best_config) if is_plateau else None

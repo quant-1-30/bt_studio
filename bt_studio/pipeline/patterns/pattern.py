@@ -1,115 +1,130 @@
-import polars as pl
+#! /usr/bin/env python3
+"""Supervised positive-pool motif discovery and full-panel causal FSM evaluation."""
+
+import logging
+from typing import Any, Dict, Optional
+
 import numpy as np
+import polars as pl
 
-from typing import List, Dict, Any
+from .astc import get_candidate_motifs, prepare_curves
+from .fsm import evaluate_and_build_fsm, prepare_fsm_base_df
+from bt_studio.utils.io import collect_lazy_safe
+from bt_studio.utils.math_func import resolve_search_hyperparams
 
-from .astc import prepare_curves, get_candidate_motifs
-from .fsm import evaluate_and_build_fsm
+logger = logging.getLogger(__name__)
 
 
-def get_balanced_samples(curves: np.ndarray, max_points: int, seed: int) -> np.ndarray:
-    if curves.ndim != 2 or curves.size == 0:
-        return np.empty((0, curves.shape[1] if curves.ndim == 2 else 0))
+def _select_positive_motif_curves(
+    curves_2d: np.ndarray,
+    base_df: pl.DataFrame,
+    m: int,
+    common_config: dict,
+) -> np.ndarray:
+    """Select training curves from directional T+1 outperformers (with T+1 intraday continuation guard)."""
+    topk = max(1, int(common_config.get("topk", 5)))
+    max_curves = max(m + 1, topk * 30)
 
-    N, L = curves.shape
-    sample_size = min(N, max(5, int(max_points / L)))
+    raw_traj = base_df["raw_trajectory"].fill_null(np.nan).to_numpy()
+    rank_traj = base_df["rank_trajectory"].fill_null(0.5).to_numpy()
+    mom_traj = (
+        base_df["momentum_trajectory"].fill_null(0.0).to_numpy()
+        if "momentum_trajectory" in base_df.columns
+        else np.zeros_like(raw_traj)
+    )
+    pos_quantile = float(common_config.get("positive_motif_quantile", 0.70))
 
-    valid_mask = ~np.isnan(curves).all(axis=1)
-    valid_curves = curves[valid_mask]
+    sign = -1.0 if common_config.get("alternative", "greater") == "less" else 1.0
+    dir_raw = sign * raw_traj
+    dir_mom = sign * mom_traj
+    dir_rank = (1.0 - rank_traj) if sign < 0 else rank_traj
 
-    if len(valid_curves) <= sample_size:
-        return valid_curves
+    # A-share T+1 continuation filter: require cross-sectional top quantile, positive holding return,
+    # and non-negative T+1 open-to-exit continuation (with graceful fallback on tiny samples).
+    base_pos_mask = np.isfinite(dir_raw) & (dir_rank >= pos_quantile) & (dir_raw > 0.0)
+    pos_idx = np.empty(0, dtype=np.int64)
+    for tier_idx, tier_mask in enumerate((base_pos_mask & (dir_mom >= 0.0), base_pos_mask, np.isfinite(dir_raw))):
+        pos_idx = np.flatnonzero(tier_mask)
+        if len(pos_idx) > m:
+            if tier_idx > 0:
+                logger.debug("[pattern] Positive pool relaxed to tier %d (n=%d, m=%d)", tier_idx, len(pos_idx), m)
+            break
+    if len(pos_idx) == 0:
+        return curves_2d[:max_curves]
 
-    # [FIX P2-P6] Use a local RNG with fixed seed for reproducible HPO.
-    # Without this, the same tune_config produces different scores across
-    # trials due to random sampling, adding noise to Optuna TPE optimization.
-    rng = np.random.RandomState(seed)
-    idx = rng.choice(len(valid_curves), size=sample_size, replace=False)
-    return valid_curves[idx]
+    if len(pos_idx) > max_curves:
+        top_order = np.argsort(-dir_raw[pos_idx], kind="stable")[:max_curves]
+        pos_idx = np.sort(pos_idx[top_order])
+
+    return curves_2d[pos_idx]
 
 
 def discover_fsm_pattern(
     panel_lf: pl.LazyFrame,
     tune_config: dict,
-    common_config: dict
+    common_config: dict,
 ) -> Dict[str, Any]:
+    # 1. Derive m and threshold_d from scalar search hyperparameters
+    local_tune_cfg = resolve_search_hyperparams(tune_config)
+    m = local_tune_cfg["m"]
 
-    m = int(tune_config["motif_minutes"] // tune_config["downsample"])
-    threshold_d = float(np.sqrt(2 * m * (1.0 - tune_config["threshold_r"])))
-    random_dist = float(np.sqrt(2 * m))
-
-    # =========================================================================
-    # 1. Drop DataFrame lag_0 null
-    # =========================================================================
-    try:
-        panel_df = panel_lf.collect(engine="streaming")
-    except Exception:
-        panel_df = panel_lf if isinstance(panel_lf, pl.DataFrame) else panel_lf.collect(engine="streaming")
-
-    panel_df = panel_df.filter(pl.col("lag_0").is_not_null())
-    if panel_df.height <= m or m < 3:
+    if m < 3:
         return {
             "status": "failed",
-            "reason": f"Data not enough after mask (n={panel_df.height})",
-            "metrics_score": -500.0
+            "reason": f"Motif length m={m} too short (< 3)",
+            "metrics_score": -500.0,
         }
 
-    # =========================================================================
-    # Tensor Matrix
-    # =========================================================================
-    tune_config["m"] = m
-    tune_config["threshold_d"] = threshold_d
-
-    curves_2d = prepare_curves(panel_df, tune_config, common_config)
-
-    if curves_2d.size == 0:
+    # 2. Materialize LazyFrame and sort deterministically by (day, sid)
+    panel_df = collect_lazy_safe(panel_lf).sort(["day", "sid"]).filter(pl.col("lag_0").is_not_null())
+    if panel_df.height <= m:
         return {
             "status": "failed",
-            "reason": "Curves_2d Empty",
-            "metrics_score": -500.0
+            "reason": f"Insufficient valid curves (n={panel_df.height} <= m={m})",
+            "metrics_score": -500.0,
         }
 
-    # =========================================================================
-    # 3. Balanced Sample
-    # =========================================================================
-    theory_points = common_config.get("max_points", 20000)
-    sampled_curves = get_balanced_samples(curves_2d, max_points=theory_points, seed=common_config.get("seed", 42))
+    # 3. Build 2D curve matrix (with right-tail NaN causal masking) and precompute base_df
+    curves_2d = prepare_curves(panel_df, local_tune_cfg, common_config)
+    base_df = prepare_fsm_base_df(panel_df, common_config)
+    if base_df is None:
+        return {
+            "status": "failed",
+            "reason": "panel has no raw_* target columns",
+            "metrics_score": -500.0,
+        }
 
-    # =========================================================================
-    # 4. Padding and NaN
-    # =========================================================================
-    clean_curves = np.copy(sampled_curves)
-    clean_curves[np.isinf(clean_curves)] = 0.0
-
-    nan_buffer = np.full((clean_curves.shape[0], m), np.nan)
-    stumpy_1d_array = np.hstack([clean_curves, nan_buffer]).flatten()[:-m]
-
-    candidate_motifs = get_candidate_motifs(stumpy_1d_array, tune_config, common_config)
+    # 4. Stage A: Extract Top-K candidate motifs from positive T+1 outperformers via STUMPY
+    pos_curves = _select_positive_motif_curves(curves_2d, base_df, m, common_config)
+    candidate_motifs = get_candidate_motifs(pos_curves, local_tune_cfg, common_config)
     if not candidate_motifs:
         return {
             "status": "failed",
-            "reason": "STUMPY returned no valid motifs",
-            "metrics_score": -500.0
+            "reason": "STUMPY returned no valid candidate motifs",
+            "metrics_score": -500.0,
         }
 
-    # =========================================================================
-    # 5. Estimate
-    # =========================================================================
-    best_result, highest_score = None, -500.0
+    # 5. Stage V: Evaluate candidate motifs on the full unbiased panel (base_df + curves_2d)
+    best_result: Optional[Dict[str, Any]] = None
+    highest_score: float = -500.0
 
     for motif in candidate_motifs:
-        if np.nanstd(motif) < 1e-4:
-            continue
-
         result = evaluate_and_build_fsm(
-            panel_df, curves_2d, motif, tune_config, common_config)
-
-        if result["status"] == "success" and result["metrics_score"] > highest_score:
+            panel_df=base_df,
+            curves_2d=curves_2d,
+            motif=motif,
+            tune_config=local_tune_cfg,
+            common_config=common_config,
+        )
+        if result.get("status") == "success" and result.get("metrics_score", -500.0) > highest_score:
             highest_score = result["metrics_score"]
             best_result = result
 
-    return best_result if best_result else {
+    if best_result is not None:
+        return best_result
+
+    return {
         "status": "failed",
-        "reason": "All candidates failed statistical tests",
-        "metrics_score": -500.0
+        "reason": "All candidate motifs failed statistical tests or economic gates",
+        "metrics_score": -500.0,
     }
