@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.btstudio.agent</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hengxinliu/startup/bt_studio</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>source scripts/start_env.sh &amp;&amp; exec poetry run python scripts/run_agent.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BT_STUDIO_ENV</key>
+        <string>prod</string>
+        <key>AGENT_STAGE3</key>
+        <string>off</string>
+        <key>RESUME</key>
+        <string>auto</string>
+        <key>FROM_DATE</key>
+        <string>20220101</string>
+        <key>TO_DATE</key>
+        <string>20230630</string>
+        <key>N_SIDS</key>
+        <string>100</string>
+        <key>AGENT_STEPS</key>
+        <string>6</string>
+        <key>LLM_DAILY_TOKEN_BUDGET</key>
+        <string>500000</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 仅在进程异常崩溃(非0退出)时由 launchd 自动拉起续跑(RESUME=auto) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hengxinliu/startup/bt_studio/result/agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hengxinliu/startup/bt_studio/result/agent.log</string>
+</dict>
+</plist>

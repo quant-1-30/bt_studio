@@ -1,0 +1,28 @@
+[Unit]
+Description=bt_studio LLM Feature Mining Flywheel Agent
+After=network-online.target tailscaled.service bt-studio-monitor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/startup/bt_studio
+Environment="BT_STUDIO_ENV=prod"
+Environment="AGENT_STAGE3=off"
+Environment="RESUME=auto"
+Environment="FROM_DATE=20220101"
+Environment="TO_DATE=20230630"
+Environment="N_SIDS=500"
+Environment="AGENT_STEPS=6"
+Environment="LLM_DAILY_TOKEN_BUDGET=500000"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-%h/startup/bt_studio/.env
+ExecStart=/bin/bash -lc 'source scripts/start_env.sh && exec poetry run python scripts/run_agent.py'
+# 正常跑完或 429/预算熔断退出时不盲目死循环重拉; 仅异常崩溃信号或非零退出时延时自愈
+Restart=on-failure
+RestartSec=30
+LimitNOFILE=1048576
+StandardOutput=append:%h/startup/bt_studio/result/agent.log
+StandardError=append:%h/startup/bt_studio/result/agent.log
+
+[Install]
+WantedBy=default.target

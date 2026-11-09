@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.btstudio.monitor</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hengxinliu/startup/bt_studio</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>source scripts/start_env.sh &amp;&amp; exec poetry run python -m uvicorn bt_studio.plugins.api_server.main:app --host "${BT_STUDIO_BIND_HOST:-127.0.0.1}" --port "${PORT:-8800}" --workers 1</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BT_STUDIO_ENV</key>
+        <string>prod</string>
+        <key>BT_STUDIO_API_TOKEN</key>
+        <string>REPLACE_WITH_YOUR_SECRET_TOKEN</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hengxinliu/startup/bt_studio/result/monitor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hengxinliu/startup/bt_studio/result/monitor.log</string>
+</dict>
+</plist>
