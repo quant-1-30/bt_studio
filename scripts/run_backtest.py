@@ -1,100 +1,109 @@
 #!/usr/bin/env python3
+"""Backtest runner consuming OOS score parquets produced by bt_studio."""
 
+import datetime
 import faulthandler
-faulthandler.enable()
-
+import glob
 import os
 import uuid
-import datetime
 import warnings
-import numpy as np
-import polars as pl
 from pathlib import Path
-from collections import defaultdict
+
+import polars as pl
 from dotenv import load_dotenv
 
 import bt_core as bt
-import bt_core.indicators as btind
-from typing import Dict, Any
-
 from bt_core.cerebro import Cerebro
-from bt_core.feeds import *
-from bt_core.brokers import *
+from bt_core.feeds import ParquetPatch
 from bt_core.pnc import Pnc
-from bt_core.utils.dateintern import ts2intdt
-from bt_protocol._protocol import SnapshotBody
+from bt_studio.constant import TUNE_SCORE_DIR
+from bt_studio.default_config import PRODUCTION_COMMON_PARAMS
+from bt_studio.plugins.backtest.sizers import FSMSizer
 
-warnings.filterwarnings('ignore')
-
-
-class FixedSize(bt.Sizer):
-    '''
-    This sizer simply returns a fixed size for any operation.
-    Size can be controlled by number of tranches that a system
-    wishes to use to scale into trades by specifying the ``tranches``
-    parameter.
-    '''
-    def __init__(self, *args, **kwargs):
-        self.stake = kwargs.get("stake", 1.0)
-
-    def _getsizing(self, topk_info: Dict[bytes, Any], snapshot: SnapshotBody, isbuy: bool):
-        if isbuy:
-            ratio = self.stake / len(topk_info)
-            _sizer = {sid: ratio for sid in topk_info.keys()}
-        else:
-            _sizer = {p.sid: 1.0 for p in snapshot.positions if p.size > 0}
-        return _sizer
+faulthandler.enable()
+warnings.filterwarnings("ignore")
 
 
 class FsmStrategy(bt.Strategy):
+    params = (("name", "fsm"),)
 
-    params = (
-        ("name", "fsm"),
+
+def _discover_backtest_scope(scores_dir: str) -> tuple[list[bytes], int, int]:
+    """Discover covered sids and date bounds from scores_*.parquet files."""
+    files = sorted(glob.glob(os.path.join(scores_dir, "scores_*.parquet")))
+    if not files:
+        return (
+            [],
+            int(os.environ.get("FROM_DATE", PRODUCTION_COMMON_PARAMS["start_date"])),
+            int(os.environ.get("TO_DATE", PRODUCTION_COMMON_PARAMS["end_date"])),
+        )
+    df = pl.scan_parquet(files).select(["sid", "day"]).collect()
+    sids = sorted({
+        s if isinstance(s, bytes) else str(s).encode()
+        for s in df["sid"].unique().to_list()
+    })
+    d_min = df["day"].min()
+    d_max = df["day"].max()
+    fromdate = int(d_min.strftime("%Y%m%d")) if hasattr(d_min, "strftime") else int(str(d_min).replace("-", "")[:8])
+    todate = int(d_max.strftime("%Y%m%d")) if hasattr(d_max, "strftime") else int(str(d_max).replace("-", "")[:8])
+    return (
+        sids,
+        int(os.environ.get("FROM_DATE", fromdate)),
+        int(os.environ.get("TO_DATE", todate)),
     )
 
 
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     load_dotenv()
-    cerebro = Cerebro(client_id=uuid.UUID("e9f8cd38-e73c-453f-8a47-55beda640ae6").bytes, fmt="parquet")
+    cerebro = Cerebro(
+        client_id=uuid.UUID("e9f8cd38-e73c-453f-8a47-55beda640ae6").bytes,
+        fmt="parquet",
+    )
 
-    # store / size / pnc
+    # Align holding period (days_held=1) with T entry -> T+1 exit label basis
+    days_held = int(os.environ.get("BT_DAYS_HELD", "1"))
     cerebro.addstore("local")
-    cerebro.addsizer(FixedSize)
-    cerebro.addpnc(Pnc, days_held=5, stake=0.9, dd=0.25, max_positions=5) 
+    cerebro.addsizer(FSMSizer, stake=0.9)
+    cerebro.addpnc(Pnc, days_held=days_held, stake=0.9, dd=0.25, max_positions=5)
 
-    # RISK timer - max_positions 
+    # T+1 session start risk & exit check
     cerebro.add_timer(
         when=bt.timer.Session.SESSION_START,
-        offset=datetime.timedelta(minutes=0),  
+        offset=datetime.timedelta(minutes=0),
         weekdays=[1, 2, 3, 4, 5],
         weekcarry=False,
-        event_type=bt.timer.TimerEvent.RISK
+        event_type=bt.timer.TimerEvent.RISK,
     )
 
-    # TRADE timer - Plan
+    # T session end - 10min (14:50) signal entry plan (matching exclude_bars=10)
     cerebro.add_timer(
         when=bt.timer.Session.SESSION_END,
         offset=datetime.timedelta(minutes=-10),
         weekdays=[1, 2, 3, 4, 5],
         weekcarry=False,
-        event_type=bt.timer.TimerEvent.TRADE
+        event_type=bt.timer.TimerEvent.TRADE,
     )
 
-    # resample
-    ddata = cerebro.resampledata(timeframe=bt.TimeFrame.Days, adjbartime=False)
-    wdata = cerebro.resampledata(timeframe=bt.TimeFrame.Weeks, adjbartime=False)
+    cerebro.resampledata(timeframe=bt.TimeFrame.Days, adjbartime=False)
+    cerebro.resampledata(timeframe=bt.TimeFrame.Weeks, adjbartime=False)
 
-    # add parquet
-    from bt_core.feeds import ParquetPatch
-    patch_data = ParquetPatch(parquet_path=Path("~/startup/bt_studio/result/fsm/scores").expanduser())
+    scores_dir = os.environ.get("BT_STUDIO_SCORE_DIR", TUNE_SCORE_DIR)
+    patch_data = ParquetPatch(parquet_path=Path(scores_dir).expanduser())
     cerebro.adddata(patch_data)
-
     cerebro.addstrategy(FsmStrategy)
 
+    sids, fromdate, todate = _discover_backtest_scope(scores_dir)
+    benchmark = [str(PRODUCTION_COMMON_PARAMS["benchmark"]).encode()]
+
     try:
-        cerebro.run(cash=100000, sid=[b"300308"], fromdate=20040101, todate=20260531, benchmark=[b"1A0001"])
+        cerebro.run(
+            cash=float(os.environ.get("BT_CASH", "1000000")),
+            sid=sids,
+            fromdate=fromdate,
+            todate=todate,
+            benchmark=benchmark,
+        )
     except Exception as e:
-        print(f"运行报错: {e}")
-        if hasattr(cerebro, '_shutdown'):
+        print(f"Backtest error: {e}")
+        if hasattr(cerebro, "_shutdown"):
             cerebro._shutdown()

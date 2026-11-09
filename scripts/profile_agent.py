@@ -18,7 +18,7 @@ def main() -> int:
     import runpy
     import run_agent  # noqa: F401  (ensures path setup)
 
-    target = "/Users/hengxinliu/startup/bt_studio/scripts/run_agent.py"
+    target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_agent.py")
 
     prof = cProfile.Profile()
     try:

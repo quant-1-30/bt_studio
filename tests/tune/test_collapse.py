@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
+"""HPO 参数空间塌陷检测 (utils.diagnostics.collapse) 单测。
 
-import os
-import sys
+由原脚本式 main() 测试改写为 pytest 用例 (原版 pytest 收集数为 0)。
+"""
+
 import json
+import os
 import tempfile
 
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, PROJECT_ROOT)
-
 from bt_studio.utils.diagnostics import (
     detect_space_collapse,
     print_collapse_report,
     build_collapse_report,
-    save_collapse_report,
 )
+from bt_studio.utils.io import atomic_save_json
+
 from bt_studio.utils.diagnostics.hpo_check import build_search_bounds
 
 RNG = np.random.default_rng(42)
@@ -48,12 +49,7 @@ def _healthy_df():
 
 
 def _collapsed_df():
-    """Narrow-band continuous sampling (spread 0.17 < 0.4) + group step.
-
-    The ds==5 group sits far above the rest, inflating the global IQR so
-    noise slices stay under the spike threshold; lookback never reaches
-    beyond [20, 35] inside its [10, 100] search range.
-    """
+    """Narrow-band continuous sampling (spread 0.17 < 0.4) + group step."""
     rng = np.random.default_rng(7)
     n = 60
     ds = rng.choice([3, 4, 5], n)
@@ -92,42 +88,67 @@ def _flat_df(n=40):
                      "threshold_r": tr, "metrics_score": score}), bounds
 
 
-def main() -> int:
-    # --- verdicts ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# verdicts
+# ---------------------------------------------------------------------------
+
+def test_verdict_healthy_plateau():
     df, bounds = _healthy_df()
     v = detect_space_collapse(df, "metrics_score", bounds)["overall_verdict"]
-    healthy_df, healthy_bounds = df, bounds
     assert v == "healthy_plateau", f"expected healthy_plateau, got {v}"
-    print(f"[ok] healthy → {v}")
 
+
+def test_verdict_collapsed():
     df, bounds = _collapsed_df()
     v = detect_space_collapse(df, "metrics_score", bounds)["overall_verdict"]
     assert v == "collapsed", f"expected collapsed, got {v}"
-    print(f"[ok] collapsed → {v}")
 
+
+def test_verdict_isolated_spike():
     df, bounds = _spike_df()
     v = detect_space_collapse(df, "metrics_score", bounds)["overall_verdict"]
     assert v == "isolated_spike", f"expected isolated_spike, got {v}"
-    print(f"[ok] spike → {v}")
 
+
+def test_verdict_flat_landscape():
     df, bounds = _flat_df()
     v = detect_space_collapse(df, "metrics_score", bounds)["overall_verdict"]
     assert v == "flat_landscape", f"expected flat_landscape, got {v}"
-    print(f"[ok] flat → {v}")
 
-    # --- build_search_bounds ------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# build_search_bounds
+# ---------------------------------------------------------------------------
+
+def test_build_search_bounds():
     sb = build_search_bounds({
         "downsample": [3, 4, 5], "motif_minutes": [30, 45, 60, 90],
-        "threshold_r": [0.65, 0.85], "num_trials": 50,
+        "threshold_r": {"type": "uniform", "low": 0.65, "high": 0.85}, "num_trials": 50,
     })
     assert sb["downsample"] == [3, 4, 5], sb
     assert sb["motif_minutes"] == [30, 45, 60, 90], sb
     assert sb["threshold_r"] == [0.65, 0.85], sb
     assert "num_trials" not in sb
-    print("[ok] build_search_bounds: discrete passthrough + continuous min/max + budget skipped")
 
-    # --- report roundtrip ----------------------------------------------------
-    df, bounds = healthy_df, healthy_bounds
+
+def test_build_search_bounds_accepts_normalized_spec():
+    """build_exp_config 的 normalized search_spec 也必须能转成 collapse bounds。"""
+    sb = build_search_bounds({
+        "downsample": {"type": "choice", "values": [3, 4, 5]},
+        "threshold_r": {"type": "uniform", "low": 0.65, "high": 0.85},
+        "num_trials": {"type": "choice", "values": [2]},
+    })
+    assert sb["downsample"] == [3, 4, 5], sb
+    assert sb["threshold_r"] == [0.65, 0.85], sb
+    assert "num_trials" not in sb
+
+
+# ---------------------------------------------------------------------------
+# report roundtrip
+# ---------------------------------------------------------------------------
+
+def test_collapse_report_json_roundtrip():
+    df, bounds = _healthy_df()
     diag = detect_space_collapse(df, "metrics_score", bounds)
     report = build_collapse_report("fsm_hpo_test_202412", "test_feat", 202412,
                                    diag, bounds)
@@ -138,20 +159,15 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "collapse_202412_test_feat.json")
-        save_collapse_report(report, path)
+        atomic_save_json(report, path)
         with open(path, "r", encoding="utf-8") as f:
             loaded = json.load(f)
         assert loaded["verdict"] == report["verdict"]
         assert loaded["diagnostics"] == report["diagnostics"]
-    print("[ok] collapse report JSON roundtrip")
 
+
+def test_print_collapse_report_renders_verdict():
+    df, bounds = _healthy_df()
+    diag = detect_space_collapse(df, "metrics_score", bounds)
     text = print_collapse_report(diag)
     assert "healthy_plateau".upper() in text.upper()
-    print("[ok] print_collapse_report renders verdict")
-
-    print("\n[test_collapse] ALL PASS")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

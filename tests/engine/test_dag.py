@@ -18,8 +18,10 @@ def test_parser():
     hpo = parse_dag("wfo_hpo")
     assert prod.name == "wfo_production" and hpo.name == "wfo_hpo"
 
+    # 2026-10 重构: oos 节点从 train_paths 尾部自行推导 warmup 月,
+    # 独立 extract_warmup 节点已删除
     assert set(prod.graph.nodes) == {
-        "macro", "extract_train", "extract_oos", "extract_warmup",
+        "macro", "extract_train", "extract_oos",
         "decay", "train_data", "tune", "update", "oos"}
     assert set(hpo.graph.nodes) == {"macro", "extract_train", "train_data", "tune"}
 
@@ -78,8 +80,9 @@ class MockNodes:
 
     def fake_decay(self, prev_model_id, prev_oos_yms, dret_path, train_paths, common_config):
         self.calls.append(("decay", prev_model_id, tuple(prev_oos_yms)))
-        from bt_studio.utils.months import paths_for_months
-        assert len(paths_for_months(train_paths, prev_oos_yms)) == len(prev_oos_yms)
+        # 关键不变量: executor 传入的 train_paths 必须覆盖 prev_oos_yms
+        # (decay 节点按月份后缀自行解析)
+        assert all(any(f"_{ym}.parquet" in p for p in train_paths) for ym in prev_oos_yms)
         # return True for tune branch, False for update branch
         return prev_model_id is None or self.decay_verdict
 
@@ -95,9 +98,9 @@ class MockNodes:
         self.calls.append(("update", model_id, prev_model_id))
         return model_id
 
-    def fake_oos(self, model_id, dret_path, oos_yms, oos_paths, warmup_paths, common_config):
+    def fake_oos(self, model_id, dret_path, oos_yms, oos_paths, common_config, train_paths=None):
         self.calls.append(("oos", model_id, tuple(oos_yms)))
-        assert oos_paths and warmup_paths
+        assert oos_paths and train_paths
 
 
 def _setup_mock_executor(mocks):
@@ -115,16 +118,16 @@ def _setup_mock_executor(mocks):
 
 def test_executor_wfo_production():
     saved = dict(ex.NODE_REGISTRY)
-    saved_lam = ex.retreive_available_months
+    saved_lam = ex.retrieve_available_months
     try:
         mocks = MockNodes()
         _setup_mock_executor(mocks)
         months = [202101 + m for m in range(12)] + [202201, 202202, 202203]
-        ex.retreive_available_months = lambda p: list(months)
+        ex.retrieve_available_months = lambda p: list(months)
 
-        exp = {"common_params": {"train_window": 3, "oss_step": 3, "num_workers": 1,
+        exp = {"common_params": {"train_window": 3, "oos_step": 3, "num_workers": 1,
                                  "feature_col": "f"},
-               "search_bounds": {}}
+               "search_spec": {}}
 
         # production: 4 windows — w1 tune (cold start), w2-4 inherit model (update)
         mocks.decay_verdict = False
@@ -152,21 +155,21 @@ def test_executor_wfo_production():
     finally:
         ex.NODE_REGISTRY.clear()
         ex.NODE_REGISTRY.update(saved)
-        ex.retreive_available_months = saved_lam
+        ex.retrieve_available_months = saved_lam
 
 
 def test_executor_wfo_hpo():
     saved = dict(ex.NODE_REGISTRY)
-    saved_lam = ex.retreive_available_months
+    saved_lam = ex.retrieve_available_months
     try:
         mocks = MockNodes()
         _setup_mock_executor(mocks)
         months = [202101 + m for m in range(12)] + [202201, 202202, 202203]
-        ex.retreive_available_months = lambda p: list(months)
+        ex.retrieve_available_months = lambda p: list(months)
 
-        exp = {"common_params": {"train_window": 3, "oss_step": 3, "num_workers": 1,
+        exp = {"common_params": {"train_window": 3, "oos_step": 3, "num_workers": 1,
                                  "feature_col": "f"},
-               "search_bounds": {}}
+               "search_spec": {}}
 
         # hpo: single window, train slice only, no decay/update/oos calls
         mocks.calls.clear()
@@ -186,17 +189,17 @@ def test_executor_wfo_hpo():
     finally:
         ex.NODE_REGISTRY.clear()
         ex.NODE_REGISTRY.update(saved)
-        ex.retreive_available_months = saved_lam
+        ex.retrieve_available_months = saved_lam
 
 
 def test_executor_resume_and_fail_fast():
     saved = dict(ex.NODE_REGISTRY)
-    saved_lam = ex.retreive_available_months
+    saved_lam = ex.retrieve_available_months
     try:
         mocks = MockNodes()
         _setup_mock_executor(mocks)
         months = [202101 + m for m in range(12)] + [202201, 202202, 202203]
-        ex.retreive_available_months = lambda p: list(months)
+        ex.retrieve_available_months = lambda p: list(months)
 
         # fail-fast: node exception raises with repr_graph
         def boom(*args, **kwargs):
@@ -206,11 +209,11 @@ def test_executor_resume_and_fail_fast():
         exp = {
             "common_params": {
                 "train_window": 3,
-                 "oss_step": 3, 
+                 "oos_step": 3, 
                  "num_workers": 1, 
                  "feature_col": "f"
                  }, 
-            "search_bounds": {}
+            "search_spec": {}
         }
         
         try:
@@ -225,12 +228,12 @@ def test_executor_resume_and_fail_fast():
         exp2 = {
             "common_params": {
                 "train_window": 3,
-                "oss_step": 3,
+                "oos_step": 3,
                 "num_workers": 1,
                 "feature_col": "f",
                 "last_model_id": 202106,  # 202106 已完成
             },
-            "search_bounds": {},
+            "search_spec": {},
         }
         res_r = ex.run_dag(parse_dag("wfo_production"), exp2, ast_recipe={"op": "x"})
 
@@ -242,7 +245,7 @@ def test_executor_resume_and_fail_fast():
     finally:
         ex.NODE_REGISTRY.clear()
         ex.NODE_REGISTRY.update(saved)
-        ex.retreive_available_months = saved_lam
+        ex.retrieve_available_months = saved_lam
 
 
 def test_config_strict():
@@ -270,11 +273,11 @@ def test_intake():
     with open(bad, "w") as f:
         f.write("{not json")
 
+    from bt_studio.engine.task_manager import TaskRegistry
     tm = AsyncTaskManager.__new__(AsyncTaskManager)
-    tm._tasks, tm._lock = {}, __import__("threading").Lock()
+    tm._registry = TaskRegistry(max_queued=100, max_history=200)
     tm._queue = __import__("queue").Queue()
-    tm._max_queued_tasks = 100
-    tm._max_history_tasks = 200
+    tm._running = False
     tm._intake_dir = tmp
     assert tm._drain_intake_once() == 2
     _, dag1, cfg1, _ = tm._queue.get_nowait()
