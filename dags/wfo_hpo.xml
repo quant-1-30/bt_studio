@@ -5,6 +5,6 @@
   <window from="last-trainable"/>
   <node id="macro"         fn="node_prepare_macro"/>
   <node id="extract_train" fn="node_extract_feature_monthly" role="train" deps="macro"/>
-  <node id="train_data"    fn="node_prepare_train_data"      deps="macro, extract_train>train_paths"/>
-  <node id="tune"          fn="node_tune_monthly"            deps="train_data"/>
+  <node id="train_data"    fn="node_prepare_train"      deps="macro, extract_train>train_paths"/>
+  <node id="tune"          fn="node_tune_monthly"            output="model_id" deps="train_data"/>
 </pipeline>
