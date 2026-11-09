@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-import pandas as pd
+import numpy as np
 
 try:
     import talib
@@ -13,8 +10,11 @@ except ImportError:  # pragma: no cover
     talib = None
 
 
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 # ---------------------------------------------------------------------------
-# dataclass
+# Data Specifications
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -32,15 +32,15 @@ class ParamSpec:
 
 @dataclass(frozen=True)
 class TalibOpSpec:
-    op: str                                # AST 
-    func: str                              # talib C 
-    inputs: Tuple[str, ...]               
-    params: Tuple[ParamSpec, ...]          
-    output_index: Optional[int] = None     
-    prior_refs: Tuple[str, ...] = ()       
-    primitive_equiv: Optional[Dict[str, Any]] = None  # Primitive AST
-    equiv_note: str = ""                  
-    summary: str = ""                    
+    op: str                                # AST 算子名称
+    func: str                              # TA-Lib 底层 C 函数名
+    inputs: Tuple[str, ...]                # 依赖输入列名序列
+    params: Tuple[ParamSpec, ...]          # 超参数规范
+    output_index: Optional[int] = None     # 多返回值索引
+    prior_refs: Tuple[str, ...] = ()       # 经典 Alpha 参照编号
+    primitive_equiv: Optional[Dict[str, Any]] = None  # 原语等价 AST 表达式
+    equiv_note: str = ""                   # 对应量化物理含义备注
+    summary: str = ""                      # 简要物理描述
 
 
 REGISTRY: Dict[str, TalibOpSpec] = {}
@@ -51,6 +51,10 @@ def _register(spec: TalibOpSpec) -> TalibOpSpec:
     return spec
 
 
+# ---------------------------------------------------------------------------
+# Whitelist Specifications
+# ---------------------------------------------------------------------------
+
 _register(TalibOpSpec(
     op="rsi",
     func="RSI",
@@ -59,7 +63,7 @@ _register(TalibOpSpec(
     prior_refs=("wq038",),
     primitive_equiv=None,
     equiv_note="Wilder recursive smooth ---> ts_rank(delta(close,N))",
-    summary="Wilder",
+    summary="Wilder 相对强弱指标",
 ))
 
 _register(TalibOpSpec(
@@ -69,8 +73,8 @@ _register(TalibOpSpec(
     params=(ParamSpec("timeperiod", 2, 250, default=14),),
     prior_refs=("wq001",),
     primitive_equiv=None,
-    equiv_note="AROONOSC = 100*(距最低点天数 - 距最高点天数)/N, 与极值新鲜度线性等价 (WQ#1 同族)",
-    summary="新高/新低新鲜度指标",
+    equiv_note="AROONOSC = 100*(距最低点天数 - 距最高点天数)/N, 与极值新鲜度线性等价",
+    summary="新高/新低极值新鲜度",
 ))
 
 _register(TalibOpSpec(
@@ -80,8 +84,8 @@ _register(TalibOpSpec(
     params=(ParamSpec("timeperiod", 2, 250, default=14),),
     prior_refs=("wq024",),
     primitive_equiv=None,
-    equiv_note="DMI 方向运动经双平滑后归一, 用作趋势/横盘 regime 开关 (对应 WQ#24 均线 regime)",
-    summary="趋势强度(无量纲 regime 开关)",
+    equiv_note="DMI 方向运动经双平滑后归一, 纯粹的无量纲趋势强度",
+    summary="趋势强度 (无量纲 Regime 开关)",
 ))
 
 _register(TalibOpSpec(
@@ -91,7 +95,7 @@ _register(TalibOpSpec(
     params=(ParamSpec("timeperiod", 2, 250, default=14),),
     prior_refs=("wq007", "wq043"),
     primitive_equiv=None,
-    equiv_note="typical price x volume 的资金流向比, 即成交量加权 RSI (对应 WQ#7/#43 量价确认)",
+    equiv_note="typical price x volume 资金流向比, 即成交量加权 RSI",
     summary="量加权动量 (量价确认)",
 ))
 
@@ -102,7 +106,7 @@ _register(TalibOpSpec(
     params=(ParamSpec("timeperiod", 2, 250, default=14),),
     prior_refs=("wq052",),
     primitive_equiv=None,
-    equiv_note="三重 EMA 的百分比变化率, 超平滑长周期趋势方向 (对应 WQ#52 长周期动量)",
+    equiv_note="三重 EMA 变化率, 超平滑长周期动量",
     summary="三重平滑趋势动量",
 ))
 
@@ -125,8 +129,8 @@ _register(TalibOpSpec(
             100,
         ],
     },
-    equiv_note="精确等价: CMO = 100 * ΣΔ / Σ|Δ|; talib 版保留作原语层数值校准基准",
-    summary="涨跌幅归一差 (WQ#30 符号和的连续化)",
+    equiv_note="精确等价: CMO = 100 * ΣΔ / Σ|Δ|; 符号和连续化",
+    summary="涨跌幅归一差",
 ))
 
 _register(TalibOpSpec(
@@ -141,11 +145,9 @@ _register(TalibOpSpec(
     output_index=0,
     prior_refs=(),
     primitive_equiv=None,
-    equiv_note="RSI 在自身 N 日区间中的相对位置 (嵌套归一化); fastd_period 冻结为 3",
+    equiv_note="RSI 在自身 N 日区间中的相对位置; fastd_period 冻结为 3",
     summary="RSI 区间相对位置 (嵌套归一动量)",
 ))
-
-# ---- Frozen Vary include fixed restrict ----
 
 _register(TalibOpSpec(
     op="ultosc",
@@ -153,11 +155,11 @@ _register(TalibOpSpec(
     inputs=("high", "low", "close"),
     params=(
         ParamSpec("timeperiod1", 2, 250, fixed=7, default=7),
-        ParamSpec("timeperiod2", 2, 250, default=14), 
+        ParamSpec("timeperiod2", 2, 250, default=14),
         ParamSpec("timeperiod3", 2, 250, fixed=28, default=28),
     ),
     prior_refs=(),
-    equiv_note="三窗口买卖压力复合动量; p1/p3 冻结 (7/28), 只暴露 p2, 满足单特征至多 1 个自由参数规则",
+    equiv_note="三窗口买卖压力复合动量; p1/p3 冻结为 7/28, 保证至多 1 个自由维度",
     summary="终极振荡器 (p1/p3 冻结为 7/28)",
 ))
 
@@ -183,12 +185,12 @@ for _name, _idx, _note in (
 
 
 # ---------------------------------------------------------------------------
-# Static AST Validate
+# Validation & Warmup Calculations
 # ---------------------------------------------------------------------------
 
 def validate_node(node: Any) -> List[str]:
     if not isinstance(node, dict):
-        return ["节点必须是 JSON 对象"]
+        return ["节点必须是 JSON 字典对象"]
 
     op = node.get("op")
     spec = REGISTRY.get(op)
@@ -197,97 +199,48 @@ def validate_node(node: Any) -> List[str]:
 
     args = node.get("args")
     if not isinstance(args, list):
-        return [f"{op}: args 必须是数组"]
+        return [f"{op}: args 必须是列表"]
 
     n_expected = len(spec.inputs) + len(spec.params)
     if len(args) != n_expected:
         return [
             f"{op}: args 应有 {n_expected} 项 "
-            f"({len(spec.inputs)} 个字段引用 + {len(spec.params)} 个整数参数), 实际 {len(args)} 项"
+            f"({len(spec.inputs)} 个字段引用 + {len(spec.params)} 个参数), 实际 {len(args)} 项"
         ]
 
     errors: List[str] = []
 
+    # 1. 字段引用校验
     for i, col in enumerate(spec.inputs):
         a = args[i]
-        if not (isinstance(a, dict) and set(a) == {"col"} and a.get("col") == col):
+        if not (isinstance(a, dict) and "col" in a and str(a.get("col")).strip() == col):
             errors.append(f'{op}: args[{i}] 应为字段引用 {{"col": "{col}"}}')
 
-    for j, p in enumerate(spec.params): # p is ParamSpec
+    # 2. 参数类型与边界校验
+    for j, p in enumerate(spec.params):
         v = args[len(spec.inputs) + j]
-        if isinstance(v, bool) or not isinstance(v, int):
+
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            errors.append(f"{op}: 参数 {p.name} 必须为数值, 实际 {v!r}")
+            continue
+
+        if isinstance(v, float) and not v.is_integer():
             errors.append(f"{op}: 参数 {p.name} 必须为整数, 实际 {v!r}")
             continue
 
-        if p.fixed is not None and v != p.fixed:
-            errors.append(f"{op}: 参数 {p.name} 已冻结为 {p.fixed}, 实际传入 {v}")
+        v_int = int(v)
 
-        if not (p.minimum <= v <= p.maximum):
-            errors.append(f"{op}: 参数 {p.name} 应在 [{p.minimum}, {p.maximum}] 区间内, 实际 {v}")
+        if p.fixed is not None and v_int != p.fixed:
+            errors.append(f"{op}: 参数 {p.name} 已冻结为 {p.fixed}, 实际传入 {v_int}")
+
+        if not (p.minimum <= v_int <= p.maximum):
+            errors.append(f"{op}: 参数 {p.name} 应在 [{p.minimum}, {p.maximum}] 区间内, 实际 {v_int}")
 
     return errors
 
 
-_LOOKBACK: Dict[str, Callable[..., int]] = {
-    "rsi": lambda t: t,
-    "aroon_osc": lambda t: t,
-    "adx": lambda t: 2 * t,
-    "mfi": lambda t: t,
-    "trix": lambda t: 3 * t + 10,
-    "cmo": lambda t: t,
-    "stoch_rsi": lambda t, k, d: t + k + d,
-    "ultosc": lambda p1, p2, p3: p1 + p2 + p3,
-    "macd": lambda f, s, g: s + g + 50,
-}
-_LOOKBACK["macd_signal"] = _LOOKBACK["macd"]
-_LOOKBACK["macd_hist"] = _LOOKBACK["macd"]
-
-
-def warmup_bars(node: Dict[str, Any]) -> int:
-    op = node.get("op", "")
-    spec = REGISTRY.get(op)
-    if not spec:
-        return 0
-
-    args = node.get("args", [])
-    raw_params = args[len(spec.inputs):]
-
-    params = []
-    for p in raw_params:
-        if isinstance(p, (int, float)) and not isinstance(p, bool):
-            params.append(int(p))
-
-    fn = _LOOKBACK.get(spec.op)
-    if fn is None:
-        return max(params) if params else 0
-
-    try:
-        return int(fn(*params))
-    except (TypeError, ValueError):
-        return max(params) if params else 0
-
-
-# ---------------------------------------------------------------------------
-# Execute and Prompt Render
-# ---------------------------------------------------------------------------
-
-def compute(df: pd.DataFrame, node: Dict[str, Any]) -> pd.Series:
-    if talib is None:
-        raise RuntimeError("pip install TA-Lib")
-
-    spec = REGISTRY[node["op"]]
-    arrays = [df[c].to_numpy(dtype=float) for c in spec.inputs]
-    params = list(node["args"][len(spec.inputs):])
-
-    raw = getattr(talib, spec.func)(*arrays, *params)
-    if isinstance(raw, tuple):
-        raw = raw[spec.output_index if spec.output_index is not None else 0]
-
-    return pd.Series(raw, index=df.index, name=spec.op)
-
-
 def format_ops_help() -> str:
-    lines = ["[TA-Lib 白名单算子](参数必须显式给出且为整数; =N 表示已冻结):"]
+    lines = ["[TA-Lib 白名单算子](参数必须显式给出且为整数; <p=N> 表示已冻结约束):"]
     for spec in REGISTRY.values():
         cols = ", ".join(f'{{"col": "{c}"}}' for c in spec.inputs)
         ps = ", ".join(
@@ -297,26 +250,6 @@ def format_ops_help() -> str:
         prior = f" [{','.join(spec.prior_refs)}]" if spec.prior_refs else ""
         lines.append(f"  {spec.op}({cols}, {ps}){prior}  # {spec.summary}")
     lines.append(
-        "  严禁堆叠名指标组合 (RSI+MACD+KDJ); "
-        "MOM/ROC/APO/BOP/WILLR 等请用原语层组合，不在白名单内."
+        "  约束: 严禁堆叠同质化经典指标; MOM/ROC/APO/BOP/WILLR 等请用原语层组合，不在白名单内."
     )
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Reject Due to Duplicate and multi dimensions
-# ---------------------------------------------------------------------------
-
-REJECTED: Dict[str, str] = {
-    "MOM": "delta(close, N) — 原语已有",
-    "ROC": "roc — 原语已有",
-    "APO": "sub(sma(close,f), sma(close,s))",
-    "PPO": "APO / sma(close,s) — 归一化均线差",
-    "BOP": "div(sub(close,open), sub(high,low)) — 即 WQ#101",
-    "WILLR": "-div(sub(max(high,N),close), sub(max(high,N),min(low,N))) — 区间位置, WQ#24 同族",
-    "AROON": "双输出, 只取 AROONOSC",
-    "STOCH/STOCHF": "区间位置同 WILLR, %K/%D 平滑可由 sma 组合",
-    "MINUS_DI/PLUS_DI/MINUS_DM/PLUS_DM": "ADX 内部组件",
-    "DX/ADXR": "ADX 原始值/平滑值",
-    "MACDEXT/MACDFIX": "MACD 冗余变体, 参数不显式",
-}
