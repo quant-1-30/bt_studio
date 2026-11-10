@@ -1,4 +1,5 @@
 #! /usr/bin/env python3
+"""Ray runtime context and platform-adaptive hardware concurrency resolver."""
 
 from __future__ import annotations
 
@@ -13,7 +14,6 @@ import ray
 
 logger = logging.getLogger(__name__)
 
-# Set single-thread environment defaults before C/Rust libraries initialize
 _THREAD_ENV_VARS = {
     "POLARS_MAX_THREADS": "1",
     "RAYON_NUM_THREADS": "1",
@@ -40,23 +40,10 @@ def _get_system_total_ram() -> int:
         return int(psutil.virtual_memory().total)
     except ImportError:
         pass
-
     try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        return int(pages * page_size)
+        return int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
     except (ValueError, AttributeError, OSError):
-        return 16 * 1024 * 1024 * 1024
-
-
-def is_ray_ready() -> bool:
-    """Return True if the local or remote Ray cluster is initialized."""
-    return ray.is_initialized()
-
-
-def get_ray_cluster_resources() -> Dict[str, float]:
-    """Return total cluster compute and memory resources."""
-    return ray.cluster_resources() if ray.is_initialized() else {}
+        return 16 * (1024 ** 3)
 
 
 def _shutdown() -> None:
@@ -82,14 +69,13 @@ def _resolve_platform_ray_defaults() -> Dict[str, Any]:
         plasma_limit = int(float(env_gb) * (1024 ** 3))
     else:
         ratio = 0.20 if is_darwin else 0.30
-        default_cap_gb = 16 if is_darwin else 64
-        plasma_limit = min(int(total_ram * ratio), default_cap_gb * (1024 ** 3))
+        cap_gb = 16 if is_darwin else 64
+        plasma_limit = min(int(total_ram * ratio), cap_gb * (1024 ** 3))
 
     if is_linux and os.path.exists("/dev/shm"):
         try:
             shm_stat = os.statvfs("/dev/shm")
-            shm_total = shm_stat.f_frsize * shm_stat.f_blocks
-            plasma_limit = min(plasma_limit, int(shm_total * 0.80))
+            plasma_limit = min(plasma_limit, int(shm_stat.f_frsize * shm_stat.f_blocks * 0.80))
         except Exception:
             pass
 
@@ -106,10 +92,8 @@ def _resolve_platform_ray_defaults() -> Dict[str, Any]:
 def resolve_platform_concurrency() -> Dict[str, int]:
     """Derive platform-adaptive concurrency knobs (num_workers, eval_procs, tick_batch_sids)."""
     hw = _resolve_platform_ray_defaults()
-    cpus = hw["cpus"]
-    ram_gb = hw["total_ram"] / (1024 ** 3)
+    cpus, ram_gb, is_linux = hw["cpus"], hw["total_ram"] / (1024 ** 3), hw["is_linux"]
 
-    is_linux = hw["is_linux"]
     hpo_workers = max(4, int(cpus * 0.75)) if is_linux else min(12, max(2, cpus - 2))
     eval_procs = min(24, max(4, cpus // (3 if cpus >= 32 else 2))) if is_linux else min(8, max(2, cpus // 2))
     tick_batch = (128 if ram_gb >= 128 else 32) if is_linux else (16 if ram_gb >= 64 else 8)
@@ -136,18 +120,11 @@ def ensure_ray(
             return
 
         hw = _resolve_platform_ray_defaults()
-        env_cpus = os.environ.get("RAY_NUM_CPUS")
-        cpus = num_cpus or (int(env_cpus) if env_cpus and env_cpus.isdigit() else hw["cpus"])
-        plasma_limit = (
-            object_store_memory_bytes
-            if object_store_memory_bytes is not None
-            else hw["plasma_limit"]
-        )
-        enable_dash = (
-            include_dashboard
-            if include_dashboard is not None
-            else (os.environ.get("RAY_DASHBOARD", "0") == "1")
-        )
+        env_cpus = os.environ.get("RAY_NUM_CPUS", "")
+        cpus = num_cpus or (int(env_cpus) if env_cpus.isdigit() else hw["cpus"])
+        plasma_limit = object_store_memory_bytes if object_store_memory_bytes is not None else hw["plasma_limit"]
+        enable_dash = include_dashboard if include_dashboard is not None else (os.environ.get("RAY_DASHBOARD", "0") == "1")
+        dash_host = os.environ.get("RAY_DASHBOARD_HOST", os.environ.get("BT_STUDIO_BIND_HOST", "127.0.0.1"))
 
         init_kwargs: Dict[str, Any] = {
             "num_cpus": cpus,
@@ -157,16 +134,9 @@ def ensure_ray(
             "logging_level": logging_level,
             "ignore_reinit_error": True,
         }
-
         node_ip = os.environ.get("RAY_NODE_IP_ADDRESS", "").strip()
         if node_ip:
             init_kwargs["_node_ip_address"] = node_ip
-
-        dash_host = (
-            os.environ.get("RAY_DASHBOARD_HOST")
-            or os.environ.get("BT_STUDIO_BIND_HOST")
-            or "127.0.0.1"
-        )
         if enable_dash:
             init_kwargs["dashboard_host"] = dash_host
 

@@ -1,18 +1,17 @@
 #! /usr/bin/env python3
+"""XML DAG parser and static topology validator."""
 
 from __future__ import annotations
 
 import os
 import re
 import xml.etree.ElementTree as ET
+from typing import List, Tuple
 
 import networkx as nx
 
-from typing import Dict, List, Optional, Tuple
-
 from bt_studio.constant import DAGS_DIR
 from bt_studio.schema import DagWindow, Dep, DepTerm, PipelineDag
-
 
 _ROLES = {"train", "oos", "prev_oos", "warmup"}
 _WINDOW_FROM_VALUES = {"first", "last-trainable"}
@@ -32,9 +31,7 @@ class DagValidationError(Exception):
 
 def _resolve_path(ref: str) -> str:
     if ref.endswith(".xml"):
-        if os.path.isabs(ref) or os.path.exists(ref):
-            return ref
-        return os.path.join(DAGS_DIR, ref)
+        return ref if (os.path.isabs(ref) or os.path.exists(ref)) else os.path.join(DAGS_DIR, ref)
     return os.path.join(DAGS_DIR, f"{ref}.xml")
 
 
@@ -65,8 +62,7 @@ def _parse_deps(raw: str, path: str, nid: str) -> Tuple[Dep, ...]:
 def list_dags() -> list[str]:
     if not os.path.isdir(DAGS_DIR):
         return []
-    return sorted(os.path.splitext(f)[0] for f in os.listdir(DAGS_DIR)
-                  if f.endswith(".xml"))
+    return sorted(os.path.splitext(f)[0] for f in os.listdir(DAGS_DIR) if f.endswith(".xml"))
 
 
 def parse_dag(ref: str) -> PipelineDag:
@@ -88,9 +84,7 @@ def parse_dag(ref: str) -> PipelineDag:
     if w_el is not None:
         from_ = w_el.get("from", "first")
         if from_ not in _WINDOW_FROM_VALUES:
-            raise DagValidationError(
-                f"{path}: window from={from_!r} 非法 (允许值: {sorted(_WINDOW_FROM_VALUES)})"
-            )
+            raise DagValidationError(f"{path}: window from={from_!r} 非法 (允许值: {sorted(_WINDOW_FROM_VALUES)})")
         window = DagWindow(
             from_=from_,
             step_key=w_el.get("step-key", "oos_step"),
@@ -98,8 +92,6 @@ def parse_dag(ref: str) -> PipelineDag:
         )
 
     g = nx.MultiDiGraph()
-    deps_by_node: Dict[str, Tuple[Dep, ...]] = {}
-
     for el in root.findall("node"):
         nid, fn = el.get("id"), el.get("fn")
         if not nid or not fn:
@@ -113,42 +105,26 @@ def parse_dag(ref: str) -> PipelineDag:
 
         output = el.get("output")
         if output is not None and not _CTX_KEY_RE.match(output):
-            raise DagValidationError(
-                f"{path}: node {nid}: output={output!r} 必须为合法的上下文标识符"
-            )
+            raise DagValidationError(f"{path}: node {nid}: output={output!r} 必须为合法的上下文标识符")
 
-        raw_deps = (el.get("deps") or "").strip()
+        raw_deps = el.get("deps", "").strip()
         node_deps = _parse_deps(raw_deps, path, nid) if raw_deps else ()
-
         g.add_node(nid, fn=fn, role=role, output=output, deps=node_deps)
-        deps_by_node[nid] = node_deps
 
-    for nid, deps in deps_by_node.items():
+    for nid, deps in g.nodes(data="deps"):
         for dep in deps:
             for t in dep.terms():
                 if t.node == nid or t.cond == nid:
-                    raise DagValidationError(
-                        f"{path}: 节点 {nid!r} 不允许依赖自身 (Self-dependency forbidden)"
-                    )
-
+                    raise DagValidationError(f"{path}: 节点 {nid!r} 不允许依赖自身 (Self-dependency forbidden)")
                 if t.node not in g:
-                    raise DagValidationError(
-                        f"{path}: node {nid}: 依赖了未定义的节点 {t.node!r}"
-                    )
+                    raise DagValidationError(f"{path}: node {nid}: 依赖了未定义的节点 {t.node!r}")
 
                 if t.cond:
                     if t.cond not in g:
-                        raise DagValidationError(
-                            f"{path}: node {nid}: 条件门控依赖了未定义的节点 {t.cond!r}"
-                        )
+                        raise DagValidationError(f"{path}: node {nid}: 条件门控依赖了未定义的节点 {t.cond!r}")
                     ctrl_key = f"ctrl_{t.cond}"
                     if nid not in g[t.cond] or ctrl_key not in g[t.cond][nid]:
-                        g.add_edge(
-                            t.cond,
-                            nid,
-                            key=ctrl_key,
-                            edge_type="control_cond",
-                        )
+                        g.add_edge(t.cond, nid, key=ctrl_key, edge_type="control_cond")
 
                 neg_flag = "not_" if t.negated else ""
                 data_key = f"data_{t.node}_{t.key or 'all'}_{neg_flag}{t.cond or 'direct'}"
@@ -166,12 +142,7 @@ def parse_dag(ref: str) -> PipelineDag:
         cycle = list(nx.find_cycle(g, orientation="original"))
         raise DagValidationError(f"{path}: 检测到静态依赖闭环: {cycle}")
 
-    return PipelineDag(
-        name=str(dag_name),
-        graph=g,
-        window=window,
-        source_path=path,
-    )
+    return PipelineDag(name=str(dag_name), graph=g, window=window, source_path=path)
 
 
 __all__ = [
