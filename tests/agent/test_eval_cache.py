@@ -89,8 +89,7 @@ def _make_harness(extra=None, feats=("f1",), months=(202401, 202402)):
 
 def _drive(h, feats, months):
     dret = pl.LazyFrame({"sid": [], "day": [], "close": []})
-    return h._evaluate_windows_parallel(
-        None, dret, feats, months, h._grid_combos(), 4)
+    return h._evaluate_windows_parallel(None, dret, feats, months)
 
 
 def test_second_run_zero_compute(env):
@@ -111,7 +110,7 @@ def test_gate_change_replays_free(env):
     _drive(h, feats, months)
     _Recorder.calls = 0
     # 门控 (u_pval/比例) 不在缓存键内 → 调阈值零重算
-    h3, feats3, months3 = _make_harness(extra={"stage2_max_pval": 0.5,
+    h3, feats3, months3 = _make_harness(extra={"u_pval": 0.5,
                                                "min_window_pass_ratio": 0.99})
     _drive(h3, feats3, months3)
     assert _Recorder.calls == 0

@@ -127,10 +127,9 @@ def test_decay_prepends_warmup_for_macro(decay_env, monkeypatch):
     env = decay_env
     captured = {}
 
-    def fake_eval(panel_df, curves_2d, motif, tune_config, common_config,
-                  skip_stats=False, stats_yms=None):
+    def fake_eval(panel_df, curves_2d, motif, tune_config, common_config):
         captured["panel_months"] = sorted(_month_ids(panel_df))
-        captured["stats_yms"] = stats_yms
+        captured["stats_yms"] = common_config.get("_stats_yms")
         return {"status": "success", "u_pval": 0.01}
 
     monkeypatch.setattr(tune_mod, "evaluate_and_build_fsm", fake_eval)
@@ -383,7 +382,7 @@ def test_write_model_manifest_handoff_schema(tmp_path):
         pickle.dump(ckpt, f)
     common = {"feature_col": "f_abc123def456", "_eval_data_fp": "d" * 8,
               "_task_id": "t1", "exclude_bars": 10}
-    tune_mod._write_model_manifest(str(tmp_path), ckpt, common, None, source="tune")
+    tune_mod._write_model_manifest(str(tmp_path), ckpt, common, source="tune")
     data = json.loads((tmp_path / "model_202412.manifest.json").read_text())
     assert data["model_id"] == 202412
     assert data["feature_id"] == "f_abc123def456"

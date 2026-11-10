@@ -54,3 +54,14 @@ def test_search_spec_rejects_execution_control_keys():
         build_exp_config({"search_spec": {"num_trials": 2}})
     with pytest.raises(ValueError, match="common_params"):
         build_exp_config({"search_spec": {"num_workers": {"type": "choice", "values": [2]}}})
+
+
+def test_build_exp_config_replaces_dict_params_atomically():
+    """覆盖 T1_rets 等字典型参数时必须原子替换, 不得残留默认 exit_15m 等子键。"""
+    cfg = build_exp_config({"common_params": {"T1_rets": {"exit_5m": 5}}})
+    assert cfg["common_params"]["T1_rets"] == {"exit_5m": 5}
+    assert cfg["common_params"]["min_excess_ret"] == {
+        "exit_5m": 5e-4,
+        "exit_15m": 1e-3,
+        "exit_30m": 1.5e-3,
+    }

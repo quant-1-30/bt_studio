@@ -15,7 +15,7 @@
 import numpy as np
 import polars as pl
 
-from bt_studio.pipeline.metrics import calculate_hpo_score
+from bt_studio.pipeline.metrics import HPOScoreInputs, calculate_hpo_score
 from bt_studio.pipeline.metrics.gates import daily_paired_pval, raw_excess_gate
 
 
@@ -41,8 +41,16 @@ TUNE_CFG = {"motif_minutes": 30}
 
 def _score(u_pval, n, rets, uncond, momentum, cfg=None, tune_cfg=None):
     return calculate_hpo_score(
-        u_pval, n, rets, uncond, momentum,
-        tune_cfg or TUNE_CFG, cfg or _common_cfg())
+        HPOScoreInputs(
+            u_pval=u_pval,
+            trigger_count=n,
+            cond_rets=rets,
+            uncond_rets=uncond,
+            cond_momentum=momentum,
+            tune_config=tune_cfg or TUNE_CFG,
+            common_config=cfg or _common_cfg(),
+        )
+    )
 
 
 def test_score_rewards_positive_excess_over_negative():

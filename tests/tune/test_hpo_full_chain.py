@@ -388,7 +388,7 @@ def test_decay_update_and_oos_inference(chain_env):
     # macro_state 滚动分位回填历史; 打分输出必须仍只含 OOS 月
     # (下方 months 断言守护 warmup 泄漏)
     tune_mod.node_oos_inference_monthly(
-        model_id, env["dret_full"], OOS_MONTHS, oos_paths, common,
+        model_id, env["dret_full"], oos_paths, common,
         train_paths=train_paths)
     score_path = os.path.join(env["score_dir"], f"scores_{model_id}.parquet")
     assert os.path.exists(score_path)

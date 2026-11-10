@@ -231,7 +231,7 @@ def test_stage2_failure_preserves_specific_reason_and_code(tmp_path, monkeypatch
     feat_root = str(tmp_path)
     monkeypatch.setattr(harness_mod, "FEATURE_DIR", feat_root)
 
-    cc = {"eps": 1e-8, "min_window_pass_ratio": 0.6, "stage2_max_pval": 0.1}
+    cc = {"eps": 1e-8, "min_window_pass_ratio": 0.6, "u_pval": 0.1}
     harness = TwoStageAgentHarness(common_config=cc)
 
     def _failing_dtw_windows(self, hf_enhanced, dret_lf, feature_names, months):
@@ -278,8 +278,8 @@ def test_eval_feature_on_grid_does_not_short_circuit_on_high_pval(monkeypatch):
         ]
     }
     res = ew.eval_feature_on_grid(
-        dummy_df.lazy(), dummy_df.lazy(), dummy_df, "f_test",
-        {"stage2_max_pval": 0.10}, combos_by_ds,
+        dummy_df.lazy(), dummy_df, "f_test",
+        {"u_pval": 0.10}, combos_by_ds,
     )
     assert calls == [0.55, 0.65]
     assert res.u_pval == 0.02 and res.score == 3.5
@@ -305,6 +305,118 @@ def test_recipe_canonical_fingerprint_and_named_ast_wrapper():
     assert records[0]["display_name"] == "wrapped_alpha"
     assert records[0]["error"] is None
 
+
+def test_resolve_walk_forward_windows_warmup_strip_and_tail_align():
+    """Verify resolve_walk_forward_windows strips warmup_months before start_date and aligns tail remainder months."""
+    from bt_studio.utils.months import resolve_walk_forward_windows, window_tag
+
+    # Warmup months 202310..202312 must be stripped when start_date=20240101
+    avail = [202310, 202311, 202312, 202401, 202402, 202403, 202404, 202405]
+    wins = resolve_walk_forward_windows(
+        avail,
+        {"start_date": 20240101, "end_date": 20240531, "train_window": 3, "oos_step": 2},
+    )
+    assert wins == [[202401, 202402, 202403], [202403, 202404, 202405]]
+    assert window_tag(wins[0]) == "202401_202403_3"
+
+    # Tail remainder alignment when (n_months - train_window) % oos_step != 0
+    wins_tail = resolve_walk_forward_windows(
+        [202401, 202402, 202403, 202404],
+        {"start_date": 20240101, "end_date": 20240430, "train_window": 3, "oos_step": 2},
+    )
+    assert wins_tail == [[202401, 202402, 202403], [202402, 202403, 202404]]
+
+
+def test_on_demand_walk_forward_lazy_fetch_and_early_stop(tmp_path, monkeypatch):
+    """Verify on-demand Walk-Forward mode fetches only active windows, reuses overlapping monthly parquets, and stops downloading on early-stop."""
+    monkeypatch.setattr(harness_mod, "FEATURE_DIR", str(tmp_path / "features"))
+    monkeypatch.setattr(harness_mod, "EVAL_CACHE_ROOT", str(tmp_path / "eval_cache"))
+
+    fetched_ranges = []
+
+    def _fake_prepare_tick(start_date, end_date, sids):
+        fetched_ranges.append((start_date, end_date, tuple(sids)))
+        # Synthesize minute bars for warmup + requested months
+        days = [
+            datetime.date(2023, 12, 15),
+            datetime.date(2024, 1, 10),
+            datetime.date(2024, 2, 10),
+            datetime.date(2024, 3, 10),
+            datetime.date(2024, 4, 10),
+        ]
+        d_lo = datetime.datetime.strptime(str(start_date), "%Y%m%d").date()
+        d_hi = datetime.datetime.strptime(str(end_date), "%Y%m%d").date()
+        sel_days = [d for d in days if d_lo <= d <= d_hi]
+        rows = {
+            "day": [d for d in sel_days for _ in range(12)],
+            "sid": [b"600001"] * (12 * len(sel_days)),
+            "bar_idx": list(range(12)) * len(sel_days),
+            "close": [float(i + 1) for i in range(12)] * len(sel_days),
+        }
+        return pl.DataFrame(rows).lazy()
+
+    monkeypatch.setattr(harness_mod, "prepare_tick", _fake_prepare_tick)
+    monkeypatch.setattr(
+        harness_mod,
+        "build_static_panel",
+        lambda w_lf, d_lf, cc, is_train=True: pl.LazyFrame({"day": [datetime.date(2024, 1, 10)], "sid": [b"600001"]}),
+    )
+
+    eval_calls = []
+
+    def _fake_eval_on_grid(feat_lf, static_df, feat, cc, combos_by_ds):
+        df = feat_lf.collect()
+        yms = sorted(df.select((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).unique()).to_series().to_list())
+        eval_calls.append(tuple(yms))
+        return harness_mod.EvalResult(feature_name=feat, status="failed", reason="doomed_window")
+
+    monkeypatch.setattr(harness_mod, "eval_feature_on_grid", _fake_eval_on_grid)
+
+    universe_sids = {
+        202312: [b"600001"],  # warmup month
+        202401: [b"600001"],
+        202402: [b"600001"],
+        202403: [b"600001"],
+        202404: [b"600001"],
+    }
+    cc = {
+        "start_date": 20240101,
+        "end_date": 20240430,
+        "train_window": 2,
+        "oos_step": 1,
+        "warmup_months": 1,
+        "min_window_pass_ratio": 0.99,  # 0 failures allowed -> early stop after Window 1!
+        "eval_procs": 1,
+        "eps": 1e-8,
+    }
+    dret_lf = pl.LazyFrame({"day": [datetime.date(2024, 1, 10)], "sid": [b"600001"], "close": [10.0]})
+    harness = TwoStageAgentHarness(common_config=cc, universe_sids=universe_sids)
+
+    results = harness.run([{"op": "abs", "args": [{"col": "close"}]}], None, dret_lf)
+    assert len(results) == 1
+    # Window 1 ([202401, 202402]) evaluated and failed -> early stop!
+    # Windows 2 ([202402, 202403]) and 3 ([202403, 202404]) must NEVER be evaluated or fetched!
+    assert eval_calls == [(202401, 202402)]
+    assert all(end <= 20240229 for _, end, _ in fetched_ranges)
+
+    # Now test multi-window progression: overlapping month 202402 is NOT re-compiled when advancing to Window 2 ([202402, 202403])
+    fetched_ranges.clear()
+    eval_calls.clear()
+    monkeypatch.setattr(
+        harness_mod,
+        "eval_feature_on_grid",
+        lambda feat_lf, static_df, feat, cc, combos_by_ds: (
+            eval_calls.append(tuple(sorted(feat_lf.collect().select((pl.col("day").dt.year() * 100 + pl.col("day").dt.month()).unique()).to_series().to_list())))
+            or harness_mod.EvalResult(feature_name=feat, status="success", score=2.5, u_pval=0.01, trigger_count=50)
+        ),
+    )
+    harness2 = TwoStageAgentHarness(common_config=dict(cc, _eval_data_fp="pass_run"), universe_sids=universe_sids)
+    results2 = harness2.run([{"op": "mean", "args": [{"col": "close"}, 3]}], None, dret_lf)
+    assert len(results2) == 1 and results2[0].stage2_passed
+    assert eval_calls == [(202401, 202402), (202402, 202403), (202403, 202404)]
+    # Fetch calls: (1) Stage 1: 202401 (+warmup 202312), (2) W1 missing 202402 (+warmup 202401),
+    # (3) W2 missing 202403 (+warmup 202402), (4) W3 missing 202404 (+warmup 202403)
+    assert [end for _, end, _ in fetched_ranges] == [20240131, 20240229, 20240331, 20240430]
 
 
 if __name__ == "__main__":
