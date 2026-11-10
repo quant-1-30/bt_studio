@@ -113,18 +113,18 @@ class LlmUsageMeter:
         model: str,
         usage: Optional[Dict[str, Any]],
         latency_ms: float,
-        status: str,
         error_type: str = "",
     ) -> None:
         self._rollover_if_needed()
+        is_err = bool(error_type and error_type != "ok")
         rec = {
             "ts": datetime.now().isoformat(timespec="milliseconds"),
             "provider": provider,
             "model": model,
             "usage": usage,
             "latency_ms": round(latency_ms, 1),
-            "status": status,
-            **({"error_type": error_type} if error_type else {}),
+            "status": "error" if is_err else "ok",
+            "error_type": error_type if is_err else None,
         }
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -153,39 +153,38 @@ class MeteredProvider(BaseLLMProvider):
         temperature: float = 0.8,
         json_mode: bool = True,
     ) -> str:
-        pname = type(self.inner).__name__
-        t0 = time.perf_counter()
         if self.meter._budget is not None:
             with self.meter.exclusive_lease():
                 self.meter.precheck()
-                return self._call_and_record(pname, t0, user_prompt, system_prompt, temperature, json_mode)
+                return self._call_and_record(user_prompt, system_prompt, temperature, json_mode)
         self.meter.precheck()
-        return self._call_and_record(pname, t0, user_prompt, system_prompt, temperature, json_mode, lock_record=True)
+        return self._call_and_record(user_prompt, system_prompt, temperature, json_mode, lock_record=True)
 
     def _call_and_record(
         self,
-        pname: str,
-        t0: float,
         user_prompt: str,
         system_prompt: Optional[str],
         temperature: float,
         json_mode: bool,
         lock_record: bool = False,
     ) -> str:
+        pname = type(self.inner).__name__
+        t0 = time.perf_counter()
         try:
             out = self.inner.generate(user_prompt, system_prompt, temperature, json_mode)
         except Exception as e:
             elapsed = (time.perf_counter() - t0) * 1000
+            err_name = type(e).__name__
             if lock_record:
                 with self.meter.exclusive_lease():
-                    self.meter.record(pname, self.model, None, elapsed, status="error", error_type=type(e).__name__)
+                    self.meter.record(pname, self.model, None, elapsed, err_name)
             else:
-                self.meter.record(pname, self.model, None, elapsed, status="error", error_type=type(e).__name__)
+                self.meter.record(pname, self.model, None, elapsed, err_name)
             raise
         elapsed = (time.perf_counter() - t0) * 1000
         if lock_record:
             with self.meter.exclusive_lease():
-                self.meter.record(pname, self.model, self.last_usage, elapsed, status="ok")
+                self.meter.record(pname, self.model, self.last_usage, elapsed)
         else:
-            self.meter.record(pname, self.model, self.last_usage, elapsed, status="ok")
+            self.meter.record(pname, self.model, self.last_usage, elapsed)
         return out

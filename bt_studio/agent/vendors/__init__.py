@@ -71,7 +71,7 @@ class FailoverLLMProvider(BaseLLMProvider):
         self.cooldown_s = (
             float(cooldown_s)
             if cooldown_s is not None
-            else float(os.environ.get("LLM_FAILOVER_COOLDOWN_S", "300.0") or 300.0)
+            else float(os.environ.get("LLM_FAILOVER_COOLDOWN_S", "300.0"))
         )
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0

@@ -8,7 +8,7 @@ import os
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import polars as pl
 
@@ -22,13 +22,14 @@ from bt_studio.compiler.ast import (
 from bt_studio.constant import (
     BASE_MARKET_COLS,
     DEFAULT_GRID,
+    DEFAULT_WARMUP_MONTHS,
     EVAL_CACHE_ROOT,
     EVAL_LOGIC_VERSION,
     FEATURE_DIR,
     MIN_WINDOW_PASS_RATIO,
-    PREFILTER_THRESHOLDS,
 )
 from bt_studio.pipeline.patterns import discover_fsm_pattern
+from bt_studio.pipeline.preprocess import prepare_tick
 from bt_studio.pipeline.preprocess.panel import build_static_panel, extract_curves_from_panel
 from bt_studio.schema import (
     EvalResult,
@@ -45,10 +46,14 @@ from bt_studio.utils.io import (
     guard_disk_watermark,
 )
 from bt_studio.utils.math_func import group_combos_by_downsample, resolve_search_hyperparams
-from bt_studio.utils.months import month_id_expr, parse_ym_from_path
-
-_evaluate_physical_stats = PrefilterResult.from_stats
-aggregate_candidate_result = FeatureMiningResult.from_candidate_windows
+from bt_studio.utils.months import (
+    calc_warmup_start_date,
+    month_bounds,
+    month_id_expr,
+    parse_ym_from_path,
+    resolve_walk_forward_windows,
+    window_tag,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +71,6 @@ def run_stage1_prefilter(
         return {}, []
 
     print(f"[Harness] Stage 1: physical prefilter ({len(compiled_names)} features) via Lazy Agg...")
-    # Strictly causal Stage 1 physical prefilter: evaluate std/null_ratio ONLY on the earliest
-    # available month (initial window) so future walk-forward months never leak into candidate survival.
     stats_lf = hf_enhanced
     try:
         if "day" in hf_enhanced.collect_schema().names():
@@ -93,7 +96,7 @@ def run_stage1_prefilter(
     try:
         row = _stats_row(compiled_names)
         stage1_map = {
-            n: _evaluate_physical_stats(n, row, row["_total_len"], prefilter_thresholds)
+            n: PrefilterResult.from_stats(n, row, row["_total_len"], prefilter_thresholds)
             for n in compiled_names
         }
     except Exception as bulk_err:
@@ -101,7 +104,7 @@ def run_stage1_prefilter(
         for n in compiled_names:
             try:
                 r = _stats_row([n])
-                stage1_map[n] = _evaluate_physical_stats(n, r, r["_total_len"], prefilter_thresholds)
+                stage1_map[n] = PrefilterResult.from_stats(n, r, r["_total_len"], prefilter_thresholds)
             except Exception as e:
                 stage1_map[n] = PrefilterResult(
                     feature_name=n, passed=False, reason=f"Stage1 runtime: {str(e)[:160]}"
@@ -170,13 +173,12 @@ def evaluate_feature(
 
 def eval_feature_on_grid(
     window_lf: pl.LazyFrame,
-    dret_lf: pl.LazyFrame,
     static_df: pl.DataFrame,
     feat: str,
     common_config: dict,
     combos_by_ds: Dict[int, List[dict]],
 ) -> EvalResult:
-    max_pval_gate = float(common_config.get("stage2_max_pval", 0.1))
+    max_pval_gate = float(common_config.get("stage2_max_pval", common_config.get("u_pval", 0.1)))
     panel_cache: Dict[int, pl.LazyFrame] = {}
     best_fallback: Optional[EvalResult] = None
     last_failed: Optional[EvalResult] = None
@@ -202,13 +204,13 @@ def eval_feature_on_grid(
 
 def _eval_window_worker(
     dret_path: str,
-    feat_month_paths: Dict[str, str],
+    feat_month_paths: Dict[str, Union[str, List[str]]],
     feature_names: List[str],
     common_config: dict,
     combos: List[dict],
 ) -> Dict[str, EvalResult]:
     first_path = next(iter(feat_month_paths.values()), None)
-    if first_path is None:
+    if not first_path:
         return {
             f: EvalResult(feature_name=f, status="failed", reason="missing_parquet")
             for f in feature_names
@@ -219,16 +221,14 @@ def _eval_window_worker(
     ).collect(engine="streaming")
     combos_by_ds = group_combos_by_downsample(combos)
 
-    out: Dict[str, EvalResult] = {}
-    for feat in feature_names:
-        f_path = feat_month_paths.get(feat)
-        if not f_path:
-            out[feat] = EvalResult(feature_name=feat, status="failed", reason="missing_parquet")
-        else:
-            out[feat] = eval_feature_on_grid(
-                pl.scan_parquet(f_path), dret_lf, static_df, feat, common_config, combos_by_ds
-            )
-    return out
+    return {
+        feat: (
+            eval_feature_on_grid(pl.scan_parquet(f_path), static_df, feat, common_config, combos_by_ds)
+            if (f_path := feat_month_paths.get(feat))
+            else EvalResult(feature_name=feat, status="failed", reason="missing_parquet")
+        )
+        for feat in feature_names
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +244,17 @@ class TwoStageAgentHarness:
         grid_config: Optional[dict] = None,
         prefilter_thresholds: Optional[dict] = None,
         stage3_callback: Optional[Any] = None,
+        universe_sids: Optional[Dict[int, List[bytes]]] = None,
     ):
         self.common_config = common_config
         self.grid_config = grid_config if grid_config is not None else DEFAULT_GRID
         self.prefilter_thresholds = prefilter_thresholds
         self.stage3_callback = stage3_callback
-        self._static_cache: Dict[Tuple[str, int], pl.DataFrame] = {}
+        self.universe_sids: Dict[int, List[bytes]] = universe_sids or {}
+        self._static_cache: Dict[Tuple[str, Union[int, str]], pl.DataFrame] = {}
+        self._last_feat_paths: Dict[str, List[str]] = {}
+        self._last_fingerprints: Dict[str, str] = {}
+        self._last_raw_asts: Dict[str, Any] = {}
 
     def _compile_asts(
         self,
@@ -265,29 +270,27 @@ class TwoStageAgentHarness:
                 inner = candidate["ast"]
                 candidate = inner if isinstance(inner, list) else ([candidate] if "name" in candidate else inner)
             fp = ast_fingerprint(candidate)
+            feat_name = f"f_{fp[:12]}"
             try:
                 if isinstance(candidate, list):
-                    renames: dict = {}
+                    renames: Dict[str, str] = {}
                     isolated_recipe: list[dict] = []
                     for step in candidate:
-                        step_copy = dict(step)
-                        orig_name = step["name"]
-                        new_name = f"_c{idx}_{orig_name}"
-                        renames[orig_name] = new_name
-                        step_copy["name"] = new_name
-                        step_copy["ast"] = rewrite_ast_col_refs(step["ast"], renames)
-                        isolated_recipe.append(step_copy)
-
+                        orig = step["name"]
+                        renames[orig] = f"_c{idx}_{orig}"
+                        isolated_recipe.append({
+                            **step,
+                            "name": renames[orig],
+                            "ast": rewrite_ast_col_refs(step["ast"], renames),
+                        })
                     for e in compile_recipe(isolated_recipe, check_causal=True):
                         hf_lf = hf_lf.with_columns(e)
                     raw_name = candidate[-1]["name"]
                     iso_last = f"_c{idx}_{raw_name}"
-                    feat_name = f"f_{fp[:12]}"
                     if feat_name != iso_last:
                         hf_lf = hf_lf.rename({iso_last: feat_name})
                 elif isinstance(candidate, dict):
                     expr, raw_name = compile_ast(candidate, check_causal=True)
-                    feat_name = f"f_{fp[:12]}"
                     hf_lf = hf_lf.with_columns(expr.alias(feat_name))
                 else:
                     raise ASTCompilationError(f"Unsupported candidate type: {type(candidate)}")
@@ -313,11 +316,31 @@ class TwoStageAgentHarness:
 
         return hf_lf, records, compiled_names
 
+    def _fetch_tick_with_warmup(self, target_ymonths: List[int]) -> pl.LazyFrame:
+        """Fetch tick LazyFrame for target_ymonths with causal warmup_months prepended."""
+        if not target_ymonths or not self.universe_sids:
+            return pl.LazyFrame()
+        raw_start_date = min(target_ymonths) * 100 + 1
+        _, end_date = month_bounds(max(target_ymonths))
+        warmup_months = int(self.common_config.get("warmup_months", DEFAULT_WARMUP_MONTHS))
+        fetch_start_date = calc_warmup_start_date(raw_start_date, warmup_months=warmup_months)
+
+        unique_sids = list(dict.fromkeys(
+            sid for ym in target_ymonths for sid in self.universe_sids.get(ym, [])
+        ))
+        if not unique_sids:
+            return pl.LazyFrame()
+
+        print(f"  [OnDemand-Tick] Window months {min(target_ymonths)}..{max(target_ymonths)} "
+              f"(warmup from {fetch_start_date}, {len(unique_sids)} sids)")
+        return prepare_tick(fetch_start_date, end_date, unique_sids)
+
     def _persist_features(
         self,
         hf_enhanced: pl.LazyFrame,
         winners: List[str],
         fingerprints: Optional[Dict[str, str]] = None,
+        target_months: Optional[List[int]] = None,
     ) -> Tuple[Dict[str, List[str]], List[int]]:
         if not winners:
             return {}, []
@@ -330,25 +353,32 @@ class TwoStageAgentHarness:
         base_cols = [c for c in required_cols if c in available_schema]
         cols_to_select = base_cols + [w for w in winners if w not in base_cols]
 
-        full_df = (
-            hf_enhanced.select(cols_to_select)
-            .with_columns(month_id_expr("day").alias("_month"))
-            .collect(engine="streaming")
-        )
+        lf_to_collect = hf_enhanced.select(cols_to_select).with_columns(month_id_expr("day").alias("_month"))
+        if target_months is not None:
+            lf_to_collect = lf_to_collect.filter(pl.col("_month").is_in([int(m) for m in target_months]))
+
+        full_df = lf_to_collect.collect(engine="streaming")
         if full_df.height == 0:
             return {w: [] for w in winners}, []
 
         parts_by_m = full_df.partition_by("_month", as_dict=True, include_key=False)
         months = sorted(int(k[0] if isinstance(k, tuple) else k) for k in parts_by_m.keys())
         out: Dict[str, List[str]] = {w: [] for w in winners}
+        fps = fingerprints or {}
 
         for m in months:
             m_df = parts_by_m.get((m,), parts_by_m.get(m))
             if m_df is None or m_df.height == 0:
                 continue
+            if m in self.universe_sids and "sid" in m_df.columns:
+                valid_sids = self.universe_sids[m]
+                if m_df.schema["sid"] == pl.String:
+                    valid_sids = [s.decode() if isinstance(s, bytes) else str(s) for s in valid_sids]
+                m_df = m_df.filter(pl.col("sid").is_in(valid_sids))
+                if m_df.height == 0:
+                    continue
             for feat in winners:
-                fp = (fingerprints or {}).get(feat, "")
-                feat_dir = os.path.join(FEATURE_DIR, str(fp)[:12])
+                feat_dir = os.path.join(FEATURE_DIR, str(fps.get(feat, ""))[:12])
                 os.makedirs(feat_dir, exist_ok=True)
                 p = os.path.join(feat_dir, f"hf_{feat}_{m}.parquet")
                 atomic_save_parquet(m_df.select(base_cols + [feat]), p)
@@ -358,52 +388,124 @@ class TwoStageAgentHarness:
             print(f"  [Persist] {feat}: {len(out[feat])} monthly parquets generated")
         return out, months
 
+    def _ensure_window_parquets(self, feature_names: List[str], win_months: List[int]) -> None:
+        """Lazily fetch ticks and compile missing monthly feature parquets for win_months on demand."""
+        if not feature_names or not win_months or not self.universe_sids:
+            return
+
+        missing_months_set: Set[int] = set()
+        feats_needing_compile: List[str] = []
+
+        for feat in feature_names:
+            feat_dir = os.path.join(FEATURE_DIR, str(self._last_fingerprints.get(feat, ""))[:12])
+            feat_missing = False
+            for m in win_months:
+                p = os.path.join(feat_dir, f"hf_{feat}_{m}.parquet")
+                if os.path.exists(p):
+                    if p not in self._last_feat_paths.setdefault(feat, []):
+                        self._last_feat_paths[feat].append(p)
+                else:
+                    missing_months_set.add(int(m))
+                    feat_missing = True
+            if feat_missing and feat in self._last_raw_asts:
+                feats_needing_compile.append(feat)
+
+        if not missing_months_set or not feats_needing_compile:
+            return
+
+        missing_months = sorted(missing_months_set)
+        raw_lf = self._fetch_tick_with_warmup(missing_months)
+        cands = [self._last_raw_asts[f] for f in feats_needing_compile]
+        compiled_lf, _, compiled_names = self._compile_asts(cands, raw_lf)
+        new_paths, _ = self._persist_features(
+            compiled_lf, compiled_names, self._last_fingerprints, target_months=missing_months
+        )
+        for feat, paths in new_paths.items():
+            self._last_feat_paths[feat] = list(dict.fromkeys(self._last_feat_paths.get(feat, []) + paths))
+
     def _grid_combos(self) -> List[dict]:
         keys = list(self.grid_config.keys())
         return [dict(zip(keys, combo)) for combo in itertools.product(*self.grid_config.values())]
 
     def _build_eval_cache_locator(self, feature_names: List[str]):
+        cfg = dict(self.common_config)
+        if getattr(self, "_eval_data_fp", None):
+            cfg["_eval_data_fp"] = self._eval_data_fp
         return build_eval_cache_locator(
-            self.common_config,
+            cfg,
             self.grid_config,
             feature_names,
             fingerprints=getattr(self, "_last_fingerprints", None),
-            eval_data_fp=getattr(self, "_eval_data_fp", None),
-            cache_root=EVAL_CACHE_ROOT,
-            logic_version=EVAL_LOGIC_VERSION,
+            cache_ctx=(EVAL_CACHE_ROOT, EVAL_LOGIC_VERSION),
         )
 
+    @staticmethod
+    def _normalize_window(w: Union[int, List[int], Tuple[int, ...]]) -> List[int]:
+        return [int(x) for x in w] if isinstance(w, (list, tuple)) else [int(w)]
+
     def _map_month_feat_paths(
-        self, feature_names: List[str], months: List[int], check_exists: bool = False
-    ) -> Dict[int, Dict[str, str]]:
+        self,
+        feature_names: List[str],
+        windows: Sequence[Union[int, List[int]]],
+        check_exists: bool = False,
+    ) -> Dict[Union[int, str], Dict[str, Union[str, List[str]]]]:
         feat_paths: Dict[str, List[str]] = getattr(self, "_last_feat_paths", {})
-        month_path_of: Dict[int, Dict[str, str]] = {m: {} for m in months}
+        by_feat_ym: Dict[str, Dict[int, str]] = {f: {} for f in feature_names}
         for feat, paths in feat_paths.items():
-            if feat not in feature_names:
-                continue
-            for p in paths:
-                m = parse_ym_from_path(p)
-                if m in month_path_of and (not check_exists or os.path.exists(p)):
-                    month_path_of[m][feat] = p
-        return month_path_of
+            if feat in by_feat_ym:
+                for p in paths:
+                    m = parse_ym_from_path(p)
+                    if m is not None and (not check_exists or os.path.exists(p)):
+                        by_feat_ym[feat][int(m)] = p
+
+        out: Dict[Union[int, str], Dict[str, Union[str, List[str]]]] = {}
+        for w in windows:
+            w_tag = window_tag(w)
+            w_months = self._normalize_window(w)
+            out[w_tag] = {
+                feat: (ym_map[w_months[0]] if len(w_months) == 1 else [ym_map[m] for m in w_months])
+                for feat in feature_names
+                if all(m in (ym_map := by_feat_ym.get(feat, {})) for m in w_months)
+            }
+        return out
+
+    def _prepare_window_eval(
+        self,
+        batch_targets: List[str],
+        w: Union[int, List[int]],
+        cache_path_fn: Any,
+        on_demand: bool,
+    ) -> Tuple[Union[int, str], List[int], Dict[str, EvalResult], List[str]]:
+        w_tag = window_tag(w)
+        w_months = self._normalize_window(w)
+        cached: Dict[str, EvalResult] = {}
+        uncached: List[str] = []
+        for feat in batch_targets:
+            hit = eval_cache_load(cache_path_fn(feat, w_tag))
+            if hit is not None:
+                cached[feat] = hit
+            else:
+                uncached.append(feat)
+        if uncached and on_demand:
+            self._ensure_window_parquets(uncached, w_months)
+        return w_tag, w_months, cached, uncached
 
     def _evaluate_windows_parallel(
         self,
-        hf_enhanced: pl.LazyFrame,
+        hf_enhanced: Optional[pl.LazyFrame],
         dret_lf: pl.LazyFrame,
         feature_names: List[str],
-        months: List[int],
-        combos: List[dict],
-        eval_procs: int,
+        months: List[Union[int, List[int]]],
     ) -> Dict[str, List[EvalResult]]:
-        for _var in ("NUMBA_NUM_THREADS", "POLARS_MAX_THREADS", "OMP_NUM_THREADS"):
-            os.environ.setdefault(_var, "1")
-
+        eval_procs = int(self.common_config.get("eval_procs", 1))
+        on_demand = bool(self.universe_sids and self._last_raw_asts)
+        combos = self._grid_combos()
         month_path_of = self._map_month_feat_paths(feature_names, months)
-        if any(not month_path_of[m] for m in months):
-            return self._evaluate_windows_serial(hf_enhanced, dret_lf, feature_names, months, combos)
 
-        n_proc = max(1, min(int(eval_procs), os.cpu_count() or 1, len(months)))
+        if not on_demand and any(not month_path_of[window_tag(w)] for w in months):
+            return self._evaluate_windows_serial(hf_enhanced, dret_lf, feature_names, months)
+
+        n_proc = max(1, min(eval_procs, os.cpu_count() or 1, len(months)))
         replay_state = WindowReplayState.create(feature_names, len(months), self.common_config)
 
         with tempfile.TemporaryDirectory(prefix="stage2_mp_") as tmp_dir:
@@ -413,42 +515,58 @@ class TwoStageAgentHarness:
             worker_cc = dict(self.common_config, max_workers=max(1, (os.cpu_count() or 1) // n_proc))
             _, _cache_path = self._build_eval_cache_locator(feature_names)
 
-            per_month: Dict[int, Dict[str, EvalResult]] = {}
+            per_win: Dict[Union[int, str], Dict[str, EvalResult]] = {}
+            block_step = 1 if on_demand else n_proc
+            blocks = [months[i : i + block_step] for i in range(0, len(months), block_step)]
+            win_ord = {window_tag(w): i for i, w in enumerate(months)}
+
             with ProcessPoolExecutor(max_workers=n_proc) as pool:
-                blocks = [months[i : i + n_proc] for i in range(0, len(months), n_proc)]
-                month_ord = {m: i for i, m in enumerate(months)}
                 for block in blocks:
                     batch_targets = sorted(replay_state.active_features)
-                    for m in block:
-                        per_month[m] = {}
-                        for feat in batch_targets:
-                            hit = eval_cache_load(_cache_path(feat, m))
-                            if hit is not None:
-                                per_month[m][feat] = hit
-                    uncached = {
-                        m: [f for f in batch_targets if f not in per_month[m]]
-                        for m in block
-                    }
-                    futures = {
-                        m: pool.submit(
-                            _eval_window_worker,
-                            dret_path,
-                            {f: month_path_of[m][f] for f in uncached[m]},
-                            uncached[m],
-                            dict(worker_cc),
-                            combos,
-                        )
-                        for m in block if uncached[m] and month_path_of[m]
-                    }
-                    for m in block:
-                        if m in futures:
-                            res_map = futures[m].result()
-                            per_month[m].update(res_map)
-                            for feat, res in res_map.items():
-                                eval_cache_save(res, _cache_path(feat, m))
+                    if not batch_targets:
+                        break
+                    uncached: Dict[Union[int, str], List[str]] = {}
+                    for w in block:
+                        w_tag, _, cached, unc = self._prepare_window_eval(batch_targets, w, _cache_path, on_demand)
+                        per_win[w_tag] = cached
+                        uncached[w_tag] = unc
+                    if on_demand:
+                        month_path_of = self._map_month_feat_paths(feature_names, months, check_exists=True)
 
-                    for m in block:
-                        replay_state.replay_month(m, month_ord[m], per_month[m])
+                    futures: List[Tuple[Union[int, str], Any]] = []
+                    for w in block:
+                        w_tag = window_tag(w)
+                        avail = [f for f in uncached[w_tag] if f in month_path_of.get(w_tag, {})]
+                        if not avail:
+                            continue
+                        if on_demand and len(avail) > 1:
+                            f_cc = dict(self.common_config, max_workers=max(1, (os.cpu_count() or 1) // min(n_proc, len(avail))))
+                            for f in avail:
+                                futures.append((
+                                    w_tag,
+                                    pool.submit(_eval_window_worker, dret_path, {f: month_path_of[w_tag][f]}, [f], f_cc, combos),
+                                ))
+                        else:
+                            w_cc = dict(self.common_config, max_workers=(os.cpu_count() or 1) if on_demand else worker_cc["max_workers"])
+                            futures.append((
+                                w_tag,
+                                pool.submit(
+                                    _eval_window_worker,
+                                    dret_path,
+                                    {f: month_path_of[w_tag][f] for f in avail},
+                                    avail,
+                                    w_cc,
+                                    combos,
+                                ),
+                            ))
+                    for w_tag, fut in futures:
+                        res_map = fut.result()
+                        per_win[w_tag].update(res_map)
+                        for feat, res in res_map.items():
+                            eval_cache_save(res, _cache_path(feat, w_tag))
+                    for w in block:
+                        w_tag = window_tag(w)
+                        replay_state.replay_month(w_tag, win_ord[w_tag], per_win[w_tag])
                     if not replay_state.active_features:
                         break
 
@@ -456,28 +574,25 @@ class TwoStageAgentHarness:
 
     def _evaluate_windows(
         self,
-        hf_enhanced: pl.LazyFrame,
+        hf_enhanced: Optional[pl.LazyFrame],
         dret_lf: pl.LazyFrame,
         feature_names: List[str],
-        months: List[int],
+        months: List[Union[int, List[int]]],
     ) -> Dict[str, List[EvalResult]]:
-        combos = self._grid_combos()
         if not months or not feature_names:
             return {f: [] for f in feature_names}
-
-        eval_procs = int(self.common_config.get("eval_procs") or 1)
-        if eval_procs > 1 and len(months) > 1:
-            return self._evaluate_windows_parallel(hf_enhanced, dret_lf, feature_names, months, combos, eval_procs)
-        return self._evaluate_windows_serial(hf_enhanced, dret_lf, feature_names, months, combos)
+        if int(self.common_config.get("eval_procs", 1)) > 1 and len(months) > 1:
+            return self._evaluate_windows_parallel(hf_enhanced, dret_lf, feature_names, months)
+        return self._evaluate_windows_serial(hf_enhanced, dret_lf, feature_names, months)
 
     def _evaluate_windows_serial(
         self,
-        hf_enhanced: pl.LazyFrame,
+        hf_enhanced: Optional[pl.LazyFrame],
         dret_lf: pl.LazyFrame,
         feature_names: List[str],
-        months: List[int],
-        combos: List[dict],
+        months: List[Union[int, List[int]]],
     ) -> Dict[str, List[EvalResult]]:
+        on_demand = bool(self.universe_sids and self._last_raw_asts)
         month_path_of = self._map_month_feat_paths(feature_names, months, check_exists=True)
         with_month = (
             hf_enhanced.with_columns(month_id_expr("day").alias("_month"))
@@ -486,79 +601,112 @@ class TwoStageAgentHarness:
         )
 
         replay_state = WindowReplayState.create(feature_names, len(months), self.common_config)
-        combos_by_ds = group_combos_by_downsample(combos)
+        combos_by_ds = group_combos_by_downsample(self._grid_combos())
         data_fp, _cache_path = self._build_eval_cache_locator(feature_names)
 
-        for i, m in enumerate(months):
+        for i, w in enumerate(months):
             eval_targets = [f for f in feature_names if f in replay_state.active_features]
             if not eval_targets:
                 break
 
-            persisted_for_m = month_path_of.get(m) or {}
-            first_persisted = next(iter(persisted_for_m.values()), None)
+            w_tag, w_months, cached_evals, uncached_targets = self._prepare_window_eval(
+                eval_targets, w, _cache_path, on_demand
+            )
+            if uncached_targets and on_demand:
+                month_path_of = self._map_month_feat_paths(feature_names, months, check_exists=True)
+
+            persisted_for_w = month_path_of.get(w_tag, {})
+            first_persisted = next(iter(persisted_for_w.values()), None)
             if first_persisted is not None:
                 window_lf = pl.scan_parquet(first_persisted)
             elif with_month is not None:
-                window_lf = with_month.filter(pl.col("_month") == m).drop("_month")
+                window_lf = with_month.filter(pl.col("_month").is_in(w_months)).drop("_month")
+            elif not uncached_targets:
+                replay_state.replay_month(w_tag, i, cached_evals)
+                continue
             else:
                 for f in eval_targets:
                     replay_state.results[f].append(EvalResult(feature_name=f, status="failed", reason="missing_parquet"))
                 continue
 
-            static_cache_key = (data_fp, m)
-            if static_cache_key not in self._static_cache:
+            static_cache_key = (data_fp, w_tag)
+            if uncached_targets and static_cache_key not in self._static_cache:
                 self._static_cache[static_cache_key] = build_static_panel(
                     window_lf, dret_lf, self.common_config, is_train=True
                 ).collect(engine="streaming")
-            static_df = self._static_cache[static_cache_key]
+            static_df = self._static_cache.get(static_cache_key)
 
-            def _run_feat_combo(feat: str) -> EvalResult:
-                hit = eval_cache_load(_cache_path(feat, m))
-                if hit is not None:
-                    return hit
-                feat_lf = pl.scan_parquet(persisted_for_m[feat]) if feat in persisted_for_m else window_lf
-                res = eval_feature_on_grid(feat_lf, dret_lf, static_df, feat, self.common_config, combos_by_ds)
-                eval_cache_save(res, _cache_path(feat, m))
-                return res
+            month_evals = dict(cached_evals)
+            for feat in uncached_targets:
+                feat_lf = pl.scan_parquet(persisted_for_w[feat]) if feat in persisted_for_w else window_lf
+                res = eval_feature_on_grid(feat_lf, static_df, feat, self.common_config, combos_by_ds)
+                eval_cache_save(res, _cache_path(feat, w_tag))
+                month_evals[feat] = res
 
-            month_evals = {f: _run_feat_combo(f) for f in eval_targets}
-            replay_state.replay_month(m, i, month_evals)
+            replay_state.replay_month(w_tag, i, month_evals)
 
         return replay_state.pad_remaining_windows()
 
     def run(
         self,
         candidate_asts: List[Union[dict, list[dict]]],
-        hf_lf: pl.LazyFrame,
+        hf_lf: Optional[pl.LazyFrame],
         dret_lf: pl.LazyFrame,
     ) -> List[FeatureMiningResult]:
         t_total = time.perf_counter()
         if not candidate_asts:
             return []
 
-        hf_enhanced, compile_records, compiled_names = self._compile_asts(candidate_asts, hf_lf)
+        on_demand = hf_lf is None and bool(self.universe_sids)
+        if on_demand:
+            wf_windows = resolve_walk_forward_windows(list(self.universe_sids.keys()), self.common_config)
+            if not wf_windows:
+                raise RuntimeError("[Harness] No valid walk-forward windows resolved from universe_sids")
+            target_months: Optional[List[int]] = [wf_windows[0][0]]
+            base_lf = self._fetch_tick_with_warmup(target_months)
+        else:
+            if hf_lf is None:
+                raise ValueError("[Harness] Either hf_lf or universe_sids must be provided")
+            wf_windows = []
+            target_months = None
+            base_lf = hf_lf
+
+        compiled_lf, compile_records, compiled_names = self._compile_asts(candidate_asts, base_lf)
+        hf_enhanced = (
+            compiled_lf.filter(month_id_expr("day").is_in(target_months))
+            if target_months is not None
+            else compiled_lf
+        )
         stage1_map, survivors = run_stage1_prefilter(
             hf_enhanced, compiled_names, self.common_config, self.prefilter_thresholds
         )
 
-        window_months: List[int] = []
+        windows: List[Union[int, List[int]]] = []
         if survivors:
-            fingerprints = {rec["name"]: rec["fingerprint"] for rec in compile_records}
-            feat_paths, window_months = self._persist_features(hf_enhanced, survivors, fingerprints)
-            self._last_feat_paths = feat_paths
             self._last_fingerprints = {
                 rec["name"]: rec["fingerprint"] for rec in compile_records if rec.get("fingerprint")
             }
+            self._last_raw_asts = (
+                {rec["name"]: rec["raw_ast"] for rec in compile_records if rec.get("error") is None}
+                if on_demand
+                else {}
+            )
+            self._last_feat_paths, window_months = self._persist_features(
+                compiled_lf, survivors, self._last_fingerprints, target_months=target_months
+            )
             self._eval_data_fp = compute_eval_data_fingerprint(self.common_config, dret_lf)
+            if not wf_windows:
+                wf_windows = resolve_walk_forward_windows(window_months, self.common_config)
+            windows = [w[0] if len(w) == 1 else w for w in wf_windows]
 
         window_results: Dict[str, List[EvalResult]] = {n: [] for n in compiled_names}
-        if survivors and window_months:
-            window_results.update(self._evaluate_windows(hf_enhanced, dret_lf, survivors, window_months))
+        if survivors and windows:
+            window_results.update(self._evaluate_windows(hf_enhanced, dret_lf, survivors, windows))
 
         min_ratio = self.common_config.get("min_window_pass_ratio", MIN_WINDOW_PASS_RATIO)
-        max_pval_gate = float(self.common_config.get("stage2_max_pval", 0.1))
+        max_pval_gate = float(self.common_config.get("stage2_max_pval", self.common_config.get("u_pval", 0.1)))
         all_results = [
-            aggregate_candidate_result(rec, stage1_map, window_results, min_ratio, max_pval_gate)
+            FeatureMiningResult.from_candidate_windows(rec, stage1_map, window_results, min_ratio, max_pval_gate)
             for rec in compile_records
         ]
 
