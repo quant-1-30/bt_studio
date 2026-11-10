@@ -219,7 +219,7 @@ bt_core parquet 日志 (datetime, value, metrics)  [长表]
 | `plot_tune_contour(df, param_x, param_y, target)` | 2D 等高线图 | `(fig, ax, contour_set)` |
 | `plot_tune_landscape_3d(df, param_x, param_y, target)` | 3D 曲面 | `(fig, ax, surf)` |
 | `plot_collapse_dashboard(df, target, search_bounds)` | 2x3 综合仪表盘 | `(fig, diagnostics)` |
-| `load_real_ray_results(experiment_path)` | 加载 Ray Tune 结果(兼容别名 `load_ray_results`,供 `scripts/run_collapse.py`) | pd.DataFrame |
+| `load_real_ray_results(experiment_path)` | 加载 Ray Tune 结果(兼容别名 `load_ray_results`,供 `scripts/run_visual.py --mode collapse`) | pd.DataFrame |
 
 ### 8.2 塌陷检测原理
 
@@ -359,7 +359,7 @@ bt_core 输出的 parquet 日志为长格式:
 ## 10. _streamlit.py — A / B / C 多通道在线量化工作台
 
 ```bash
-poetry run python scripts/run_streamlit.py   # 启动 bt_studio/visual/_streamlit.py
+poetry run python scripts/run_visual.py --mode online   # 启动 bt_studio/visual/_streamlit.py
 ```
 
 支持 **单屏工作区切换** 与 **多显示器独立 URL 联动（`?view_mode=...`）**：

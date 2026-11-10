@@ -57,7 +57,7 @@ bt_studio/
 scripts/                   # 启动与运行入口
 ├── run_agent.py           # 启动 LLM 自动化特征挖掘飞轮
 ├── run_tune.py            # 启动生产环境全量 WFO 跑批
-├── run_streamlit.py       # 启动可视化看板
+├── run_visual.py         # 可视化统一入口 (online/collapse/drift/pdf 四模式)
 └── start_env.sh           # 初始化运行环境变量
 
 tests/                     # pytest 套件 (engine/pipeline/tune/compiler/agent)
@@ -99,7 +99,7 @@ poetry run python -m pytest tests/ -q -p no:cacheprovider
   ```
 - **启动可视化大屏 (Streamlit)**：
   ```bash
-  poetry run python scripts/run_streamlit.py
+  poetry run python scripts/run_visual.py --mode online
   ```
 
 ## 5. 架构与执行流设计

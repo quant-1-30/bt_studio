@@ -73,7 +73,7 @@
 ### 1. 启动服务
 ```bash
 # 1. 启动在线可视化工作台 (默认 http://127.0.0.1:8501)
-poetry run python scripts/run_streamlit.py
+poetry run python scripts/run_visual.py --mode online
 
 # 2. (可选) 启动独立 FastAPI + WebSocket 多端推送网关 (默认 http://127.0.0.1:8800)
 poetry run python -m bt_studio.plugins.api_server.main

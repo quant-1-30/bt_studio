@@ -65,6 +65,7 @@ from bt_studio.utils.months import (
     calc_warmup_start_date,
     is_macro_cache_valid,
     month_id_expr,
+    parse_ym_from_path,
     partition_cached_and_missing_months,
     retrieve_available_months,
     resolve_oos_paths_with_warmup,
@@ -273,8 +274,7 @@ def node_check_decay_monthly(
         curves_2d,
         model_ckpt["motif"],
         model_ckpt["config"],
-        common_config,
-        stats_yms=eval_yms,
+        dict(common_config, _stats_yms=eval_yms),
     )
 
     u_pval = float(result.get("u_pval", 1.0)) if result.get("status") == "success" else 1.0
@@ -436,9 +436,9 @@ def node_tune_monthly(
         resources={"cpu": 1, "gpu": 0},
     )
 
-    num_trials = common_config.get("num_trials") or exp_config.get("num_trials", 300)
-    trial_timeout_s = float(common_config.get("trial_timeout_s", 600.0) or 600.0)
-    max_concurrent = int(common_config.get("num_workers") or 12)
+    num_trials = common_config.get("num_trials", exp_config.get("num_trials", 300))
+    trial_timeout_s = float(common_config.get("trial_timeout_s", 600.0))
+    max_concurrent = int(common_config.get("num_workers", 12))
     
     mlflow_callback = create_mlflow_callback(common_config)
 
@@ -513,12 +513,13 @@ def node_tune_monthly(
         "feature_col": common_config.get("feature_col"),
         "T1_rets": common_config.get("T1_rets"),
         "decay_minutes": common_config.get("decay_minutes"),
+        "ast_recipe": exp_config.get("ast_recipe", None),
     }
 
     pkl_path = f"{model_dir}/model_{model_id}.pkl"
     atomic_save_pickle(model_ckpt, pkl_path)
     _write_model_manifest(
-        model_dir, model_ckpt, common_config, exp_config,
+        model_dir, model_ckpt, common_config,
         source="tune",
         gates={"collapse_verdict": verdict, "u_pval": common_config.get("u_pval"),
                "trigger": common_config.get("trigger"), "min_excess_ret": common_config.get("min_excess_ret")},
@@ -563,7 +564,7 @@ def node_update_fsm_matrix(
 
     curves = prepare_curves(panel_df, prev_tune_config, common_config)
     result = evaluate_and_build_fsm(
-        panel_df, curves, prev_motif, prev_tune_config, common_config, skip_stats=True
+        panel_df, curves, prev_motif, prev_tune_config, dict(common_config, _skip_stats=True)
     )
 
     if result.get("status") != "success":
@@ -582,7 +583,7 @@ def node_update_fsm_matrix(
     pkl_path = f"{model_dir}/model_{model_id}.pkl"
     atomic_save_pickle(new_ckpt, pkl_path)
     _write_model_manifest(
-        model_dir, new_ckpt, common_config, None,
+        model_dir, new_ckpt, common_config,
         source="inherit", gates={"decay_eval_months": common_config.get("decay_eval_months")},
     )
 
@@ -597,7 +598,6 @@ def node_update_fsm_matrix(
 def node_oos_inference_monthly(
     model_id: int,
     dret_path: str,
-    oos_yms: List[int],
     oos_paths: List[str],
     common_config: dict,
     train_paths: Optional[List[str]] = None,
@@ -614,6 +614,11 @@ def node_oos_inference_monthly(
 
     valid_paths = [p for p in oos_paths if os.path.exists(p)]
     if not valid_paths:
+        return
+
+    oos_yms = sorted({m for p in valid_paths if (m := parse_ym_from_path(p)) is not None})
+    if not oos_yms:
+        print(f"⚠️ No valid YYYYMM parsed from oos_paths ({len(valid_paths)} files) -> Skip OOS Inference")
         return
 
     # 训练尾月 + OOS 月合并供 warmup 解析:

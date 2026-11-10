@@ -88,8 +88,7 @@ PREFILTER_THRESHOLDS = {
 EVAL_SEMANTIC_KEYS = (
     "T1_rets", "decay_minutes", "eps", "exclude_bars",
     "dtw_window_frac", "ranking_window", "topk", "trigger",
-    "alternative", "min_excess_ret", "seed", "min_curve_valid_ratio",
-    "positive_motif_quantile", "max_t1_missing_ratio",
+    "alternative", "min_excess_ret", "seed", "max_t1_missing_ratio",
 )
 
 TASK_DIR_KEYS = (

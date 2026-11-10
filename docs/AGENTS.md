@@ -25,7 +25,7 @@
 ```bash
 poetry install                      # 安装依赖 (Python >=3.11,<3.14)
 
-# 全量测试套件 (7 个模块, 224 个用例)
+# 全量测试套件 (7 个模块, 227 个用例)
 poetry run python -m pytest tests/ -q -p no:cacheprovider
 
 # 生产 WFO 跑批 (wfo_production DAG, mlflow 落本地 sqlite)
@@ -34,16 +34,19 @@ poetry run python scripts/run_tune.py --feature f_a1b2c3d4e5f6 --dag wfo_hpo \
     --start-date 20200101 --end-date 20221231               # 特征指纹/名 + DAG + 区间覆盖
 
 # LLM 特征挖掘飞轮 (agent 循环 + Stage3 落盘 spool)
-poetry run python scripts/run_agent.py
+poetry run python scripts/run_agent.py                      # 常用参数: --steps N --vendor zhipu|kimi|google|dummy
+                                                            #   --n-sids K (固定种子抽样宇宙) --resume auto (指纹匹配续跑)
+                                                            #   --profile (内置 cProfile 采样, 产物落 LLM_PROFILE_DIR)
+AGENT_STAGE3=off poetry run python scripts/run_agent.py     # 只验证挖掘+RL, 不触发 tune/HPO 契约
 
-# 只验证特征挖掘 + RL、不触发 tune/HPO 契约 (不写 result/artifacts/pending)
-AGENT_STAGE3=off poetry run python scripts/run_agent.py
+# 回测 (bt_core; scores 目录三级回退: --score-dir > --task-id 桶 > 最新桶, 自动发现 sid/日期范围)
+poetry run python scripts/run_backtest.py --task-id <task_id>
 
-# 可视化看板 / 回测 / 塌陷诊断 / 漂移诊断
-poetry run python scripts/run_streamlit.py
-poetry run python scripts/run_backtest.py
-poetry run python scripts/run_collapse.py
-poetry run python scripts/run_drift_diagnose.py
+# 可视化统一入口 (四模式, 懒加载)
+poetry run python scripts/run_visual.py --mode online       # Streamlit A/B/C 多屏工作台
+poetry run python scripts/run_visual.py --mode collapse --exp <ray_results目录>   # 塌陷诊断 PNG
+poetry run python scripts/run_visual.py --mode drift --exp <ray_results目录>      # WFO 漂移诊断 PNG
+poetry run python scripts/run_visual.py --mode pdf --log <bt_core回测parquet>     # 回测 PDF 报告
 ```
 
 基础设施(Postgres/MLflow/Prometheus/Grafana)可选,`docker-compose up -d`;
@@ -96,7 +99,7 @@ bt_studio/
 ├── default_config.py    # 生产参数基线 (Single Source of Truth)
 └── tune.py              # 7 大节点函数 (node_prepare_macro ... node_oos_inference_monthly)
 
-scripts/                 # 全部运行入口 (见第 2 节; profile_agent.py 为 cProfile 采样工具)
+scripts/                 # 运行入口 (4 个): run_agent.py / run_tune.py / run_backtest.py / run_visual.py + start_env.sh
 tests/                   # pytest 套件: agent/compiler/engine/misc/monitor/pipeline/tune 七个子目录 + conftest.py 确定性环境
 result/                  # 输出根目录, 按 task_id 分桶 (见 4.2)
 ```
@@ -109,7 +112,7 @@ result/                  # 输出根目录, 按 task_id 分桶 (见 4.2)
 
 - 配置单一来源 `bt_studio/default_config.py::build_exp_config(overrides)`;
   `scripts/run_tune.py` 只做覆盖与 `run_dag(parse_dag("wfo_production"), exp_config)`。
-- 节点签名由 executor 经 `engine/tasking.py::analyze_signature` 依 DAG 声明自动注入
+- 节点签名由 executor 内联的 `analyze_signature` 依 DAG 声明自动注入
   (`ctx_key` / 条件边 `?`/`?!`),节点函数本身是纯函数,注册于
   `engine/executor.py::NODE_REGISTRY`。
 - Agent 落盘任务契约:Stage3 胜出特征写 `result/artifacts/pending/*.json`(含

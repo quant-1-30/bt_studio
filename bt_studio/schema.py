@@ -248,7 +248,7 @@ class WindowReplayState:
         common_config: Dict[str, Any],
     ) -> "WindowReplayState":
         min_ratio = float(common_config.get("min_window_pass_ratio", MIN_WINDOW_PASS_RATIO))
-        max_pval_gate = float(common_config.get("stage2_max_pval", 0.1))
+        max_pval_gate = float(common_config.get("u_pval", 0.1))
         max_allowed_failures = int(total_windows * (1.0 - min_ratio + 1e-9))
         return cls(
             feature_names=list(feature_names),
