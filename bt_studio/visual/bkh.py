@@ -92,7 +92,7 @@ class Plot:
 
         if ind_cols:
             self.layout_indicators = self._plot_series_stacked(
-                ind_cols, "Technical Indicators", "Indicator", self.scheme.ind_height, color_offset=0, strip_prefix="ind_"
+                ind_cols, "Technical Indicators", "Indicator", self.scheme.ind_height, color_offset=0
             )
         if analyzer_cols:
             self.layout_analyzers = self._plot_series_stacked(
@@ -183,11 +183,11 @@ class Plot:
         )
 
     def _plot_series_stacked(
-        self, cols: list[str], section_title: str, prefix_label: str, height: int, color_offset: int = 0, strip_prefix: str = ""
+        self, cols: list[str], section_title: str, prefix_label: str, height: int, color_offset: int = 0
     ):
         figs = []
         for i, col in enumerate(cols):
-            label = col.replace(strip_prefix, "") if strip_prefix else col
+            label = col.removeprefix("ind_")
             p = figure(
                 width=self.scheme.figure_width, height=height,
                 title=f"{prefix_label}: {label}",

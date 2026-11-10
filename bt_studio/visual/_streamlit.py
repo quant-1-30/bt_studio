@@ -170,18 +170,18 @@ def render_screen_a_research() -> None:
     idx = _get_monitor_index()
     idx.scan_if_stale(min_interval=2.0)
     ov = idx.overview()
-    usage = ov.get("usage") or {}
-    cov = ov.get("raw_pit") or {}
+    usage = ov.get("usage", {})
+    cov = ov.get("raw_pit", {})
 
     with st.container(border=True):
         st.subheader(":material/science: Screen A — RL flywheel & HPO parameter space")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Active runs (24h)", int(ov.get("active_runs_24h") or 0))
-        c2.metric("Viable features", int(ov.get("viable_features") or 0))
-        c3.metric("Today LLM tokens", f"{int(usage.get('total_tokens') or 0):,}")
-        c4.metric("Raw PIT coverage", f"{float(cov.get('coverage') or 0.0):.1%}")
+        c1.metric("Active runs (24h)", int(ov.get("active_runs_24h", 0)))
+        c2.metric("Viable features", int(ov.get("viable_features", 0)))
+        c3.metric("Today LLM tokens", f"{int(usage.get('total_tokens', 0)):,}")
+        c4.metric("Raw PIT coverage", f"{float(cov.get('coverage', 0.0)):.1%}")
 
-        feats = (idx.list_features(limit=20) or {}).get("items") or []
+        feats = idx.list_features(limit=20).get("items", [])
         if feats:
             st.caption("Top viable features (Stage 2 survivors)")
             st.dataframe(pd.DataFrame(feats), width="stretch", height=220, alt="Top viable Stage 2 features")
