@@ -6,15 +6,7 @@ import numpy as np
 from bt_studio.schema import HPOScoreInputs
 
 
-def calculate_hpo_score(
-    u_pval: Union[float, HPOScoreInputs],
-    trigger_count: int = 0,
-    cond_rets: Optional[np.ndarray] = None,
-    uncond_rets: Optional[np.ndarray] = None,
-    cond_momentum: Optional[np.ndarray] = None,
-    tune_config: Optional[dict] = None,
-    common_config: Optional[dict] = None,
-) -> float:
+def calculate_hpo_score(inputs: HPOScoreInputs) -> float:
     """
       base_score = ln(1+ excess_positive_bp ) - ln(1+|excess_negative_bp|)   
                  + ln(winrate) + ln(momentum_win_rate)             
@@ -22,18 +14,13 @@ def calculate_hpo_score(
       score = base_score - k/sqrt(n)                        
     u_pval (rank_trajectory)
     """
-    if isinstance(u_pval, HPOScoreInputs):
-        inp = u_pval
-        u_pval = inp.u_pval
-        trigger_count = inp.trigger_count
-        cond_rets = inp.cond_rets
-        uncond_rets = inp.uncond_rets
-        cond_momentum = inp.cond_momentum
-        tune_config = inp.tune_config
-        common_config = inp.common_config
-
-    tune_config = tune_config or {}
-    common_config = common_config or {}
+    u_pval = inputs.u_pval
+    trigger_count = inputs.trigger_count
+    cond_rets = inputs.cond_rets
+    uncond_rets = inputs.uncond_rets
+    cond_momentum = inputs.cond_momentum
+    tune_config = inputs.tune_config or {}
+    common_config = inputs.common_config or {}
     if cond_rets is None or cond_momentum is None:
         return -500.0
     if uncond_rets is None:

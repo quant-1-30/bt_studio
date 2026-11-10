@@ -59,17 +59,19 @@ def _banded_dtw_sq(s1: np.ndarray, s2: np.ndarray, w: int, max_dist_sq: float) -
     return dp[r, c] if dp[r, c] <= max_dist_sq else np.inf
 
 
+_DTW_EPS = 1e-8
+
+
 @numba.njit(nogil=True, cache=True)
 def _row_min_subseq_dtw_nb(
     row_curve: np.ndarray,
     z_motif: np.ndarray,
-    u: np.ndarray,
-    l: np.ndarray,
+    keogh_env: Tuple[np.ndarray, np.ndarray],
     dtw_w: int,
     threshold_d: float,
-    eps: float = 1e-8,
 ) -> float:
     """Compiled GIL-free per-curve minimum subsequence DTW with inline Z-norm and LB_Keogh pruning."""
+    u, l = keogh_env
     L = len(row_curve)
     m = len(z_motif)
     if L < m or m == 0 or np.isnan(threshold_d) or threshold_d < 0.0:
@@ -85,7 +87,7 @@ def _row_min_subseq_dtw_nb(
             continue
 
         std = np.std(win)
-        if std < eps:
+        if std < _DTW_EPS:
             continue
         mean = np.mean(win)
 
@@ -104,7 +106,7 @@ def _row_min_subseq_dtw_nb(
         if d_sq <= min_dist_sq:
             min_dist_sq = d_sq
             best_dist_sq = d_sq
-            if best_dist_sq <= eps:
+            if best_dist_sq <= _DTW_EPS:
                 break
 
     return math.sqrt(best_dist_sq)
@@ -114,17 +116,15 @@ def _row_min_subseq_dtw_nb(
 def _chunk_dtw_nb(
     curves_chunk: np.ndarray,
     z_motif: np.ndarray,
-    u: np.ndarray,
-    l: np.ndarray,
+    keogh_env: Tuple[np.ndarray, np.ndarray],
     dtw_w: int,
     threshold_d: float,
-    eps: float,
 ) -> np.ndarray:
     """Process a contiguous chunk of 2D curves with GIL released."""
     n = curves_chunk.shape[0]
     out = np.empty(n, dtype=np.float64)
     for i in range(n):
-        out[i] = _row_min_subseq_dtw_nb(curves_chunk[i], z_motif, u, l, dtw_w, threshold_d, eps)
+        out[i] = _row_min_subseq_dtw_nb(curves_chunk[i], z_motif, keogh_env, dtw_w, threshold_d)
     return out
 
 
@@ -204,20 +204,17 @@ def calc_min_subseq_dtw(
     z_motif: np.ndarray,
     dtw_w: int,
     threshold_d: float,
-    eps: float = 1e-8,
 ) -> float:
     """Compute minimum subsequence DTW distance for a single intraday curve via compiled Numba kernel."""
     motif_c = np.ascontiguousarray(z_motif, dtype=np.float64)
-    u, l = _compute_keogh_envelope(motif_c, int(dtw_w))
+    keogh_env = _compute_keogh_envelope(motif_c, int(dtw_w))
     return float(
         _row_min_subseq_dtw_nb(
             np.ascontiguousarray(row_curve, dtype=np.float64),
             motif_c,
-            u,
-            l,
+            keogh_env,
             int(dtw_w),
             float(threshold_d),
-            float(eps),
         )
     )
 
@@ -242,19 +239,19 @@ def compute_dtw_distances(
         (raw_motif - np.mean(raw_motif)) / (m_std if m_std > eps else 1.0),
         dtype=np.float64,
     )
-    u, l = _compute_keogh_envelope(z_motif, dtw_w)
+    keogh_env = _compute_keogh_envelope(z_motif, dtw_w)
     curves_c = np.ascontiguousarray(curves_2d, dtype=np.float64)
     max_workers = resolve_dtw_workers(common_config)
 
     if max_workers <= 1 or n_curves < 128:
-        return _chunk_dtw_nb(curves_c, z_motif, u, l, dtw_w, float(threshold_d), eps)
+        return _chunk_dtw_nb(curves_c, z_motif, keogh_env, dtw_w, float(threshold_d))
 
     chunk_size = max(64, (n_curves + max_workers - 1) // max_workers)
     chunks = [curves_c[i : i + chunk_size] for i in range(0, n_curves, chunk_size)]
     with ThreadPoolExecutor(max_workers=min(max_workers, len(chunks))) as executor:
         parts = list(
             executor.map(
-                lambda ch: _chunk_dtw_nb(ch, z_motif, u, l, dtw_w, float(threshold_d), eps),
+                lambda ch: _chunk_dtw_nb(ch, z_motif, keogh_env, dtw_w, float(threshold_d)),
                 chunks,
             )
         )

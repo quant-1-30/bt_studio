@@ -133,9 +133,9 @@ def evaluate_and_build_fsm(
     motif: np.ndarray,
     tune_config: dict,
     common_config: dict,
-    skip_stats: bool = False,
-    stats_yms: Optional[List[int]] = None,
 ) -> dict:
+    skip_stats = bool(common_config.get("_skip_stats", False))
+    stats_yms = common_config.get("_stats_yms")
     targets = common_config["T1_rets"]
     target_names = [t for t in targets if f"raw_{t}" in panel_df.columns]
     if not target_names:
