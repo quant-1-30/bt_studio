@@ -245,7 +245,7 @@ def guard_disk_watermark(target_dir: str) -> None:
     """Trigger LRU cache eviction when disk usage on target_dir exceeds BT_STUDIO_DISK_CRIT_RATIO."""
     try:
         du = shutil.disk_usage(target_dir)
-        crit_thr = float(os.environ.get("BT_STUDIO_DISK_CRIT_RATIO", "0.95") or 0.95)
+        crit_thr = float(os.environ.get("BT_STUDIO_DISK_CRIT_RATIO", "0.95"))
         if du.total > 0 and (du.used / du.total) >= crit_thr:
             evict_cache_lru(max_remove=500, include_bars=True)
     except Exception:
@@ -423,22 +423,24 @@ def build_eval_cache_locator(
     grid_config: Dict[str, list],
     feature_names: List[str],
     fingerprints: Optional[Dict[str, str]] = None,
-    eval_data_fp: Optional[str] = None,
-    cache_root: str = EVAL_CACHE_ROOT,
-    logic_version: str = EVAL_LOGIC_VERSION,
-) -> Tuple[str, Callable[[str, int], str]]:
+    cache_ctx: Tuple[str, str] = (EVAL_CACHE_ROOT, EVAL_LOGIC_VERSION),
+) -> Tuple[str, Callable[[str, Any], str]]:
+    cache_root, logic_version = cache_ctx
     data_fp = str(
-        eval_data_fp
-        or common_config.get("_eval_data_fp")
+        common_config.get("_eval_data_fp")
         or sha1_hex({k: common_config.get(k) for k in _DATA_SCOPE_KEYS if k in common_config})
     )
     fps = fingerprints or {f: sha1_hex(f) for f in feature_names}
     eval_cfg = {k: common_config.get(k) for k in EVAL_SEMANTIC_KEYS if k in common_config}
     gh = sha1_hex({"grid": grid_config, "eval_cfg": eval_cfg})
 
-    def _cache_path(feat: str, ym: int) -> str:
+    def _cache_path(feat: str, ym: Any) -> str:
+        if isinstance(ym, (list, tuple)):
+            tag = int(ym[0]) if len(ym) == 1 else f"{int(ym[0])}_{int(ym[-1])}_{len(ym)}"
+        else:
+            tag = ym
         ast_fp = fps.get(feat, sha1_hex(feat))
-        return os.path.join(cache_root, logic_version, data_fp[:8], ast_fp[:8], f"{ym}_{gh[:10]}.json")
+        return os.path.join(cache_root, logic_version, data_fp[:8], ast_fp[:8], f"{tag}_{gh[:10]}.json")
 
     return data_fp, _cache_path
 

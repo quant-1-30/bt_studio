@@ -53,14 +53,14 @@ def safe_load_model_ckpt(model_path: str) -> Dict[str, Any]:
             raise ValueError(f"模型 manifest 损坏 ({manifest_path})")
 
         if hmac_key:
-            expected_hmac = str(manifest.get("pkl_hmac_sha256") or "")
+            expected_hmac = str(manifest.get("pkl_hmac_sha256", ""))
             actual_hmac = _file_hmac_sha256(model_path, hmac_key)
             if not expected_hmac or not hmac.compare_digest(actual_hmac, expected_hmac):
                 raise ValueError(
                     f"模型文件 HMAC-SHA256 密钥签名验证失败 (拒绝反序列化): {model_path}"
                 )
 
-        expected_sha = str(manifest.get("pkl_sha256") or "")
+        expected_sha = str(manifest.get("pkl_sha256", ""))
         if expected_sha:
             actual_sha = _file_sha256(model_path)
             if actual_sha != expected_sha:
@@ -77,7 +77,6 @@ def write_model_manifest(
     model_dir: str,
     model_ckpt: Dict[str, Any],
     common_config: dict,
-    exp_config: Optional[Dict[str, Any]] = None,
     source: str = "tune",
     gates: Optional[Dict[str, Any]] = None,
 ) -> None:
@@ -86,7 +85,7 @@ def write_model_manifest(
     pkl_sha256 = _file_sha256(pkl_path)
     hmac_key = os.environ.get("BT_STUDIO_MODEL_HMAC_KEY", "").strip()
     pkl_hmac = _file_hmac_sha256(pkl_path, hmac_key) if hmac_key else ""
-    ast_recipe = (exp_config or {}).get("ast_recipe")
+    ast_recipe = model_ckpt.get("ast_recipe") or common_config.get("ast_recipe")
     try:
         ast_fp = ast_fingerprint(ast_recipe) if ast_recipe is not None else ""
     except Exception:
@@ -98,7 +97,7 @@ def write_model_manifest(
         "model_id": model_id,
         "source": source,
         "pkl_sha256": pkl_sha256,
-        **({"pkl_hmac_sha256": pkl_hmac} if pkl_hmac else {}),
+        "pkl_hmac_sha256": pkl_hmac,
         "feature_id": feature_id,
         "feature_col": feature_id,  
         "ast_fingerprint": ast_fp or (feature_id[2:] if feature_id.startswith("f_") else ""),

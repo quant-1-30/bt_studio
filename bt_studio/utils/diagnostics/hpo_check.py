@@ -58,14 +58,14 @@ def run_collapse_check(
         return True, "insufficient_samples", {}
 
     try:
-        common_cfg = exp_config.get("common_params") or exp_config.get("common_config") or {}
-        search_bounds = exp_config.get("search_spec") or {}
+        common_cfg = exp_config.get("common_params", exp_config.get("common_config", {}))
+        search_bounds = exp_config.get("search_spec", {})
         try:
             feature_col = resolve_feature_col(
                 common_cfg, exp_config.get("ast_recipe"), exp_config.get("feature_col")
             )
         except ValueError:
-            feature_col = common_cfg.get("_task_id") or "unknown_feat"
+            feature_col = common_cfg.get("_task_id", "unknown_feat")
 
         run_name = (
             exp_config.get("run_name")

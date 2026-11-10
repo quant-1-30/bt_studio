@@ -80,6 +80,54 @@ def ym_range(start_ym: int, end_ym: int) -> list[int]:
     return out
 
 
+def window_tag(win: int | str | list[int] | tuple[int, ...]) -> int | str:
+    """Format a single-month or multi-month window into a canonical cache/log tag."""
+    if isinstance(win, (list, tuple)):
+        if not win:
+            return "empty"
+        if len(win) == 1:
+            return int(win[0])
+        return f"{int(win[0])}_{int(win[-1])}_{len(win)}"
+    return win
+
+
+def resolve_walk_forward_windows(
+    available_yms: list[int],
+    common_config: dict,
+) -> list[list[int]]:
+    """Slice available months into Walk-Forward windows of (train_window, oos_step), excluding warmup_months."""
+    yms = sorted({int(m) for m in available_yms})
+    if not yms:
+        return []
+
+    start_date = common_config.get("start_date")
+    end_date = common_config.get("end_date")
+    if start_date is not None:
+        start_ym = int(start_date) // 100
+        filtered = [m for m in yms if m >= start_ym]
+        if filtered:
+            yms = filtered
+    if end_date is not None:
+        end_ym = int(end_date) // 100
+        filtered = [m for m in yms if m <= end_ym]
+        if filtered:
+            yms = filtered
+
+    n_months = len(yms)
+    train_window = max(1, int(common_config.get("train_window", 1)))
+    oos_step = max(1, int(common_config.get("oos_step", 1)))
+
+    if n_months < train_window:
+        return [[m] for m in yms]
+    if n_months == train_window:
+        return [yms] if "train_window" in common_config and train_window > 1 else [[m] for m in yms]
+
+    splits = list(range(train_window, n_months + 1, oos_step))
+    if splits[-1] < n_months:
+        splits.append(n_months)
+    return [yms[idx - train_window : idx] for idx in splits]
+
+
 def calc_warmup_start_date(start_date: int, warmup_months: int = 1) -> int:
     year = start_date // 10000
     month = (start_date % 10000) // 100

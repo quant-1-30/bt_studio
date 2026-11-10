@@ -140,14 +140,16 @@ def _calc_local_turbulence(
     col: str,
     values: np.ndarray,
     valid: pd.DataFrame,
-    param_cols: List[str],
     search_bounds: Dict[str, Any],
-    target_vals: np.ndarray,
-    best_idx: int,
-    best_score: float,
-    iqr_scale: float,
-    higher_is_better: bool,
+    target_ctx: Dict[str, Any],
 ) -> Tuple[float, float]:
+    param_cols = target_ctx["param_cols"]
+    target_vals = target_ctx["target_vals"]
+    best_idx = target_ctx["best_idx"]
+    best_score = target_ctx["best_score"]
+    iqr_scale = target_ctx["iqr_scale"]
+    higher_is_better = target_ctx["higher_is_better"]
+
     best_val = values[best_idx]
     delta = max(float(np.std(values)) * 0.5, 1e-5)
     neighbors_mask = (values >= best_val - delta) & (values <= best_val + delta)
@@ -206,6 +208,14 @@ def detect_space_collapse(
 
     q75, q25 = np.percentile(target_vals, [75, 25])
     iqr_scale = max(float(q75 - q25), 1e-4)
+    target_ctx = {
+        "param_cols": param_cols,
+        "target_vals": target_vals,
+        "best_idx": best_idx,
+        "best_score": best_score,
+        "iqr_scale": iqr_scale,
+        "higher_is_better": higher_is_better,
+    }
 
     for col in param_cols:
         name = _clean_param_name(col)
@@ -231,10 +241,7 @@ def detect_space_collapse(
         worst_drop_ratio, local_turbulence = (
             (0.0, 0.0)
             if is_categorical
-            else _calc_local_turbulence(
-                col, values, valid, param_cols, search_bounds,
-                target_vals, best_idx, best_score, iqr_scale, higher_is_better,
-            )
+            else _calc_local_turbulence(col, values, valid, search_bounds, target_ctx)
         )
 
         is_collapsed = False
