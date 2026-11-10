@@ -1,28 +1,12 @@
 #!/usr/bin/env python3
-"""Production WFO entry — wfo_production / wfo_hpo DAG via the engine.
-
-支持两种运行方式:
-1. 显式指定特征名 / viable_features.json 中的指纹或 feature_id:
-   poetry run python scripts/run_tune.py --feature f_a1b2c3d4e5f6
-2. 环境变量或命令行覆盖起止日期、DAG、搜索预算:
-   poetry run python scripts/run_tune.py --feature close --dag wfo_production --start-date 20200101 --end-date 20221231
-"""
 
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 from typing import Any, Dict, Optional, Tuple
 
-# Pin single-thread execution before importing polars/numba/stumpy to guarantee
-# bit-identical floating-point reduction order across processes (see docs/AGENTS.md §2).
-for _var in ("NUMBA_NUM_THREADS", "POLARS_MAX_THREADS", "OMP_NUM_THREADS"):
-    os.environ.setdefault(_var, "1")
-
 import mlflow
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from bt_studio.agent.flywheel import load_viable_features
 from bt_studio.default_config import build_exp_config
@@ -30,26 +14,26 @@ from bt_studio.engine import parse_dag, run_dag
 
 
 def _lookup_viable_feature(feature_ref: Optional[str]) -> Tuple[Optional[str], Any, Dict[str, Any]]:
-    """从 viable_features.json 解析 (feature_col, ast_recipe, prior_config)。"""
+    """Resolve (feature_col, ast_recipe, prior_config) from viable_features.json."""
     features = load_viable_features()
 
     if not feature_ref:
         if features:
             top = features[0]
-            fc = top.get("feature_id") or top.get("feature_name")
-            return fc, top.get("ast_recipe"), dict(top.get("prior_config") or {})
+            fc = top.get("feature_id", top.get("feature_name"))
+            return fc, top.get("ast_recipe"), dict(top.get("prior_config", {}))
         return None, None, {}
 
     for item in features:
         candidates = {
-            str(item.get("feature_id") or ""),
-            str(item.get("feature_name") or ""),
-            str(item.get("fingerprint") or ""),
-            str(item.get("display_name") or ""),
+            str(item.get("feature_id", "")),
+            str(item.get("feature_name", "")),
+            str(item.get("fingerprint", "")),
+            str(item.get("display_name", "")),
         }
         if feature_ref in candidates:
-            fc = item.get("feature_id") or item.get("feature_name") or feature_ref
-            return str(fc), item.get("ast_recipe"), dict(item.get("prior_config") or {})
+            fc = item.get("feature_id", item.get("feature_name", feature_ref))
+            return str(fc), item.get("ast_recipe"), dict(item.get("prior_config", {}))
 
     return feature_ref, None, {}
 
@@ -80,7 +64,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_cli_parser().parse_args(argv)
 
-    # [FIX] Force local SQLite MLflow backend unless MLFLOW_TRACKING_URI is explicitly set
     if not os.environ.get("MLFLOW_TRACKING_URI"):
         mlflow.set_tracking_uri(f"sqlite:///{os.path.join(os.getcwd(), 'mlflow.db')}")
     print(f"  [MLflow] Tracking URI: {mlflow.get_tracking_uri()}")
@@ -88,27 +71,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     feature_col, ast_recipe, prior_config = _lookup_viable_feature(args.feature)
     if not feature_col:
         raise SystemExit(
-            "未指定特征且 viable_features.json 为空: 请通过 --feature <feature_id|col> "
-            "或环境变量 BT_STUDIO_FEATURE_COL 显式指定要运行的特征。"
+            "viable_features.json null and --feature <feature_id|col> "
+            "or env set BT_STUDIO_FEATURE_COL is required"
         )
 
     common_overrides: Dict[str, Any] = {"feature_col": feature_col}
     if prior_config:
         common_overrides["prior_config"] = prior_config
-    if args.start_date is not None:
-        common_overrides["start_date"] = args.start_date
-    if args.end_date is not None:
-        common_overrides["end_date"] = args.end_date
-    if args.train_window is not None:
-        common_overrides["train_window"] = args.train_window
-    if args.oos_step is not None:
-        common_overrides["oos_step"] = args.oos_step
-    if args.num_trials is not None:
-        common_overrides["num_trials"] = args.num_trials
-    if args.num_workers is not None:
-        common_overrides["num_workers"] = args.num_workers
-    if args.last_model_id is not None:
-        common_overrides["last_model_id"] = args.last_model_id
+    for cli_val, key in (
+        (args.start_date, "start_date"),
+        (args.end_date, "end_date"),
+        (args.train_window, "train_window"),
+        (args.oos_step, "oos_step"),
+        (args.num_trials, "num_trials"),
+        (args.num_workers, "num_workers"),
+        (args.last_model_id, "last_model_id"),
+    ):
+        if cli_val is not None:
+            common_overrides[key] = cli_val
 
     user_cfg: Dict[str, Any] = {
         "feature_col": feature_col,
