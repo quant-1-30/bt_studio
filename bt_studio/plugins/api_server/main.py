@@ -245,30 +245,30 @@ def prometheus_metrics():
     idx = get_index()
     idx.scan_if_stale(min_interval=2.0)
     ov = idx.overview()
-    usage = ov.get("usage") or {}
-    all_time = ov.get("usage_all_time") or {}
-    alerts_list = ov.get("alerts") or []
-    raw_pit = ov.get("raw_pit") or {}
+    usage = ov.get("usage", {})
+    all_time = ov.get("usage_all_time", {})
+    alerts_list = ov.get("alerts", [])
+    raw_pit = ov.get("raw_pit", {})
 
     lines = [
         "# HELP bt_studio_active_runs_24h Active LLM feature mining runs in the last 24h",
         "# TYPE bt_studio_active_runs_24h gauge",
-        f"bt_studio_active_runs_24h {int(ov.get('active_runs_24h') or 0)}",
+        f"bt_studio_active_runs_24h {int(ov.get('active_runs_24h', 0))}",
         "# HELP bt_studio_viable_features_total Total viable features passing Stage 2",
         "# TYPE bt_studio_viable_features_total gauge",
-        f"bt_studio_viable_features_total {int(ov.get('viable_features') or 0)}",
+        f"bt_studio_viable_features_total {int(ov.get('viable_features', 0))}",
         "# HELP bt_studio_llm_tokens_today Today LLM total tokens consumed",
         "# TYPE bt_studio_llm_tokens_today gauge",
-        f"bt_studio_llm_tokens_today {int(usage.get('total_tokens') or 0)}",
+        f"bt_studio_llm_tokens_today {int(usage.get('total_tokens', 0))}",
         "# HELP bt_studio_llm_calls_today Today LLM total API calls",
         "# TYPE bt_studio_llm_calls_today gauge",
-        f"bt_studio_llm_calls_today {int(usage.get('calls') or 0)}",
+        f"bt_studio_llm_calls_today {int(usage.get('calls', 0))}",
         "# HELP bt_studio_llm_tokens_all_time All-time LLM total tokens consumed",
         "# TYPE bt_studio_llm_tokens_all_time counter",
-        f"bt_studio_llm_tokens_all_time {int(all_time.get('total_tokens') or 0)}",
+        f"bt_studio_llm_tokens_all_time {int(all_time.get('total_tokens', 0))}",
         "# HELP bt_studio_raw_pit_coverage Raw PIT minute bar cache coverage ratio",
         "# TYPE bt_studio_raw_pit_coverage gauge",
-        f"bt_studio_raw_pit_coverage {float(raw_pit.get('coverage') or 0.0):.4f}",
+        f"bt_studio_raw_pit_coverage {float(raw_pit.get('coverage', 0.0)):.4f}",
         "# HELP bt_studio_alerts_active Active monitor alerts count",
         "# TYPE bt_studio_alerts_active gauge",
         f"bt_studio_alerts_active {len(alerts_list)}",

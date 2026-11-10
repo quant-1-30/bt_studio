@@ -112,13 +112,9 @@ class MonitorIndex:
         c: sqlite3.Connection,
         path: str,
         kind: str,
-        *,
-        run_id: str = "",
-        feature_id: str = "",
-        model_id: Optional[int] = None,
-        ym: Optional[int] = None,
         meta: Optional[dict] = None,
         parse_sha: bool = False,
+        **scope: Any,
     ) -> None:
         st = os.stat(path)
         size, mtime, inode = int(st.st_size), float(st.st_mtime), int(getattr(st, "st_ino", 0))
@@ -136,8 +132,19 @@ class MonitorIndex:
                  feature_id=excluded.feature_id,model_id=excluded.model_id,ym=excluded.ym,
                  size=excluded.size,mtime=excluded.mtime,inode=excluded.inode,
                  content_sha1=excluded.content_sha1,meta_json=excluded.meta_json""",
-            (path, kind, run_id, feature_id, model_id, ym, size, mtime, inode,
-             content_sha1, json.dumps(meta or {}, ensure_ascii=False, default=str)),
+            (
+                path,
+                kind,
+                scope.get("run_id", ""),
+                scope.get("feature_id", ""),
+                scope.get("model_id"),
+                scope.get("ym"),
+                size,
+                mtime,
+                inode,
+                content_sha1,
+                json.dumps(meta or {}, ensure_ascii=False, default=str),
+            ),
         )
 
     # ------------------------------------------------------------------ #

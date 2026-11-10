@@ -55,16 +55,14 @@ class FSMSizer(bt.Sizer):
         target_expected_ret: float = 0.003,
         max_single_weight: float = 0.30,
         vol_parity: bool = True,
-        default_vol_scale: float = 0.02,
-        min_vol_scale: float = 0.005,
         **kwargs,
     ):
         self.stake = float(stake)
         self.target_expected_ret = max(1e-6, float(target_expected_ret))
         self.max_single_weight = float(max_single_weight)
         self.vol_parity = bool(vol_parity)
-        self.default_vol_scale = max(1e-4, float(default_vol_scale))
-        self.min_vol_scale = max(1e-4, float(min_vol_scale))
+        self.default_vol_scale = max(1e-4, float(kwargs.get("default_vol_scale", 0.02)))
+        self.min_vol_scale = max(1e-4, float(kwargs.get("min_vol_scale", 0.005)))
 
     def _resolve_vol_scale(self, info: Dict[str, Any]) -> float:
         if info.get("sid_scale") and float(info["sid_scale"]) > 0:
