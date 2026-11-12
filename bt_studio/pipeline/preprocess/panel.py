@@ -94,14 +94,12 @@ def extract_curves_from_panel(
     ds = tune_config["downsample"]
     total_bars = int(common_config.get("bars_per_day", TRADING_BARS_PER_DAY))
     bars_per_day = total_bars // ds
-
-    train_feat_lf = align_date_col(train_feat_lf).sort(["sid", "day", "bar_idx"])
+    feature_col = common_config.get("feature_col", "ofi_ratio")
+    min_valid_ratio = float(common_config.get("min_curve_valid_ratio", 0.90))
 
     if ds > 1:
         train_feat_lf = train_feat_lf.filter((pl.col("bar_idx") % ds) == 0)
-
-    feature_col = common_config.get("feature_col", "ofi_ratio")
-    min_valid_ratio = float(common_config.get("min_curve_valid_ratio", 0.90))
+    train_feat_lf = align_date_col(train_feat_lf.select(["day", "sid", "bar_idx", feature_col]))
 
     return (
         train_feat_lf.group_by(["day", "sid"])

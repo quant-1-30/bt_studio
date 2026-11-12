@@ -186,11 +186,16 @@ def evaluate_and_build_fsm(
     cond_ranks = triggers["rank_trajectory"].drop_nulls().to_numpy()
     uncond_ranks = complementary_df["rank_trajectory"].drop_nulls().to_numpy()
     min_test_samples = max(10, common_config["trigger"] // 3)
+    min_uncond_samples = max(3, min(500, eval_df.height // 100))
 
-    if len(cond_ranks) < min_test_samples or np.std(cond_ranks) < 1e-8 or len(uncond_ranks) == 0:
+    if (
+        len(cond_ranks) < min_test_samples
+        or np.std(cond_ranks) < 1e-8
+        or len(uncond_ranks) < min_uncond_samples
+    ):
         return {
             "status": "failed",
-            "reason": f"Rank trajectory valid triggers ({len(cond_ranks)}) < {min_test_samples}",
+            "reason": f"Rank trajectory valid triggers ({len(cond_ranks)}) or control ({len(uncond_ranks)} < {min_uncond_samples}) insufficient",
             "metrics_score": -500.0,
         }
 

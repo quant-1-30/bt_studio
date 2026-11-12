@@ -42,7 +42,6 @@ _BARS_SCHEMA = {
 def prepare_macro(
     start_date: int,
     end_date: int,
-    benchmark: bytes = b"1A0001",
 ) -> tuple[pl.LazyFrame, pl.LazyFrame]:
     with external_mdapi_context() as mdapi:
         inst_df = mdapi.get_instrument()
@@ -82,13 +81,17 @@ def prepare_tick(
 
     with external_mdapi_context() as mdapi:
         for ym in months:
-            covered = store.covered_sids(ym)
-            missing = [s for s in sids_bytes if s.decode() not in covered]
+            if not sids_bytes:
+                continue
+
+            known = store.known_sids(ym)
+            missing = [s for s in sids_bytes if s.decode() not in known]
             if not missing and os.path.exists(store.pack_path(ym)):
                 continue
 
             new_frames: list[pl.DataFrame] = []
             added_sids: set[str] = set()
+            empty_sids: set[str] = set()
             lo, hi = month_bounds(ym)
 
             for i in range(0, len(missing), batch):
@@ -98,25 +101,31 @@ def prepare_tick(
                 factors = fetch_hfq_factors_safe(mdapi, body, FactorTopic.Hfq)
                 if factors:
                     raw = apply_factor(raw, factors, FactorTopic.Hfq)
-                for sid in chunk:
-                    tick_df = raw.get(sid)
-                    if tick_df is not None and tick_df.height > 0 and "tick" in tick_df.columns:
-                        df = align_skeleton(
-                            tick_df.with_columns(pl.lit(sid).alias("sid").cast(pl.Binary)).lazy()
-                        ).collect(engine="streaming")
-                    else:
-                        df = pl.DataFrame(schema=_BARS_SCHEMA)
 
+                chunk_raw = [
+                    t_df.with_columns(pl.lit(sid).alias("sid").cast(pl.Binary))
+                    for sid in chunk
+                    if (t_df := raw.get(sid)) is not None and t_df.height > 0 and "tick" in t_df.columns
+                ]
+                aligned_df = (
+                    align_skeleton(pl.concat(chunk_raw).lazy()).collect(engine="streaming")
+                    if chunk_raw
+                    else pl.DataFrame(schema=_BARS_SCHEMA)
+                )
+                valid_chunk_sids = set(aligned_df["sid"].unique().to_list()) if aligned_df.height > 0 else set()
+                if aligned_df.height > 0:
+                    new_frames.append(aligned_df)
+
+                for sid in chunk:
                     sid_str = sid.decode()
-                    if store.is_valid_sid_month(df):
-                        new_frames.append(df)
+                    if sid in valid_chunk_sids:
                         added_sids.add(sid_str)
                     else:
-                        n_days = df.height // TRADING_BARS_PER_DAY if df.height else 0
-                        print(f"[raw_pit] {(sid_str, ym)} validation failed (days={n_days}), skipped")
+                        empty_sids.add(sid_str)
+                        print(f"[raw_pit] {(sid_str, ym)} validation failed (days=0), skipped")
 
-            if added_sids:
-                store.merge_and_save_month(ym, new_frames, added_sids)
+            if added_sids or empty_sids:
+                store.merge_and_save_month(ym, new_frames, added_sids, empty_sids)
 
     return store.verify_and_scan(months, sids_bytes, start_date, end_date)
 

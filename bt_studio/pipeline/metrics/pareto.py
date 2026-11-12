@@ -8,7 +8,7 @@ from bt_studio.utils.math_func import resolve_search_hyperparams
 from .fanova import validate_parameter_plateau_fanova
 
 
-def find_pareto_front(df_results: pl.DataFrame, common_config: Optional[dict] = None) -> pl.DataFrame:
+def find_pareto_front(df_results: pl.DataFrame) -> pl.DataFrame:
     """Extract the non-dominated Pareto front across (efficiency, valid_sample_ratio, momentum_persistence)."""
     valid_df = (
         df_results
@@ -68,11 +68,10 @@ def _extract_trial_config(row: Dict[str, Any]) -> Dict[str, Any]:
 def select_plateau_verified_config(
     df_results: pl.DataFrame,
     stats_valid_trials: pl.DataFrame,
-    common_config: dict,
     search_spec: dict,
 ) -> Optional[Dict[str, Any]]:
     """Select a Pareto-optimal configuration verified by fANOVA neighborhood plateau stability."""
-    pareto_front_df = find_pareto_front(stats_valid_trials, common_config)
+    pareto_front_df = find_pareto_front(stats_valid_trials)
     best_model_dict = select_best_model_from_pareto(pareto_front_df)
     if not best_model_dict:
         return None
