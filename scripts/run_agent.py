@@ -38,12 +38,11 @@ def spool_stage3_hpo_task(feature_name: str, ast_recipe: Any, common_config: Dic
     """Spool a Stage 2 winner feature as an atomic pending HPO task JSON for AsyncTaskManager."""
     n_months = len(ym_range(common_config["start_date"] // 100, common_config["end_date"] // 100))
     train_win = min(int(common_config.get("train_window", PRODUCTION_COMMON_PARAMS["train_window"])), max(1, n_months))
-    bench = common_config["benchmark"]
 
     common_params: Dict[str, Any] = {
         **PRODUCTION_COMMON_PARAMS,
         **{k: v for k, v in common_config.items() if k in PRODUCTION_COMMON_PARAMS},
-        "benchmark": bench.decode() if isinstance(bench, bytes) else str(bench),
+        "benchmark": str(common_config["benchmark"]),
         "train_window": train_win,
         "oos_step": int(common_config.get("oos_step", PRODUCTION_COMMON_PARAMS["oos_step"])),
         "feature_col": feature_name,
@@ -100,7 +99,6 @@ def run_mining_flywheel(args: argparse.Namespace) -> None:
         "end_date": int(args.end_date),
         "train_window": int(args.train_window),
         "oos_step": int(args.oos_step),
-        "benchmark": str(PRODUCTION_COMMON_PARAMS["benchmark"]).encode(),
         "u_pval": float(os.environ.get("AGENT_SCREEN_MAX_PVAL", PRODUCTION_COMMON_PARAMS["u_pval"])),
         "min_window_pass_ratio": float(
             os.environ.get("AGENT_SCREEN_MIN_WINDOW_PASS_RATIO", PRODUCTION_COMMON_PARAMS["min_window_pass_ratio"])
@@ -143,7 +141,7 @@ def run_mining_flywheel(args: argparse.Namespace) -> None:
     data_fp = sha1_hex({
         "start": common_config["start_date"],
         "end": common_config["end_date"],
-        "sids": sorted(s.decode() if isinstance(s, bytes) else str(s) for s in chosen),
+        "sids": [s.decode() for s in chosen],
     })
     run_common = {
         k: v for k, v in common_config.items()
