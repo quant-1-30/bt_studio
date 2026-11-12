@@ -247,7 +247,7 @@ def test_prepare_macro_regenerates_when_cache_stale(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_prepare_macro(start_date, end_date, benchmark):
+    def fake_prepare_macro(start_date, end_date):
         calls.append((start_date, end_date))
         uni = pl.LazyFrame({"sid": ["a"], "first_trading": ["20200101"]})
         daily = pl.LazyFrame({
@@ -306,7 +306,7 @@ def test_prepare_macro_intramonth_date_mismatch_regenerates(tmp_path, monkeypatc
     os.makedirs(base, exist_ok=True)
     calls = []
 
-    def fake_prepare_macro(start_date, end_date, benchmark):
+    def fake_prepare_macro(start_date, end_date):
         calls.append((start_date, end_date))
         uni = pl.LazyFrame({"sid": ["a"], "first_trading": ["20200101"]})
         daily = pl.LazyFrame({

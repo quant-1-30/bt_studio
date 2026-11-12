@@ -133,12 +133,17 @@ def test_incremental_merge_new_sid_appends(pit_env):
 
 def test_poisoned_sid_not_cached(pit_env):
     root, log, mk = pit_env
-    # bad: 源返回 0 天 (空/无有效行情) → 不入 covered; good 正常
+    # bad: 源返回 0 天 (空/无有效行情) → 不入 covered, 记入 empty_sids 负缓存防重复 RPC; good 正常
     mk({b"bad": 0, b"good": 3})
     _run(None, start_date=20240101, end_date=20240131,
          sids=[b"bad", b"good"])
     meta = json.load(open(os.path.join(root, "ym=202401.meta.json")))
     assert "bad" not in meta["covered_sids"] and "good" in meta["covered_sids"]
+    assert "bad" in meta["empty_sids"]
+    # 第二次再次请求 [bad, good] 时, bad 命中 empty_sids 负缓存, 零 RPC 重拉!
+    _run(None, start_date=20240101, end_date=20240131,
+         sids=[b"bad", b"good"])
+    assert len(log) == 1
 
 
 def test_readside_filters_request_range(pit_env):
