@@ -99,8 +99,8 @@ PRODUCTION_SEARCH_SPEC: Dict[str, Dict[str, Any]] = {
     },
     "threshold_r": {
         "type": "uniform",
-        "low": 0.65,
-        "high": 0.85,
+        "low": 0.70,
+        "high": 0.92,
     },
 }
 

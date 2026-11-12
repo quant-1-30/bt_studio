@@ -245,11 +245,12 @@ def is_macro_cache_valid(
     end_date: int,
     common_config: dict,
 ) -> tuple[bool, List[int]]:
+    start_ym = int(common_config.get("start_date") or fetch_start) // 100
+    required_months = ym_range(start_ym, end_date // 100)
     if not os.path.exists(dret_path):
-        return False, ym_range(fetch_start // 100, end_date // 100)
+        return False, required_months
 
     cached_months = retrieve_available_months(dret_path)
-    required_months = ym_range(fetch_start // 100, end_date // 100)
     missing_months = sorted(set(required_months) - set(cached_months))
     if not cached_months or missing_months:
         return False, missing_months

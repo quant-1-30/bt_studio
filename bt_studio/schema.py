@@ -384,16 +384,3 @@ class TaskResult:
     progress: float = 0.0
     message: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "task_id": self.task_id,
-            "status": self.status.value,
-            "feature_col": self.feature_col,
-            "dag": self.dag,
-            "result": self.result,
-            "error": self.error,
-            "progress": self.progress,
-            "message": self.message,
-            "timestamp": self.timestamp.isoformat(),
-        }

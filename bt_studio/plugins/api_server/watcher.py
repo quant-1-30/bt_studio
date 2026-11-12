@@ -137,8 +137,8 @@ def _scan_root_multi_kinds_sync(
     kinds: List[ArtifactKind],
     prev_registries: Dict[ArtifactKind, Dict[str, ArtifactRecord]],
 ) -> Dict[ArtifactKind, Tuple[Dict[str, ArtifactRecord], List[Tuple[str, ArtifactRecord]], List[str]]]:
-    """对同一个物理根目录 (如 TUNE_BASE_DIR) 只执行 1 次 os.walk 与 1 次 os.stat，
-    在内存内按 ArtifactKind 分类分发，消除多 kind 共享目录时的 3 倍重复磁盘遍历。"""
+    """os.walk and os.stat once; dispatch to different kinds; only scan the same physical root directory (e.g., TUNE_BASE_DIR) once for each kind,
+    classify and distribute in memory, eliminate 3x redundant disk traversal when multiple kinds share directories."""
     if not os.path.isdir(directory):
         return {k: ({}, [], list(prev_registries.get(k, {}).keys())) for k in kinds}
 
@@ -315,24 +315,6 @@ class ResultWatcher:
                 "timestamp": now_iso,
             }
             await self._safe_broadcast(del_payload)
-
-    async def _scan_single_kind(
-        self,
-        kind: ArtifactKind,
-        directory: str,
-        suffix: str,
-        quiet: bool = False,
-    ) -> None:
-        batch_res = await asyncio.to_thread(
-            _scan_root_multi_kinds_sync,
-            directory,
-            [kind],
-            {kind: self._registry[kind]},
-        )
-        updated_reg, event_records, deleted_names = batch_res[kind]
-        await self._apply_scan_results(
-            kind, updated_reg, event_records, deleted_names, quiet=quiet
-        )
 
     async def _safe_broadcast(self, message: Dict[str, Any]) -> None:
         try:

@@ -102,7 +102,6 @@ def node_prepare_macro(common_config: dict) -> Dict[str, Any]:
         universe_lf, daily_lf = prepare_macro(
             start_date=fetch_start,
             end_date=end_date,
-            benchmark=str(common_config["benchmark"]).encode(),
         )
         filtered_uni_lf = universe_sample(universe_lf, daily_lf, common_config)
 
@@ -165,9 +164,7 @@ def _prepare_tick_for_months(
         return None
 
     hf = prepare_tick(fetch_start_date, end_date, unique_sids)
-    if isinstance(hf, pl.LazyFrame):
-        return hf if hf.select(pl.len()).collect().item() > 0 else None
-    return None
+    return hf if hf.collect_schema().names() else None
 
 
 def node_extract_feature_monthly(
@@ -332,7 +329,6 @@ def node_prepare_train(
     try:
         static_lazy = build_static_panel(hf_lazy, dret_lazy, common_config, is_train=True)
         hf_pa = hf_lazy.collect(engine="streaming").to_arrow()
-        dret_pa = dret_lazy.collect(engine="streaming").to_arrow()
         static_pa = static_lazy.collect(engine="streaming").to_arrow()
     except Exception as e:
         print(f"Train Dataset Preparation Failure: {e}")
@@ -340,10 +336,8 @@ def node_prepare_train(
 
     return {
         "hf_ref": ray.put(hf_pa),
-        "dret_ref": ray.put(dret_pa),
         "static_ref": ray.put(static_pa),
         "hf_lazy": hf_lazy,
-        "dret_lazy": dret_lazy,
     }
 
 
@@ -354,7 +348,7 @@ def node_prepare_train(
 _WORKER_PANEL_CACHE: Dict[tuple, pl.DataFrame] = {}
 
 
-def trainable_fsm_worker(config: dict, hf_ref: Any, dret_ref: Any, static_ref: Any, common_config: dict):
+def trainable_fsm_worker(config: dict, hf_ref: Any, static_ref: Any, common_config: dict):
     trial_cfg = resolve_search_hyperparams(config)
     ds = int(trial_cfg["downsample"])
     cache_key = (id(hf_ref), id(static_ref), ds, common_config.get("feature_col"))
@@ -396,7 +390,7 @@ def node_tune_monthly(
             common_config, exp_config.get("ast_recipe"), exp_config.get("feature_col")
         )
 
-    model_dir = common_config.get("tune_model_dir", common_config.get("tune_model_dir", TUNE_MODEL_DIR))
+    model_dir = common_config.get("tune_model_dir", TUNE_MODEL_DIR)
     os.makedirs(model_dir, exist_ok=True)
     pkl_path = f"{model_dir}/model_{model_id}.pkl"
     if (
@@ -429,7 +423,6 @@ def node_tune_monthly(
         tune.with_parameters(
             trainable_fsm_worker,
             hf_ref=train_data["hf_ref"],
-            dret_ref=train_data["dret_ref"],
             static_ref=train_data["static_ref"],
             common_config=common_config,
         ),
@@ -471,7 +464,7 @@ def node_tune_monthly(
         df_results,
         exp_config,
         model_id,
-        collapse_dir=common_config.get("tune_collapse_dir", common_config.get("tune_collapse_dir")),
+        collapse_dir=common_config.get("tune_collapse_dir"),
     )
     if not is_healthy:
         print(f"❌ [HPO Gating] Model {model_id} rejected due to {verdict.upper()}")
@@ -485,21 +478,21 @@ def node_tune_monthly(
         print(f"⚠️ [Failed] {model_id} zero valid statistical samples")
         return None
 
-    # 3. Pareto  + fANOVA 
+    # 3. Pareto + fANOVA
     best_config = select_plateau_verified_config(
         df_results=df_results,
         stats_valid_trials=stats_valid_trials,
-        common_config=common_config,
         search_spec=search_spec,
     )
     if not best_config:
         print(f"❌ {model_id} fANOVA spike detected or empty Pareto front -> Reject")
         return None
 
-    # 4. Overfit FSM and Manifest
-    final_panel_lf = build_fsm_panel(
-        train_data["hf_lazy"], train_data["dret_lazy"], best_config, common_config, is_train=True
-    )
+    # 4. Overfit FSM and Manifest (reuse precomputed static_ref instead of recomputing build_static_panel)
+    static_lf = pl.from_arrow(ray.get(train_data["static_ref"])).lazy()
+    final_panel_lf = extract_curves_from_panel(
+        train_data["hf_lazy"], best_config, common_config
+    ).join(static_lf, on=["day", "sid"], how="inner")
     final_result = discover_fsm_pattern(final_panel_lf, best_config, common_config)
 
     raw_motif = final_result.get("learned_motif", [])

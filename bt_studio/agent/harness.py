@@ -63,7 +63,6 @@ from bt_studio.utils.months import (
 def run_stage1_prefilter(
     hf_enhanced: pl.LazyFrame,
     compiled_names: List[str],
-    common_config: dict,
     prefilter_thresholds: Optional[dict] = None,
 ) -> Tuple[Dict[str, PrefilterResult], List[str]]:
     """Run single-pass streaming aggregation for Stage 1 dead-water and null-ratio filtering."""
@@ -215,10 +214,14 @@ def _eval_window_worker(
             f: EvalResult(feature_name=f, status="failed", reason="missing_parquet")
             for f in feature_names
         }
-    dret_lf = pl.scan_parquet(dret_path)
-    static_df = build_static_panel(
-        pl.scan_parquet(first_path), dret_lf, common_config, is_train=True
-    ).collect(engine="streaming")
+    static_path = common_config.get("_static_parquet")
+    if static_path and os.path.exists(static_path):
+        static_df = pl.read_parquet(static_path)
+    else:
+        dret_lf = pl.scan_parquet(dret_path)
+        static_df = build_static_panel(
+            pl.scan_parquet(first_path), dret_lf, common_config, is_train=True
+        ).collect(engine="streaming")
     combos_by_ds = group_combos_by_downsample(combos)
 
     return {
@@ -371,10 +374,7 @@ class TwoStageAgentHarness:
             if m_df is None or m_df.height == 0:
                 continue
             if m in self.universe_sids and "sid" in m_df.columns:
-                valid_sids = self.universe_sids[m]
-                if m_df.schema["sid"] == pl.String:
-                    valid_sids = [s.decode() if isinstance(s, bytes) else str(s) for s in valid_sids]
-                m_df = m_df.filter(pl.col("sid").is_in(valid_sids))
+                m_df = m_df.filter(pl.col("sid").is_in(self.universe_sids[m]))
                 if m_df.height == 0:
                     continue
             for feat in winners:
@@ -513,7 +513,7 @@ class TwoStageAgentHarness:
             dret_lf.collect(engine="streaming").write_parquet(dret_path)
 
             worker_cc = dict(self.common_config, max_workers=max(1, (os.cpu_count() or 1) // n_proc))
-            _, _cache_path = self._build_eval_cache_locator(feature_names)
+            data_fp, _cache_path = self._build_eval_cache_locator(feature_names)
 
             per_win: Dict[Union[int, str], Dict[str, EvalResult]] = {}
             block_step = 1 if on_demand else n_proc
@@ -539,15 +539,29 @@ class TwoStageAgentHarness:
                         avail = [f for f in uncached[w_tag] if f in month_path_of.get(w_tag, {})]
                         if not avail:
                             continue
-                        if on_demand and len(avail) > 1:
-                            f_cc = dict(self.common_config, max_workers=max(1, (os.cpu_count() or 1) // min(n_proc, len(avail))))
+                        if on_demand:
+                            static_key = (data_fp, w_tag)
+                            if static_key not in self._static_cache:
+                                self._static_cache[static_key] = build_static_panel(
+                                    pl.scan_parquet(month_path_of[w_tag][avail[0]]),
+                                    dret_lf,
+                                    self.common_config,
+                                    is_train=True,
+                                ).collect(engine="streaming")
+                            static_path = os.path.join(tmp_dir, f"static_{w_tag}.parquet")
+                            if not os.path.exists(static_path):
+                                self._static_cache[static_key].write_parquet(static_path)
+                            f_cc = dict(
+                                self.common_config,
+                                _static_parquet=static_path,
+                                max_workers=max(1, (os.cpu_count() or 1) // min(n_proc, len(avail))),
+                            )
                             for f in avail:
                                 futures.append((
                                     w_tag,
                                     pool.submit(_eval_window_worker, dret_path, {f: month_path_of[w_tag][f]}, [f], f_cc, combos),
                                 ))
                         else:
-                            w_cc = dict(self.common_config, max_workers=(os.cpu_count() or 1) if on_demand else worker_cc["max_workers"])
                             futures.append((
                                 w_tag,
                                 pool.submit(
@@ -555,7 +569,7 @@ class TwoStageAgentHarness:
                                     dret_path,
                                     {f: month_path_of[w_tag][f] for f in avail},
                                     avail,
-                                    w_cc,
+                                    dict(worker_cc),
                                     combos,
                                 ),
                             ))
@@ -678,7 +692,7 @@ class TwoStageAgentHarness:
             else compiled_lf
         )
         stage1_map, survivors = run_stage1_prefilter(
-            hf_enhanced, compiled_names, self.common_config, self.prefilter_thresholds
+            hf_enhanced, compiled_names, self.prefilter_thresholds
         )
 
         windows: List[Union[int, List[int]]] = []

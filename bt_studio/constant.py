@@ -29,7 +29,7 @@ TUNE_COLLAPSE_DIR = os.path.join(TUNE_BASE_DIR, "collapse")
 # --- cache --------------------------------------------------------------- #
 BT_STUDIO_VERSION = "0.2.1"
 RAW_PIT_VERSION = "v2"
-EVAL_LOGIC_VERSION = "v2"
+EVAL_LOGIC_VERSION = "v3"
 RAW_PIT_DIR = os.path.join(CACHE_ROOT, "bars", RAW_PIT_VERSION)  
 EVAL_CACHE_ROOT = os.path.join(CACHE_ROOT, "evals")
 MONITOR_DB = os.path.join(CACHE_ROOT, "monitor.sqlite")
@@ -77,7 +77,7 @@ BASE_MARKET_COLS = [
 DEFAULT_GRID = {
     "downsample": [3, 4, 5],
     "motif_minutes": [30, 45, 60],
-    "threshold_r": [0.55, 0.65, 0.75],
+    "threshold_r": [0.75, 0.82, 0.88],
 }
 
 PREFILTER_THRESHOLDS = {

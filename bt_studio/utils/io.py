@@ -337,31 +337,54 @@ class RawPitCacheStore:
         meta_obj = read_json_safe(self.meta_path(ym), default={}) or {}
         return set(meta_obj.get("covered_sids", []))
 
-    @staticmethod
-    def is_valid_sid_month(df: pl.DataFrame) -> bool:
-        return df.height > 0
+    def known_sids(self, ym: int) -> set[str]:
+        if not os.path.exists(self.pack_path(ym)):
+            return set()
+        meta_obj = read_json_safe(self.meta_path(ym), default={}) or {}
+        covered = set(meta_obj.get("covered_sids", []))
+        if not covered:
+            return set()
+        return covered | set(meta_obj.get("empty_sids", []))
 
     def merge_and_save_month(
         self,
         ym: int,
         new_frames: list[pl.DataFrame],
         added_sids: set[str],
+        empty_sids: Optional[set[str]] = None,
     ) -> None:
         p_path = self.pack_path(ym)
         m_path = self.meta_path(ym)
-        frames = list(new_frames)
+        frames = [df for df in new_frames if df.height > 0]
 
         with exclusive_file_lock(p_path + ".lock"):
             prev_meta = read_json_safe(m_path, default={}) or {}
             latest_covered = set(prev_meta.get("covered_sids", [])) | added_sids
-            replaced_bytes = list(dict.fromkeys(df["sid"][0] for df in new_frames if df.height))
+            latest_empty = (set(prev_meta.get("empty_sids", [])) | (empty_sids or set())) - latest_covered
+
+            if not frames and os.path.exists(p_path):
+                if latest_covered:
+                    atomic_save_json(
+                        {
+                            "ym": ym,
+                            "covered_sids": sorted(latest_covered),
+                            "empty_sids": sorted(latest_empty),
+                            "rows": int(prev_meta.get("rows", 0)),
+                            "version": RAW_PIT_VERSION,
+                        },
+                        m_path,
+                    )
+                return
+
+            replaced_bytes = list(dict.fromkeys(
+                s for df in frames for s in df["sid"].unique().to_list()
+            ))
             if os.path.exists(p_path):
                 try:
                     old = pl.read_parquet(p_path)
-                    if replaced_bytes:
-                        added = old.filter(~pl.col("sid").is_in(replaced_bytes))
-                    if added.height:
-                        frames.append(added)
+                    kept = old.filter(~pl.col("sid").is_in(replaced_bytes)) if replaced_bytes else old
+                    if kept.height > 0:
+                        frames.append(kept)
                 except Exception:
                     pass
             merged = (pl.concat(frames) if frames else pl.DataFrame(schema=self.bars_schema)).sort(
@@ -372,6 +395,7 @@ class RawPitCacheStore:
                 {
                     "ym": ym,
                     "covered_sids": sorted(latest_covered),
+                    "empty_sids": sorted(latest_empty),
                     "rows": merged.height,
                     "version": RAW_PIT_VERSION,
                 },
@@ -435,12 +459,8 @@ def build_eval_cache_locator(
     gh = sha1_hex({"grid": grid_config, "eval_cfg": eval_cfg})
 
     def _cache_path(feat: str, ym: Any) -> str:
-        if isinstance(ym, (list, tuple)):
-            tag = int(ym[0]) if len(ym) == 1 else f"{int(ym[0])}_{int(ym[-1])}_{len(ym)}"
-        else:
-            tag = ym
         ast_fp = fps.get(feat, sha1_hex(feat))
-        return os.path.join(cache_root, logic_version, data_fp[:8], ast_fp[:8], f"{tag}_{gh[:10]}.json")
+        return os.path.join(cache_root, logic_version, data_fp[:8], ast_fp[:8], f"{ym}_{gh[:10]}.json")
 
     return data_fp, _cache_path
 
