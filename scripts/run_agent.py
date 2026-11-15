@@ -79,7 +79,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     p.add_argument("--end-date", type=int, default=int(os.environ.get("TO_DATE", PRODUCTION_COMMON_PARAMS["end_date"])))
     p.add_argument("--train-window", type=int, default=int(os.environ.get("TRAIN_WINDOW", PRODUCTION_COMMON_PARAMS["train_window"])), help="Walk-Forward training window (months)")
     p.add_argument("--oos-step", type=int, default=int(os.environ.get("OOS_STEP", PRODUCTION_COMMON_PARAMS["oos_step"])), help="Walk-Forward OOS step interval (months)")
-    p.add_argument("--n-sids", type=int, default=int(os.environ.get("N_SIDS", "0")), help="Max sampled sids (0 = full PIT universe)")
+    p.add_argument("--min-amount-rank", type=float, default=float(os.environ.get("MIN_AMOUNT_RANK", PRODUCTION_COMMON_PARAMS["min_amount_rank"])), help="Monthly causal avg_amount quantile cutoff (0.90 = Top 10%% liquid sids)")
     p.add_argument("--steps", type=int, default=int(os.environ.get("AGENT_STEPS", "100")), help="Total RL flywheel iterations")
     p.add_argument("--vendor", default=os.environ.get("LLM_PROVIDER", "zhipu"), help="LLM provider (zhipu | google | kimi | dummy)")
     p.add_argument("--stage3", choices=("spool", "off"), default=os.environ.get("AGENT_STAGE3", "off"))
@@ -99,6 +99,7 @@ def run_mining_flywheel(args: argparse.Namespace) -> None:
         "end_date": int(args.end_date),
         "train_window": int(args.train_window),
         "oos_step": int(args.oos_step),
+        "min_amount_rank": float(args.min_amount_rank),
         "u_pval": float(os.environ.get("AGENT_SCREEN_MAX_PVAL", PRODUCTION_COMMON_PARAMS["u_pval"])),
         "min_window_pass_ratio": float(
             os.environ.get("AGENT_SCREEN_MIN_WINDOW_PASS_RATIO", PRODUCTION_COMMON_PARAMS["min_window_pass_ratio"])
@@ -116,23 +117,13 @@ def run_mining_flywheel(args: argparse.Namespace) -> None:
     if not all_sids:
         raise RuntimeError("[run_agent] Empty PIT universe returned by node_prepare_macro")
 
-    if args.n_sids > 0 and len(all_sids) > args.n_sids:
-        rng = np.random.default_rng(int(common_config["seed"]))
-        chosen = sorted(rng.choice(all_sids, size=args.n_sids, replace=False).tolist())
-        chosen_set = set(chosen)
-        universe_sids = {
-            ym: [s for s in sids if s in chosen_set]
-            for ym, sids in universe_sids.items()
-        }
-        universe_sids = {ym: sids for ym, sids in universe_sids.items() if sids}
-    else:
-        chosen = all_sids
-
     wf_windows = resolve_walk_forward_windows(list(universe_sids.keys()), common_config)
     if not wf_windows:
         raise RuntimeError("[run_agent] No valid walk-forward windows resolved from universe_sids")
+    avg_monthly_sids = int(round(np.mean([len(s) for s in universe_sids.values()])))
     print(
-        f"[run_agent] Selected {len(chosen)}/{len(all_sids)} universe sids | "
+        f"[run_agent] PIT Universe (min_amount_rank={common_config['min_amount_rank']:.2f}): "
+        f"avg {avg_monthly_sids} sids/month ({len(all_sids)} unique across range) | "
         f"Walk-Forward windows: {len(wf_windows)} "
         f"(train={common_config['train_window']}m, step={common_config['oos_step']}m, "
         f"{wf_windows[0][0]}..{wf_windows[-1][-1]})"
@@ -141,7 +132,8 @@ def run_mining_flywheel(args: argparse.Namespace) -> None:
     data_fp = sha1_hex({
         "start": common_config["start_date"],
         "end": common_config["end_date"],
-        "sids": [s.decode() for s in chosen],
+        "min_amount_rank": common_config["min_amount_rank"],
+        "sids": [s.decode() for s in all_sids],
     })
     run_common = {
         k: v for k, v in common_config.items()

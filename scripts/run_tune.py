@@ -52,6 +52,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--start-date", type=int, default=None, help="Override start_date (YYYYMMDD)")
     p.add_argument("--end-date", type=int, default=None, help="Override end_date (YYYYMMDD)")
+    p.add_argument("--min-amount-rank", type=float, default=None, help="Override monthly causal avg_amount quantile cutoff (0.90 = Top 10%%)")
     p.add_argument("--train-window", type=int, default=None, help="Override train_window (months)")
     p.add_argument("--oos-step", type=int, default=None, help="Override oos_step (months)")
     p.add_argument("--num-trials", type=int, default=None, help="Override Ray Tune num_trials")
@@ -81,6 +82,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for cli_val, key in (
         (args.start_date, "start_date"),
         (args.end_date, "end_date"),
+        (args.min_amount_rank, "min_amount_rank"),
         (args.train_window, "train_window"),
         (args.oos_step, "oos_step"),
         (args.num_trials, "num_trials"),

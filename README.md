@@ -54,11 +54,12 @@ bt_studio/
 ├── default_config.py      # 全局生产参数基线 (Single Source of Truth)
 └── tune.py                # 供 Engine 调用的纯节点库 (7 大核心 Node)
 
-scripts/                   # 启动与运行入口
-├── run_agent.py           # 启动 LLM 自动化特征挖掘飞轮
-├── run_tune.py            # 启动生产环境全量 WFO 跑批
-├── run_visual.py         # 可视化统一入口 (online/collapse/drift/pdf 四模式)
-└── start_env.sh           # 初始化运行环境变量
+scripts/                   # 启动与运行入口 (功能级收敛)
+├── start_env.sh           # 初始化运行环境变量 (单线程确定性 / 平台并发 / gRPC 防代理劫持)
+├── run_agent.py           # 启动 LLM + RL 自动化特征挖掘飞轮 (Walk-Forward 按窗按需加载)
+├── run_tune.py            # 启动 WFO / HPO 阶段跑批 (wfo_production / wfo_hpo)
+├── run_visual.py          # 在线与离线可视化评测入口 (--mode online|collapse|drift|pdf)
+└── run_backtest.py        # bt_core 组合回测引擎入口
 
 tests/                     # pytest 套件 (engine/pipeline/tune/compiler/agent)
 ├── conftest.py            # NUMBA/POLARS/OMP 单线程 env, 保证 HPO 打分可复现
@@ -82,14 +83,22 @@ poetry run python -m pytest tests/ -q -p no:cacheprovider
 ```
 
 ### 4.3 启动流水线与智能体
-- **运行全生命周期生产跑批 (WFO Production)**：
+- **前置环境初始化**：
   ```bash
-  poetry run python scripts/run_tune.py
+  source scripts/start_env.sh
   ```
 - **启动 LLM 特征挖掘智能体 (Agent Loop)**：
-  该智能体将自行与大模型交互，生成、校验 AST 表达式，并将脱颖而出的候选特征落盘至 `pending/` 目录供 Orchestrator 消费。
+  该智能体按 `train_window + oos_step` 滚动窗口按需拉取 Tick 数据（默认 `min_amount_rank=0.90` 即每月因果成交额前 10% 活力池），通过两段式早停（`max_consec_failures=3` + 全局通过率门控）极速筛选 AST/Recipe，并将胜出特征写入 `viable_features.json`（及可选落盘至 `pending/` 目录）。
   ```bash
-  poetry run python scripts/run_agent.py
+  poetry run python scripts/run_agent.py --steps 100 --vendor zhipu --resume auto
+  ```
+- **运行全生命周期生产跑批 (WFO Production / HPO)**：
+  ```bash
+  poetry run python scripts/run_tune.py --dag wfo_production
+  ```
+- **运行组合回测 (bt_core)**：
+  ```bash
+  poetry run python scripts/run_backtest.py
   ```
 
 ### 4.4 基础设施与网关启动

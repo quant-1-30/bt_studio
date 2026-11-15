@@ -414,9 +414,9 @@ def test_on_demand_walk_forward_lazy_fetch_and_early_stop(tmp_path, monkeypatch)
     results2 = harness2.run([{"op": "mean", "args": [{"col": "close"}, 3]}], None, dret_lf)
     assert len(results2) == 1 and results2[0].stage2_passed
     assert eval_calls == [(202401, 202402), (202402, 202403), (202403, 202404)]
-    # Fetch calls: (1) Stage 1: 202401 (+warmup 202312), (2) W1 missing 202402 (+warmup 202401),
-    # (3) W2 missing 202403 (+warmup 202402), (4) W3 missing 202404 (+warmup 202403)
-    assert [end for _, end, _ in fetched_ranges] == [20240131, 20240229, 20240331, 20240430]
+    # Fetch calls: (1) W1 [202401, 202402] (+warmup 202312) in single pass,
+    # (2) W2 missing 202403 (+warmup 202402), (3) W3 missing 202404 (+warmup 202403)
+    assert [end for _, end, _ in fetched_ranges] == [20240229, 20240331, 20240430]
 
 
 if __name__ == "__main__":

@@ -14,6 +14,9 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
 export PYTHONUNBUFFERED=1
+export GRPC_ENABLE_HTTP_PROXY=0
+export no_proxy="${no_proxy:-localhost,127.0.0.1,::1}"
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1}"
 
 # 2. Darwin vs Linux
 OS_NAME="$(uname -s)"
