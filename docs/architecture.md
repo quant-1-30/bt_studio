@@ -20,11 +20,12 @@
                 │ candidate_asts (AST dict / Recipe list)
 ┌───────────────▼─────────────────────────────────────────────────┐
 │ 评估层  TwoStageAgentHarness (agent/harness.py)                   │
-│   编译一次(compiler/ast.py compile_ast/compile_recipe,            │
-│   causal+depth+跨族嵌套守卫) → Stage1 物理预过滤 (std/null-ratio)  │
-│   → Stage1.5 幸存特征落盘 (FEATURE_DIR 月度 PIT parquet)          │
-│   → Stage2 月度滚动窗口 × 固定离散网格 (短路:任一组合过=窗口过)     │
-│   → 聚合 (pass-ratio ≥ min_window_pass_ratio, 默认0.6)           │
+│   按 (train_window, oos_step) 滚动窗口流式按需拉取 Tick 与编译    │
+│   → Stage1 首窗首月物理预过滤 (std/null-ratio, 剥离 warmup)      │
+│   → Stage1.5 幸存特征按月增量落盘 (FEATURE_DIR/{fp12}/)          │
+│   → Stage2 滚动窗口 × 离散网格 (threshold_r=[0.75, 0.82, 0.88])  │
+│   → 两段式早停 (连续失败 ≥ max_consec_failures=3 或累计超标剪枝) │
+│   → 聚合 (pass-ratio ≥ min_window_pass_ratio, 默认 0.6)          │
 └───────────────┬─────────────────────────────────────────────────┘
                 │ stage3_callback(feature, recipe, cfg)
 ┌───────────────▼─────────────────────────────────────────────────┐

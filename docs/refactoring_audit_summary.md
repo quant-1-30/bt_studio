@@ -85,8 +85,19 @@
 | | `_collect_stream_sync(observable, timeout)` | 带显式批次超时保护的 RxPY RPC 数据流同步收集器 |
 | | `fetch_hfq_factors_safe(mdapi, body, topic)` | 安全拉取 `mdapi.get_factor` 后复权因子（异常/Mock 平滑降级 `{}`） |
 | | `RawPitCacheStore` | 分钟级 Raw PIT 月度 Parquet 包校验（`df.height > 0`）、加锁增量合并与按区间扫描 |
-| **5. 任务分桶与窗口评估缓存** | `resolve_task_id(exp_config, ast_recipe)` | 基于特征、AST、行情范围与搜索空间计算确定性 `task_id` |
-| | `attach_task_dirs(...)` / `sync_task_dirs_to_exp_config(...)` | 为任务挂载并同步隔离的 `feature_dir` 与 `tune_*_dir` 目录 |
-| | `window_artifacts_complete(model_id, common_config)` | 校验 Walk-Forward 窗口的 `model_*.pkl` 与 `scores_*.parquet` 完整性 |
-| | `compute_eval_data_fingerprint(common_config, dret_lf)` | 生成与候选批次大小解耦的确定性行情数据集指纹 `data_fp` |
-| | `build_eval_cache_locator(...)` / `eval_cache_load` / `eval_cache_save` | Stage 2 窗口 `EvalResult` 缓存路径寻址与原子读写 |
+| **5. 任务分桶与窗口评估缓存** | `compute_eval_data_fingerprint(common_config, dret_lf)` | 生成与候选批次大小解耦的确定性行情数据集指纹 `data_fp` |
+| | `build_eval_cache_locator(...)` / `eval_cache_load` / `eval_cache_save` | Stage 2 窗口 `EvalResult` 缓存路径寻址与原子读写（`EVAL_LOGIC_VERSION="v3"`） |
+
+---
+
+## 五、 Walk-Forward 按需流式加载、两段式早停与全仓函数签名极简化 (2026-11)
+
+1. **`run_agent.py` + `harness.py` 按 `(train_window, oos_step)` 流式按需架构**：
+   - 移除启动期全区间 `prepare_tick` 阻塞下载，改由 `node_prepare_macro` 秒级生成日线与月度 PIT 池（`min_amount_rank=0.90` 动态选取每月成交额 Top 10% 标的，并保留 $\mathcal{U}_m \cup \mathcal{U}_{m-1}$ 缓冲确保跨月 $T \rightarrow T+1$ 出场价完整且零前视）；
+   - `WindowReplayState` 实施两段式早停（`consec_failures >= max_consec_failures(3)` 局部连续失败熔断 + `failure_counts > max_allowed_failures` 全局失败上限剪枝），不合格特征在前 3 个窗口即停止后续年份 Tick 下载；
+   - `static_{w_tag}.parquet` 跨步持久化于 `EVAL_CACHE_ROOT/static/`，100 步 RL 飞轮仅计算一次。
+2. **RPC 防代理劫持与批量向量化 `align_skeleton`**：
+   - `start_env.sh` 与 `ctx.py` 导出 `GRPC_ENABLE_HTTP_PROXY=0` 与 `no_proxy=localhost,127.0.0.1,::1`；`_collect_stream_sync` 挂载 `@_retry_rpc_stream(max_retries=3)` 装饰器（`timeout=60.0s`）；
+   - `prepare_tick` 按 `chunk` 批量合并调用 `align_skeleton`，并在 `ym.meta.json` 中记录 `empty_sids` 负缓存。
+3. **全仓函数签名复杂度清零（所有函数非 `self/cls` 参数 $\le 5$）**：
+   - 对全仓 21 个超过 5 参数的函数完成职责内聚与未使用形参清理，经 AST 静态扫描验证，全仓 `> 5` 参数的函数降至 **0 个**。

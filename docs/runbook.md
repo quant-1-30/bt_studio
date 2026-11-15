@@ -15,14 +15,13 @@ BT_STUDIO_ENV=prod BT_STUDIO_API_TOKEN='<secret>' \
   poetry run python -m uvicorn bt_studio.plugins.api_server.main:app \
   --host "${BT_STUDIO_BIND_HOST:-127.0.0.1}" --port 8800 --workers 1
 
-# 2) 挖掘主进程 (prod 模式必须显式三参, 并发度根据 macOS/Linux 核数自动适配)
-BT_STUDIO_ENV=prod FROM_DATE=20220101 TO_DATE=20230630 N_SIDS=100 \
-AGENT_STEPS=6 AGENT_STAGE3=off RESUME=auto \
+# 2) 挖掘主进程 (Walk-Forward 按窗按需加载, 默认 2010-2025 & min_amount_rank=0.90 即每月 Top 10% 标的)
 LLM_DAILY_TOKEN_BUDGET=500000 \
-  poetry run python scripts/run_agent.py
+  caffeinate -i poetry run python scripts/run_agent.py \
+  --steps 100 --vendor zhipu --stage3 off --resume auto
 ```
 
-**旋钮**：`FROM_DATE/TO_DATE/N_SIDS`（prod 必填，缺省拒绝）｜`AGENT_STEPS`（默认 3）｜`EVAL_PROCS`（默认 8）｜`AGENT_STAGE3=off`（A 形态保持 off）｜`RESUME=auto`（指纹匹配续跑）｜`LLM_DAILY_TOKEN_BUDGET`（调用前熔断）｜`TICK_BATCH_SIDS`（默认 8）。
+**旋钮**：`--start-date/--end-date`（默认 `20100101–20251231`）｜`--min-amount-rank`（默认 `0.90`，即每月因果成交额 Top 10%）｜`--train-window/--oos-step`（默认 `12/6` 个月）｜`--steps`（默认 `100`）｜`--stage3`（默认 `off`，仅写 `viable_features.json`）｜`--resume`（默认 `auto` 指纹匹配续跑）｜`LLM_DAILY_TOKEN_BUDGET`（调用前熔断）。
 
 ## 2. 日常操作（面板）
 

@@ -25,19 +25,22 @@
 ```bash
 poetry install                      # 安装依赖 (Python >=3.11,<3.14)
 
-# 全量测试套件 (7 个模块, 227 个用例)
+# 前置初始化 (单线程确定性 + 硬件自适应并发 + gRPC 防代理劫持)
+source scripts/start_env.sh
+
+# 全量测试套件 (231 个用例: 226 单元 + 5 Ray Tune 全链路)
 poetry run python -m pytest tests/ -q -p no:cacheprovider
 
-# 生产 WFO 跑批 (wfo_production DAG, mlflow 落本地 sqlite)
+# LLM 特征挖掘飞轮 (Walk-Forward 按需加载 + 两段式早停 + 断点续跑)
+poetry run python scripts/run_agent.py                      # 常用参数: --steps N --vendor zhipu|kimi|google|dummy
+                                                            #   --min-amount-rank 0.90 (每月因果成交额 Top 10%)
+                                                            #   --train-window 12 --oos-step 6 --resume auto --profile
+                                                            #   --stage3 off|spool (默认 off 仅写 viable_features.json)
+
+# 生产 WFO / HPO 跑批 (wfo_production / wfo_hpo DAG, mlflow 默认落本地 sqlite)
 poetry run python scripts/run_tune.py                       # 默认取 viable_features.json 首个特征
 poetry run python scripts/run_tune.py --feature f_a1b2c3d4e5f6 --dag wfo_hpo \
     --start-date 20200101 --end-date 20221231               # 特征指纹/名 + DAG + 区间覆盖
-
-# LLM 特征挖掘飞轮 (agent 循环 + Stage3 落盘 spool)
-poetry run python scripts/run_agent.py                      # 常用参数: --steps N --vendor zhipu|kimi|google|dummy
-                                                            #   --n-sids K (固定种子抽样宇宙) --resume auto (指纹匹配续跑)
-                                                            #   --profile (内置 cProfile 采样, 产物落 LLM_PROFILE_DIR)
-AGENT_STAGE3=off poetry run python scripts/run_agent.py     # 只验证挖掘+RL, 不触发 tune/HPO 契约
 
 # 回测 (bt_core; scores 目录三级回退: --score-dir > --task-id 桶 > 最新桶, 自动发现 sid/日期范围)
 poetry run python scripts/run_backtest.py --task-id <task_id>
@@ -121,7 +124,7 @@ result/                  # 输出根目录, 按 task_id 分桶 (见 4.2)
 
 ### 4.2 结果目录按 task_id 分桶 (布局 v2: artifacts/ + cache/)
 
-`engine/tasking.py::attach_task_dirs`(由 executor 调用)按
+`engine/executor.py::attach_task_dirs` 按
 `feature_col + ast_recipe + 日期/基准 + 产物语义 common 键 + search_spec`
 的 sha1 派生 task_id,向 `common_config` setdefault 注入;task_manager 的队列
 uuid 只用于状态跟踪,不写入 `common_params.task_id`,同实验重跑仍命中同一分桶:
@@ -130,8 +133,8 @@ uuid 只用于状态跟踪,不写入 `common_params.task_id`,同实验重跑仍�
 result/artifacts/features/<task_id>/                 # 特征 parquet (feature_dir)
 result/artifacts/tune/<task_id>/models|scores|collapse/   # _tune_*_dir
 result/artifacts/runs/<run_id>/                      # agent 挖掘 run 状态与 step
-result/cache/bars/v2/ym={YYYYMM}.parquet             # 分钟 PIT 月包缓存
-result/cache/evals/v2/                               # EvalResult 窗口缓存
+result/cache/bars/v2/ym={YYYYMM}.parquet             # 分钟 PIT 月包缓存 (含 empty_sids 负缓存)
+result/cache/evals/v3/                               # EvalResult 窗口缓存 + static/ 跨步静态面板缓存
 ```
 
 无 task_id(缺 feature_col 等)时回落旧的扁平布局,行为与旧版一致;
@@ -198,9 +201,9 @@ agent 预计算特征经 `FEATURE_DIR/{fp12}/` 纯 12 位指纹目录约定复�
    修复后 collapse-first ×6 / 单文件 ×3 / 全量 ×2 全绿, 且 trial 分数跨进程
    bit-identical。
 
-## 8. 性能与资源 (2026-10)
+## 8. 性能与资源 (2026-11)
 
-- **内存**: prepare_tick 分批订阅 (TICK_BATCH_SIDS, 单月×批), 月包缓存消化全量 Tick; POLARS/NUMBA/OMP=1 单线程确定性 + 防 Mach 风暴。
-- **CPU**: stumpy/numba workqueue 非线程安全 —— 窗口内串行, 并行走窗口级进程池 (eval_procs); DTW 线程预算单一权威 resolve_dtw_workers (显式注入 > ray 配额 > 满核)。
-- **磁盘**: 月度 PIT parquet 严格缓存 (缺失月才 RPC); 消费者剪枝经 dep-term 绑定 (decay/oos 复用 train 月份特征文件)。
+- **RPC 与月包缓存 (`prepare.py` & `utils/io.py`)**: `start_env.sh` 与 `ctx.py` 默认导出 `GRPC_ENABLE_HTTP_PROXY=0` 与 `no_proxy=localhost,127.0.0.1` 防本地代理劫持 gRPC; `_collect_stream_sync` 由 `@_retry_rpc_stream(max_retries=3)` 装饰器托管 (`timeout=60.0s`); `prepare_tick` 按 `chunk` 批量向量化执行 `align_skeleton`, 并在 `ym.meta.json` 中记录 `empty_sids` 负缓存(纯停牌增量仅更新 20KB `meta.json`, 零拷贝跳过 120MB Parquet 重排)。
+- **Walk-Forward 按需评估与两段式早停 (`harness.py` & `schema.py`)**: 按 `(train_window=12, oos_step=6)` 切分滚动窗口, `min_amount_rank=0.90` 因果选取每月成交额前 10% 标的(落盘保留 $\mathcal{U}_m \cup \mathcal{U}_{m-1}$ 防止月末 $T \rightarrow T+1$ 跨月出场价丢失); `WindowReplayState` 执行两段式早停(`consec_failures >= max_consec_failures(3)` 或 `failure_counts > max_allowed_failures`); `static_{w_tag}.parquet` 跨步持久化于 `EVAL_CACHE_ROOT/static/`, 100 步 RL 飞轮仅计算一次。
+- **CPU 与内存确定性**: `POLARS/NUMBA/OMP=1` 单线程确定性 + 防 Mach 风暴; 窗口内多特征或跨窗口进程池并行 (`eval_procs`), DTW 线程预算单一权威 `resolve_dtw_workers`。
 
