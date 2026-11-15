@@ -272,7 +272,26 @@ def collect_lazy_safe(lf_or_df: Any) -> pl.DataFrame:
     return lf_or_df
 
 
-def _collect_stream_sync(observable, timeout: float = 600.0) -> Dict[bytes, pl.DataFrame]:
+def _retry_rpc_stream(max_retries: int = 3):
+    """Decorator adding bounded exponential-backoff retry to RxPY RPC stream collection."""
+    def _decorator(fn: Callable[..., Dict[bytes, pl.DataFrame]]):
+        @wraps(fn)
+        def _wrapped(observable: Any, timeout: float = 60.0) -> Dict[bytes, pl.DataFrame]:
+            last_err: Optional[Exception] = None
+            for attempt in range(max_retries):
+                try:
+                    return fn(observable, timeout=timeout)
+                except Exception as exc:
+                    last_err = exc
+                    if attempt + 1 < max_retries:
+                        time.sleep(float(2 ** attempt))
+            raise RuntimeError(f"RPC stream failed after {max_retries} attempts: {last_err!r}") from last_err
+        return _wrapped
+    return _decorator
+
+
+@_retry_rpc_stream(max_retries=3)
+def _collect_stream_sync(observable, timeout: float = 60.0) -> Dict[bytes, pl.DataFrame]:
     """Synchronously collect an RxPY RPC stream with explicit per-batch timeout protection."""
     q: queue.Queue = queue.Queue()
     subscription = observable.pipe(

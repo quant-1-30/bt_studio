@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import itertools
 import os
-import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -328,8 +327,9 @@ class TwoStageAgentHarness:
         warmup_months = int(self.common_config.get("warmup_months", DEFAULT_WARMUP_MONTHS))
         fetch_start_date = calc_warmup_start_date(raw_start_date, warmup_months=warmup_months)
 
+        prev_ym = calc_warmup_start_date(raw_start_date, warmup_months=1) // 100
         unique_sids = list(dict.fromkeys(
-            sid for ym in target_ymonths for sid in self.universe_sids.get(ym, [])
+            sid for ym in [prev_ym, *target_ymonths] for sid in self.universe_sids.get(ym, [])
         ))
         if not unique_sids:
             return pl.LazyFrame()
@@ -374,7 +374,11 @@ class TwoStageAgentHarness:
             if m_df is None or m_df.height == 0:
                 continue
             if m in self.universe_sids and "sid" in m_df.columns:
-                m_df = m_df.filter(pl.col("sid").is_in(self.universe_sids[m]))
+                prev_m = calc_warmup_start_date(m * 100 + 1, warmup_months=1) // 100
+                allowed_sids = list(dict.fromkeys(
+                    self.universe_sids.get(m, []) + self.universe_sids.get(prev_m, [])
+                ))
+                m_df = m_df.filter(pl.col("sid").is_in(allowed_sids))
                 if m_df.height == 0:
                     continue
             for feat in winners:
@@ -508,38 +512,41 @@ class TwoStageAgentHarness:
         n_proc = max(1, min(eval_procs, os.cpu_count() or 1, len(months)))
         replay_state = WindowReplayState.create(feature_names, len(months), self.common_config)
 
-        with tempfile.TemporaryDirectory(prefix="stage2_mp_") as tmp_dir:
-            dret_path = os.path.join(tmp_dir, "dret.parquet")
-            dret_lf.collect(engine="streaming").write_parquet(dret_path)
+        data_fp, _cache_path = self._build_eval_cache_locator(feature_names)
+        static_dir = os.path.join(EVAL_CACHE_ROOT, "static", data_fp[:12])
+        os.makedirs(static_dir, exist_ok=True)
+        dret_path = os.path.join(static_dir, "dret.parquet")
+        if not os.path.exists(dret_path):
+            atomic_save_parquet(dret_lf.collect(engine="streaming"), dret_path)
 
-            worker_cc = dict(self.common_config, max_workers=max(1, (os.cpu_count() or 1) // n_proc))
-            data_fp, _cache_path = self._build_eval_cache_locator(feature_names)
+        worker_cc = dict(self.common_config, max_workers=max(1, (os.cpu_count() or 1) // n_proc))
+        per_win: Dict[Union[int, str], Dict[str, EvalResult]] = {}
+        block_step = 1 if on_demand else n_proc
+        blocks = [months[i : i + block_step] for i in range(0, len(months), block_step)]
+        win_ord = {window_tag(w): i for i, w in enumerate(months)}
 
-            per_win: Dict[Union[int, str], Dict[str, EvalResult]] = {}
-            block_step = 1 if on_demand else n_proc
-            blocks = [months[i : i + block_step] for i in range(0, len(months), block_step)]
-            win_ord = {window_tag(w): i for i, w in enumerate(months)}
+        with ProcessPoolExecutor(max_workers=n_proc) as pool:
+            for block in blocks:
+                batch_targets = sorted(replay_state.active_features)
+                if not batch_targets:
+                    break
+                uncached: Dict[Union[int, str], List[str]] = {}
+                for w in block:
+                    w_tag, _, cached, unc = self._prepare_window_eval(batch_targets, w, _cache_path, on_demand)
+                    per_win[w_tag] = cached
+                    uncached[w_tag] = unc
+                if on_demand:
+                    month_path_of = self._map_month_feat_paths(feature_names, months, check_exists=True)
 
-            with ProcessPoolExecutor(max_workers=n_proc) as pool:
-                for block in blocks:
-                    batch_targets = sorted(replay_state.active_features)
-                    if not batch_targets:
-                        break
-                    uncached: Dict[Union[int, str], List[str]] = {}
-                    for w in block:
-                        w_tag, _, cached, unc = self._prepare_window_eval(batch_targets, w, _cache_path, on_demand)
-                        per_win[w_tag] = cached
-                        uncached[w_tag] = unc
+                futures: List[Tuple[Union[int, str], Any]] = []
+                for w in block:
+                    w_tag = window_tag(w)
+                    avail = [f for f in uncached[w_tag] if f in month_path_of.get(w_tag, {})]
+                    if not avail:
+                        continue
                     if on_demand:
-                        month_path_of = self._map_month_feat_paths(feature_names, months, check_exists=True)
-
-                    futures: List[Tuple[Union[int, str], Any]] = []
-                    for w in block:
-                        w_tag = window_tag(w)
-                        avail = [f for f in uncached[w_tag] if f in month_path_of.get(w_tag, {})]
-                        if not avail:
-                            continue
-                        if on_demand:
+                        static_path = os.path.join(static_dir, f"static_{w_tag}.parquet")
+                        if not os.path.exists(static_path):
                             static_key = (data_fp, w_tag)
                             if static_key not in self._static_cache:
                                 self._static_cache[static_key] = build_static_panel(
@@ -548,41 +555,39 @@ class TwoStageAgentHarness:
                                     self.common_config,
                                     is_train=True,
                                 ).collect(engine="streaming")
-                            static_path = os.path.join(tmp_dir, f"static_{w_tag}.parquet")
-                            if not os.path.exists(static_path):
-                                self._static_cache[static_key].write_parquet(static_path)
-                            f_cc = dict(
-                                self.common_config,
-                                _static_parquet=static_path,
-                                max_workers=max(1, (os.cpu_count() or 1) // min(n_proc, len(avail))),
-                            )
-                            for f in avail:
-                                futures.append((
-                                    w_tag,
-                                    pool.submit(_eval_window_worker, dret_path, {f: month_path_of[w_tag][f]}, [f], f_cc, combos),
-                                ))
-                        else:
+                            atomic_save_parquet(self._static_cache[static_key], static_path)
+                        f_cc = dict(
+                            self.common_config,
+                            _static_parquet=static_path,
+                            max_workers=max(1, (os.cpu_count() or 1) // min(n_proc, len(avail))),
+                        )
+                        for f in avail:
                             futures.append((
                                 w_tag,
-                                pool.submit(
-                                    _eval_window_worker,
-                                    dret_path,
-                                    {f: month_path_of[w_tag][f] for f in avail},
-                                    avail,
-                                    dict(worker_cc),
-                                    combos,
-                                ),
+                                pool.submit(_eval_window_worker, dret_path, {f: month_path_of[w_tag][f]}, [f], f_cc, combos),
                             ))
-                    for w_tag, fut in futures:
-                        res_map = fut.result()
-                        per_win[w_tag].update(res_map)
-                        for feat, res in res_map.items():
-                            eval_cache_save(res, _cache_path(feat, w_tag))
-                    for w in block:
-                        w_tag = window_tag(w)
-                        replay_state.replay_month(w_tag, win_ord[w_tag], per_win[w_tag])
-                    if not replay_state.active_features:
-                        break
+                    else:
+                        futures.append((
+                            w_tag,
+                            pool.submit(
+                                _eval_window_worker,
+                                dret_path,
+                                {f: month_path_of[w_tag][f] for f in avail},
+                                avail,
+                                dict(worker_cc),
+                                combos,
+                            ),
+                        ))
+                for w_tag, fut in futures:
+                    res_map = fut.result()
+                    per_win[w_tag].update(res_map)
+                    for feat, res in res_map.items():
+                        eval_cache_save(res, _cache_path(feat, w_tag))
+                for w in block:
+                    w_tag = window_tag(w)
+                    replay_state.replay_month(w_tag, win_ord[w_tag], per_win[w_tag])
+                if not replay_state.active_features:
+                    break
 
         return replay_state.pad_remaining_windows()
 
@@ -676,7 +681,7 @@ class TwoStageAgentHarness:
             wf_windows = resolve_walk_forward_windows(list(self.universe_sids.keys()), self.common_config)
             if not wf_windows:
                 raise RuntimeError("[Harness] No valid walk-forward windows resolved from universe_sids")
-            target_months: Optional[List[int]] = [wf_windows[0][0]]
+            target_months: Optional[List[int]] = list(wf_windows[0])
             base_lf = self._fetch_tick_with_warmup(target_months)
         else:
             if hf_lf is None:

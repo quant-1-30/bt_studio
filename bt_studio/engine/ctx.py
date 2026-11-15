@@ -24,6 +24,9 @@ _THREAD_ENV_VARS = {
     "VECLIB_MAXIMUM_THREADS": "1",
     "NUMEXPR_NUM_THREADS": "1",
     "PYTHONUNBUFFERED": "1",
+    "GRPC_ENABLE_HTTP_PROXY": "0",
+    "no_proxy": "localhost,127.0.0.1,::1",
+    "NO_PROXY": "localhost,127.0.0.1,::1",
 }
 
 for _k, _v in _THREAD_ENV_VARS.items():

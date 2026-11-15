@@ -262,6 +262,7 @@ def is_macro_cache_valid(
             or int(meta.get("end_date", 0)) != int(end_date)
             or str(meta.get("benchmark", "")) != str(common_config.get("benchmark", ""))
             or int(meta.get("days_since_ipo", -1)) != int(common_config.get("days_since_ipo", 120))
+            or float(meta.get("min_amount_rank", 0.90)) != float(common_config.get("min_amount_rank", 0.90))
         ):
             return False, []
         return True, []

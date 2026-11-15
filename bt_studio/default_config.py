@@ -32,21 +32,22 @@ _SEARCH_CONTROL_KEYS = frozenset({
 # ---------------------------------------------------------------------------
 
 PRODUCTION_COMMON_PARAMS: Dict[str, Any] = {
-    # Date range & benchmark
+    # Date range & benchmark (full 2010-2025 multi-cycle Walk-Forward horizon)
     "start_date": 20100101,
     "end_date": 20251231,
     "benchmark": "1A0001",
     "warmup_months": DEFAULT_WARMUP_MONTHS,
 
-    # Point-in-time stock universe filtering
+    # Point-in-time stock universe filtering (min_amount_rank=0.90 selects M -> M+1 causal Top 10% by avg_amount)
     "days_since_ipo": 120,
     "min_active_ratio": 0.90,
-    "min_amount_rank": 0.10,
+    "min_amount_rank": 0.90,
 
-    # Walk-forward windowing
+    # Walk-forward windowing & two-stage early-stop
     "train_window": 12,
     "oos_step": 6,
     "min_window_pass_ratio": MIN_WINDOW_PASS_RATIO,
+    "max_consec_failures": 3,
 
     # T+1 exit horizons from open (minutes) & exponential decay half-life
     "T1_rets": {
@@ -77,8 +78,8 @@ PRODUCTION_COMMON_PARAMS: Dict[str, Any] = {
 
     # Ray Tune scheduling & resources
     "num_workers": 12,
-    "n_startup_trials": 40,
-    "num_trials": 500,
+    "n_startup_trials": 20,
+    "num_trials": 100,
     "seed": 42,
     "storage_path": "/tmp/ray_results",
 }

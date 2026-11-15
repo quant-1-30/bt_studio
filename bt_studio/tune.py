@@ -113,6 +113,7 @@ def node_prepare_macro(common_config: dict) -> Dict[str, Any]:
                 "end_date": end_date,
                 "benchmark": str(common_config["benchmark"]),
                 "days_since_ipo": int(common_config.get("days_since_ipo", 120)),
+                "min_amount_rank": float(common_config.get("min_amount_rank", 0.90)),
             },
             dret_path + ".meta.json",
         )
@@ -155,8 +156,9 @@ def _prepare_tick_for_months(
     warmup_months = int(common_config.get("warmup_months", DEFAULT_WARMUP_MONTHS))
     fetch_start_date = calc_warmup_start_date(raw_start_date, warmup_months=warmup_months)
 
+    prev_ym = calc_warmup_start_date(raw_start_date, warmup_months=1) // 100
     sids: List[Any] = []
-    for ym in missing_ymonths:
+    for ym in [prev_ym, *missing_ymonths]:
         sids.extend(universe_sids.get(ym, []))
 
     unique_sids = list(dict.fromkeys(sids))
@@ -207,7 +209,10 @@ def node_extract_feature_monthly(
 
     parts_by_ym = feat_df.partition_by("month_id", as_dict=True, include_key=False)
     for ym in missing_ymonths:
-        valid_sids = universe_sids.get(ym, [])
+        prev_ym = calc_warmup_start_date(ym * 100 + 1, warmup_months=1) // 100
+        valid_sids = list(dict.fromkeys(
+            universe_sids.get(ym, []) + universe_sids.get(prev_ym, [])
+        ))
         part_df = parts_by_ym.get((ym,))
         if part_df is None:
             part_df = parts_by_ym.get(ym)

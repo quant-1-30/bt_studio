@@ -236,8 +236,10 @@ class WindowReplayState:
     min_ratio: float
     max_pval_gate: float
     max_allowed_failures: int
+    max_consec_failures: int = 3
     results: Dict[str, List[EvalResult]] = field(default_factory=dict)
     failure_counts: Dict[str, int] = field(default_factory=dict)
+    consec_failures: Dict[str, int] = field(default_factory=dict)
     active_features: Set[str] = field(default_factory=set)
 
     @classmethod
@@ -248,43 +250,55 @@ class WindowReplayState:
         common_config: Dict[str, Any],
     ) -> "WindowReplayState":
         min_ratio = float(common_config.get("min_window_pass_ratio", MIN_WINDOW_PASS_RATIO))
-        max_pval_gate = float(common_config.get("u_pval", 0.1))
+        max_pval_gate = float(common_config.get("stage2_max_pval", common_config.get("u_pval", 0.1)))
         max_allowed_failures = int(total_windows * (1.0 - min_ratio + 1e-9))
+        max_consec_failures = int(common_config.get("max_consec_failures", 3))
         return cls(
             feature_names=list(feature_names),
             total_windows=total_windows,
             min_ratio=min_ratio,
             max_pval_gate=max_pval_gate,
             max_allowed_failures=max_allowed_failures,
+            max_consec_failures=max_consec_failures,
             results={f: [] for f in feature_names},
             failure_counts={f: 0 for f in feature_names},
+            consec_failures={f: 0 for f in feature_names},
             active_features=set(feature_names),
         )
 
     def replay_month(
         self,
-        m: int,
+        m: int | str,
         month_idx: int,
         month_res: Dict[str, EvalResult],
     ) -> None:
-        """Record a single window's evaluation results and prune mathematically doomed features."""
+        """Record a single window's evaluation results and apply two-stage early-stop pruning."""
         eval_targets = [f for f in self.feature_names if f in self.active_features]
-        print(f"  [Stage2] window {month_idx + 1}/{self.total_windows}: {m} (回放, {len(eval_targets)} 个活跃特征)")
+        n_done = month_idx + 1
+        print(f"  [Stage2] window {n_done}/{self.total_windows}: {m} (回放, {len(eval_targets)} 个活跃特征)")
         for feat in eval_targets:
             res = month_res.get(feat) or EvalResult(
                 feature_name=feat, status="failed", reason="missing_window_result"
             )
             self.results[feat].append(res)
-            if not (res.is_success and res.u_pval <= self.max_pval_gate):
-                if res.is_success:
-                    print(f"    [Pval-Gate] {feat} u_pval={res.u_pval:.3f} > {self.max_pval_gate:.1f}, 该窗口不计通过")
-                self.failure_counts[feat] += 1
-                if self.failure_counts[feat] > self.max_allowed_failures:
-                    self.active_features.discard(feat)
-                    print(
-                        f"    [Early-Stop] {feat} 在第 {month_idx + 1}/{self.total_windows} 窗口累计失败 "
-                        f"{self.failure_counts[feat]} 次，无法达成 {self.min_ratio:.0%} 通过率，剪枝淘汰"
-                    )
+            if res.is_success and res.u_pval <= self.max_pval_gate:
+                self.consec_failures[feat] = 0
+                continue
+
+            if res.is_success:
+                print(f"    [Pval-Gate] {feat} u_pval={res.u_pval:.3f} > {self.max_pval_gate:.1f}, 该窗口不计通过")
+            self.failure_counts[feat] += 1
+            self.consec_failures[feat] += 1
+            if (
+                self.consec_failures[feat] >= self.max_consec_failures
+                or self.failure_counts[feat] > self.max_allowed_failures
+            ):
+                self.active_features.discard(feat)
+                print(
+                    f"    [Early-Stop] {feat} 在第 {n_done}/{self.total_windows} 窗口剪枝 "
+                    f"(连续失败={self.consec_failures[feat]}/{self.max_consec_failures}, "
+                    f"累计失败={self.failure_counts[feat]}/{self.max_allowed_failures})"
+                )
 
         for f in self.feature_names:
             if f not in self.active_features and len(self.results[f]) < (month_idx + 1):

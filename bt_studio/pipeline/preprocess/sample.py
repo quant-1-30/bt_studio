@@ -14,8 +14,8 @@ def universe_sample(
     start_date = common_config.get("start_date")
     min_ipo_days = int(common_config.get("days_since_ipo", 120))
     min_active_ratio = float(common_config.get("min_active_ratio", 0.90))
-    min_amount_rank = float(common_config.get("min_amount_rank", 0.10))
-    
+    min_amount_rank = float(common_config.get("min_amount_rank", 0.90))
+
     meta_lf = universe_lf.select(["sid", "first_trading"])
 
     # 1. normalize date
@@ -31,7 +31,7 @@ def universe_sample(
         ])
     )
 
-    # 2. actual month trading days 
+    # 2. actual month trading days
     market_month_days = (
         uni_lf.select(["month_id", "date"])
         .unique()
@@ -39,14 +39,14 @@ def universe_sample(
         .agg(pl.len().alias("market_trade_days"))
     )
 
-    # 3. filter with active days / IPO ordinary days / amount ranking (based on T month)
+    # 3. filter with active days / IPO ordinary days / amount ranking (based on T month -> T+1 trade_month_id)
     sample_lf = (
         uni_lf.group_by(["sid", "month_id"])
         .agg([
             pl.col("volume").filter((pl.col("volume").is_not_null()) & (pl.col("volume") > 0) & (pl.col("high") > pl.col("low"))).count().alias("active_days"),
             (pl.col("date").max() - pl.col("ipo_date").max()).dt.total_days().alias("days_since_ipo"),
             pl.col("amount").mean().alias("avg_amount"),
-            pl.col("trade_month_id").first().alias("trade_month_id")
+            pl.col("trade_month_id").first().alias("trade_month_id"),
         ])
         .join(market_month_days, on="month_id", how="left")
         .with_columns(
@@ -56,10 +56,11 @@ def universe_sample(
             (pl.col("days_since_ipo") >= min_ipo_days)
             & (pl.col("active_ratio") >= min_active_ratio)
         )
+        .sort(["month_id", "sid"])
         .with_columns(
-            (pl.col("avg_amount").rank(method="average").over("month_id") / pl.len().over("month_id")).alias("amount_rank")
+            (pl.col("avg_amount").rank(method="ordinal").over("month_id") / pl.len().over("month_id")).alias("amount_rank")
         )
-        .filter(pl.col("amount_rank") >= min_amount_rank) #descending=False
+        .filter(pl.col("amount_rank") >= min_amount_rank)
         .select(["sid", "trade_month_id"])
     )
 
