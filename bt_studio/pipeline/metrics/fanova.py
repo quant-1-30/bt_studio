@@ -6,7 +6,7 @@ import polars as pl
 from typing import Any, Dict, List
 from optuna.importance import FanovaImportanceEvaluator
 
-from bt_studio.default_config import build_optuna_distributions
+from bt_studio.utils.config import build_optuna_distributions
 
 
 def _build_neighborhood_conditions(

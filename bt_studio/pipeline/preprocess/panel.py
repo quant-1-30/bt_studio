@@ -4,7 +4,7 @@
 from typing import List, Optional
 import polars as pl
 from bt_studio.constant import TRADING_BARS_PER_DAY
-from bt_studio.utils.math_func import entry_bar_idx
+from bt_studio.utils.math_func import entry_bar_idx, entry_close_expr
 from bt_studio.utils.months import align_date_col, resolve_oos_paths_with_warmup
 
 
@@ -38,21 +38,22 @@ def build_static_panel(
     anchors_lf = (
         train_feat_lf.group_by(["day", "sid"])
         .agg([
-            pl.col("close").filter(pl.col("bar_idx") == entry_idx).first().alias("bar_entry_price"),
+            entry_close_expr(entry_idx).alias("bar_entry_price"),
             pl.col("volume").filter(pl.col("bar_idx") <= entry_idx).sum().alias("entry_vol_sum"),
             pl.col("open").filter(pl.col("bar_idx") == 0).first().alias("_day_open"),
+            pl.col("high").max().alias("day_high"),
+            pl.col("low").min().alias("day_low"),
             *[
                 pl.col("close").filter(pl.col("bar_idx") == (int(minutes) - 1)).first().alias(f"{name}_close")
                 for name, minutes in targets_rets.items()
             ],
         ])
         .join(calendar_lf, on="day", how="left")
-        .join(daily_lf.select(["day", "sid", pl.col("close").alias("t_close")]), on=["day", "sid"], how="left")
         .sort(["sid", "day"])
         .with_columns([
             (pl.col("day").shift(-1).over("sid") == pl.col("t1_day")).fill_null(False).alias("has_t1"),
             pl.when(pl.col("entry_vol_sum") > 0)
-            .then(pl.coalesce(["bar_entry_price", "t_close"]))
+            .then(pl.col("bar_entry_price"))
             .otherwise(None)
             .alias("entry_price"),
             pl.col("_day_open").shift(-1).over("sid").alias("t1_open_price"),
@@ -61,6 +62,7 @@ def build_static_panel(
                 for name in target_names
             ],
         ])
+        .filter(pl.col("day_high") > pl.col("day_low"))
     )
 
     if is_train:
