@@ -7,7 +7,7 @@ import polars as pl
 from typing import Any, Dict, List, Optional, Tuple
 
 from bt_studio.constant import TUNE_COLLAPSE_DIR
-from bt_studio.default_config import (
+from bt_studio.utils.config import (
     resolve_feature_col,
     search_spec_to_collapse_bounds,
 )

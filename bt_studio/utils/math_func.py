@@ -3,8 +3,16 @@
 
 import os
 import numpy as np
+import polars as pl
 
-from bt_studio.constant import DEFAULT_EXCLUDE_BARS, TRADING_BARS_PER_DAY
+from bt_studio.constant import (
+    AFTERNOON_FIRST_MINUTE,
+    DEFAULT_EXCLUDE_BARS,
+    LIMIT_PCT_BY_PREFIX,
+    LIMIT_PCT_MAIN,
+    MORNING_FIRST_MINUTE,
+    TRADING_BARS_PER_DAY,
+)
 
 
 # ===========================================================================
@@ -19,6 +27,35 @@ def entry_bar_idx(common_config: dict | None = None) -> int:
     return min(total_bars - 1, max(0, total_bars - exclude_bars))
 
 
+def entry_bar_clock(common_config: dict | None = None) -> tuple[int, int]:
+    """Clock time (hour, minute) of the entry bar's END-labeled close.
+
+    Inverse of the 240-bar END mapping in ``constant.py`` (09:31->0 ..
+    11:30->119 | 13:01->120 .. 15:00->239). For the default ``exclude_bars=10``
+    the entry bar 230 closes at 14:51 — the backtest TRADE timer must fire on
+    that bar, not two minutes earlier.
+    """
+    idx = entry_bar_idx(common_config)
+    if idx < 120:
+        minute = MORNING_FIRST_MINUTE + idx
+    else:
+        minute = AFTERNOON_FIRST_MINUTE + (idx - 120)
+    return minute // 60, minute % 60
+
+
+def limit_pct(sid: str) -> float:
+    """Entry-side price-limit band for a ticker (shared by tune OOS filter & trade build_topk).
+
+    Reads the shared ``LIMIT_PCT_BY_PREFIX`` table in ``constant.py``; the
+    board→band mapping has no re-implementation elsewhere (tune.py consumes this
+    scalar via ``map_elements``).
+    """
+    for prefixes, pct in LIMIT_PCT_BY_PREFIX:
+        if sid.startswith(prefixes):
+            return pct
+    return LIMIT_PCT_MAIN
+
+
 def causal_keep_bars(common_config: dict | None = None, downsample: int = 1) -> int:
     """Compute the number of downsampled intraday bars strictly before the excluded post-entry tail."""
     cc = common_config or {}
@@ -26,6 +63,23 @@ def causal_keep_bars(common_config: dict | None = None, downsample: int = 1) -> 
     exclude_bars = max(0, int(cc.get("exclude_bars", 0)))
     ds = max(1, int(downsample))
     return max(1, (total_bars - exclude_bars) // ds)
+
+
+def entry_close_expr(entry_idx: int) -> pl.Expr:
+    """Entry-price expression: the last non-null ``close`` at ``bar_idx <= entry_idx``.
+
+    缺 entry bar 时向前取最近 bar 收盘 (forward fill); 不用当日收盘兜底 (14:50 缺 bar
+    取 15:00 收盘会引入前视)。训练面板 (``build_static_panel``) 与 OOS 推理
+    (``node_oos_inference_monthly``) 共用, 保证 train/serve 一致。
+    """
+    cond = (pl.col("bar_idx") <= entry_idx) & pl.col("close").is_not_null()
+    return (
+        pl.struct(["bar_idx", "close"])
+        .filter(cond)
+        .sort()
+        .last()
+        .struct.field("close")
+    )
 
 
 def resolve_dtw_workers(common_config: dict) -> int:
