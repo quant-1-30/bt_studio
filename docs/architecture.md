@@ -172,11 +172,12 @@ bt_studio/visual/
 ├── bkh.py          # bt_core 回测结果可视化(Bokeh 垂直联动多面板图 + load_and_align)
 └── _streamlit.py   # A/B/C 多通道在线可视化工作台(支持单屏切换与多屏 URL 路由联动)
 
-bt_studio/plugins/api_server/
-├── main.py         # FastAPI 网关入口 + /ws/{client_id}
-├── monitor_api.py  # /api/v2/* (含 /screener 与 /focus 跨屏焦点同步) + /ws/v2 事件环广播
-├── indexer.py      # MonitorIndex (SQLite WAL 索引 + screener 截面查询 + focus 状态持久化)
-└── watcher.py      # ResultWatcher 增量目录监听
+bt_studio/server/            # FastAPI/WS 网关
+├── main.py                 # FastAPI 网关入口 + /ws/{client_id}
+├── monitor_api.py          # /api/v2/* (含 /screener 与 /focus 跨屏焦点同步) + /ws/v2 事件环广播
+└── watcher.py              # ResultWatcher 增量目录监听
+
+bt_studio/monitor/indexer.py  # MonitorIndex (SQLite WAL 索引 + screener 截面查询 + focus 状态持久化)
 
 bt_studio/utils/diagnostics/
 ├── collapse.py     # detect_space_collapse 塌陷检测算法 + 报告构建/保存/渲染

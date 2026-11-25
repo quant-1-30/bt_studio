@@ -28,7 +28,7 @@ poetry install                      # 安装依赖 (Python >=3.11,<3.14)
 # 前置初始化 (单线程确定性 + 硬件自适应并发 + gRPC 防代理劫持)
 source scripts/start_env.sh
 
-# 全量测试套件 (231 个用例: 226 单元 + 5 Ray Tune 全链路)
+# 全量测试套件 (298 个用例: 293 单元 + 5 Ray Tune 全链路)
 poetry run python -m pytest tests/ -q -p no:cacheprovider
 
 # LLM 特征挖掘飞轮 (Walk-Forward 按需加载 + 两段式早停 + 断点续跑)
@@ -89,12 +89,15 @@ bt_studio/
 │   ├── executor.py      #   NODE_REGISTRY/run_dag 滚动窗口编排 + task_id 分桶 + 签名/条件依赖求值
 │   ├── ctx.py           #   Ray 生命周期与平台自适应并发 (ensure_ray)
 │   └── task_manager.py  #   异步 FIFO 队列 + 契约预检 + LLM_PENDING_DIR intake
+├── trade/               # 实盘交易引擎 (scorer/data/sizers/strategy/execution/engine/drift)
+├── monitor/             # 产物监控域 (indexer.MonitorIndex, server 与 visual 共享)
 ├── pipeline/            # 核心算法
 │   ├── preprocess/      #   prepare/sample/panel/macro (Tick 因果后复权、曲线提取、静态面板)
 │   ├── patterns/        #   astc/fsm/pattern (有监督正样本 Motif 发现 → Numba DTW → FSM)
 │   ├── metrics/         #   score/gates/pareto/fanova (奥卡姆精简 HPO 评分与自适应 plateau 校验)
 │   └── inference/       #   predict.py FSMPredictor (OOS 打分)
-├── plugins/             # api_server (FastAPI/WS + monitor_api + indexer.py), backtest (Pnc/Sizer), xtp_client
+├── plugins/             # 零核心依赖可插拔: zmq_client (通用 ZMQ 传输) + xtp (XTP 行情)
+├── server/              # FastAPI/WS 网关 (main/monitor_api/watcher)
 ├── utils/               # months/io/math_func/manifest + diagnostics/{collapse,hpo_check}
 ├── visual/              # _streamlit.py (A/B/C 多屏工作台), collapse.py 绘图, bkh.py Bokeh 组件
 ├── constant.py          # 全部路径常量与固定业务阈值 (RESULT_ROOT 可由 BT_STUDIO_RESULT_DIR 覆盖)
@@ -151,6 +154,7 @@ agent 预计算特征经 `FEATURE_DIR/{fp12}/` 纯 12 位指纹目录约定复�
 - **统计分与显著性检验**: `daily_paired_pval` 按日配对 Wilcoxon; p 值项软饱和 `cap·(1−e^(−x/cap))`(`max_neg_ln_p`, 默认 10);
 - **经济门控与结局截断守卫**: `min_excess_ret` 硬门控原始收益中位数超额; `t1_missing_ratio <= 0.25` 拦截次日停牌/缺失造成的结局截断偏差;
 - **衰减遥测与塌陷诊断**: `node_check_decay_monthly` 自动落盘 `decay_{model_id}_{feature_col}.json` 跟踪 OOS $u$-pval、触发率与得分漂移; `collapse.py` 单因子扰动邻域检测空间塌陷。
+- **实盘日度漂移哨兵 (`trade/drift.py`)**: 月度衰减门控决定是否重训, 实盘另设日级哨兵 —— `TradeEngine.daily_plan` 打分一次, 把当日 DTW 触发数与 top-k conviction (`fsm_score` / `expected_return`, 即 `FSMSizer` 的加权输入) 对比本模型 OOS 打分 (`scores_{model_id}.parquet`) 的**中位数**: 相对偏移 `|v − median| / |median|` 超过 `drift_rel` 即 `model_drift_*` 告警 (`warn`; 不做窗口过滤、不设经验分位带)。日度记录落盘 `drift_{model_id}_{feature_col}.json` (重启续读, 同日重触发幂等), 由 `MonitorIndex.alerts()` 抬升并经 webhook 推送。只告警不改变交易行为; 基线缺失/损坏时自动禁用, 不阻塞交易进程。
 
 ### 4.4 编译器约束 (改动 prompt/agent 前必读)
 
@@ -201,9 +205,22 @@ agent 预计算特征经 `FEATURE_DIR/{fp12}/` 纯 12 位指纹目录约定复�
    修复后 collapse-first ×6 / 单文件 ×3 / 全量 ×2 全绿, 且 trial 分数跨进程
    bit-identical。
 
+2. **`bt_core` `ParquetPatch` 的 `day_id` Int8 溢出 → 回测静默空仓** **已修复 (2026-11)**。
+   根因: `pl.col("day").dt.month()` 返回 `Int8`, `* 100` 在 i8 内静默回绕
+   (`2024-11-20 → 20240096`, `2025-12-31 → 20249951`, 仅 1 月正确),
+   `global_scores` 的键随之错位, `get_topk(current_day)` 除 1 月外一律查空。
+   旧用例只用了 1 月的日期, 故长期未暴露; 任何 `dt.month()/dt.day()` 参与乘法
+   的表达式都必须先 `.cast(pl.Int32)` (同 `bt_sdk/core/factor.py` 的写法)。
+   修复: 补 `.cast(pl.Int32)` + 跨 12 个月回归用例
+   (`tests/behavior/test_feed_factor.py::test_parquet_score_feed_day_id_covers_all_months`)。
+   **影响**: 在当前依赖 (polars ^1.39) 下, 修复前的回测只有 1 月的交易日拿得到信号,
+   其余月份 `get_topk` 返回空 → 不开新仓; 此前跑出的回测结果需重跑核对。
+
 ## 8. 性能与资源 (2026-11)
 
 - **RPC 与月包缓存 (`prepare.py` & `utils/io.py`)**: `start_env.sh` 与 `ctx.py` 默认导出 `GRPC_ENABLE_HTTP_PROXY=0` 与 `no_proxy=localhost,127.0.0.1` 防本地代理劫持 gRPC; `_collect_stream_sync` 由 `@_retry_rpc_stream(max_retries=3)` 装饰器托管 (`timeout=60.0s`); `prepare_tick` 按 `chunk` 批量向量化执行 `align_skeleton`, 并在 `ym.meta.json` 中记录 `empty_sids` 负缓存(纯停牌增量仅更新 20KB `meta.json`, 零拷贝跳过 120MB Parquet 重排)。
 - **Walk-Forward 按需评估与两段式早停 (`harness.py` & `schema.py`)**: 按 `(train_window=12, oos_step=6)` 切分滚动窗口, `min_amount_rank=0.90` 因果选取每月成交额前 10% 标的(落盘保留 $\mathcal{U}_m \cup \mathcal{U}_{m-1}$ 防止月末 $T \rightarrow T+1$ 跨月出场价丢失); `WindowReplayState` 执行两段式早停(`consec_failures >= max_consec_failures(3)` 或 `failure_counts > max_allowed_failures`); `static_{w_tag}.parquet` 跨步持久化于 `EVAL_CACHE_ROOT/static/`, 100 步 RL 飞轮仅计算一次。
+- **回测 (`run_backtest.py` & `sizers.py`)**: 从 `PRODUCTION_COMMON_PARAMS` 自动推导尾盘建仓时点 `entry_bar_idx - 240`（如 `-10m` 即 `14:50`）与次日早盘分批出场时点 `T1_rets`（如 `+5m/+15m/+30m`）及衰减分批比例 `exit_weights`；`node_oos_inference_monthly` 基于昨日收盘价 `preclose` 与 `entry_close` 硬过滤尾盘涨停不可买标的；`FSMSizer` 纯粹由 `fsm_score` 与 `expected_return` 驱动，与特征挖掘层彻底解耦。
+- **实时行情缓存 (`plugins/xtp/quote_cache.py::TopkQuoteCache`)**: 零第三方依赖 C-double 连续数组 `(N_sids * 240)`，先握手订阅事件流再订当月 Top-K 标的，`O(1)` 增量聚合 240-bar 分钟骨架并实时应用 `hfq_scales`，实现 10,000+ 帧突发零丢帧。
 - **CPU 与内存确定性**: `POLARS/NUMBA/OMP=1` 单线程确定性 + 防 Mach 风暴; 窗口内多特征或跨窗口进程池并行 (`eval_procs`), DTW 线程预算单一权威 `resolve_dtw_workers`。
 

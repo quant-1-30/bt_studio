@@ -12,7 +12,7 @@ source scripts/start_env.sh
 
 # 1) 监控面板 (token 必配; BT_STUDIO_ENV=prod 下未配直接拒绝启动)
 BT_STUDIO_ENV=prod BT_STUDIO_API_TOKEN='<secret>' \
-  poetry run python -m uvicorn bt_studio.plugins.api_server.main:app \
+  poetry run python -m uvicorn bt_studio.server.main:app \
   --host "${BT_STUDIO_BIND_HOST:-127.0.0.1}" --port 8800 --workers 1
 
 # 2) 挖掘主进程 (Walk-Forward 按窗按需加载, 默认 2010-2025 & min_amount_rank=0.90 即每月 Top 10% 标的)
@@ -42,6 +42,7 @@ LLM_DAILY_TOKEN_BUDGET=500000 \
 | `disk_usage_high` / `disk_usage_critical` | 磁盘水位 ≥85% 告警，≥95% 自动按 LRU 驱逐 `result/cache/evals/` 旧缓存 |
 | `index_lag` | 索引落后磁盘 >60s → 系统已自动触发 `scan_once()` 自愈重扫 |
 | `raw_pit_coverage_low` | 查 md-server / 日历 |
+| `model_drift_n_trigger` / `model_drift_topk_score` / `model_drift_topk_ret` | 实盘信号相对 OOS **中位数**偏移超 `drift_rel`（记录在 `result/artifacts/tune/<task>/collapse/drift_<model>_<feat>.json` 的 `history`）。核对行情完整性（丢 tick）与 universe 是否与 OOS 一致，持续则提前重训；可用 `BT_DRIFT_REL` 调整阈值。哨兵只告警，不拦截下单 |
 
 ## 4. 断点续跑 / 崩溃恢复
 

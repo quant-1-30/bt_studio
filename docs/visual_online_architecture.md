@@ -19,7 +19,7 @@
 
 ```text
                     ┌────────────────────────────────────────────────────────┐
-                    │           bt_studio 统一后端网关 (plugins/api_server)    │
+                    │           bt_studio 统一后端网关 (server/)               │
                     │   FastAPI + MonitorIndex (SQLite WAL) + _WsHub + ZMQ   │
                     └────────┬───────────────────┬───────────────────┬───────┘
                              │                   │                   │
@@ -76,7 +76,7 @@
 poetry run python scripts/run_visual.py --mode online
 
 # 2. (可选) 启动独立 FastAPI + WebSocket 多端推送网关 (默认 http://127.0.0.1:8800)
-poetry run python -m bt_studio.plugins.api_server.main
+poetry run python -m bt_studio.server.main
 ```
 
 ### 2. 单屏模式 vs 多显示器多屏联动模式

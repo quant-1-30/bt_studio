@@ -101,3 +101,7 @@
    - `prepare_tick` 按 `chunk` 批量合并调用 `align_skeleton`，并在 `ym.meta.json` 中记录 `empty_sids` 负缓存。
 3. **全仓函数签名复杂度清零（所有函数非 `self/cls` 参数 $\le 5$）**：
    - 对全仓 21 个超过 5 参数的函数完成职责内聚与未使用形参清理，经 AST 静态扫描验证，全仓 `> 5` 参数的函数降至 **0 个**。
+4. **`bt_studio` $\leftrightarrow$ `bt_core` $\leftrightarrow$ `bt_playgroud` 进出场、仓位与实时行情三仓闭环 (2026-11)**：
+   - **`bt_core` 瘦身与 `Pnc` 修复**：清除 IB/OANDA/VC/MT4 等 14 个外盘遗留模块（-5,546 行）；`pnc.pyx` 修复同刻卖单冻结槽位导致的“隔日空仓 Bug”、空 `topk` 不平仓 Bug 与 `c_topk_info` 强制 `double` 类型截断，支持 `exit_on_risk=True` 早盘分批出场与按目标权重降序分配 `slots`；
+   - **特征与执行解耦 (`tune.py` & `FSMSizer` & `run_backtest.py`)**：`scores_*.parquet` 保留因果昨收 `preclose` 与 `entry_close` 精准过滤 `entry_bar_idx` 涨停不可买标的；移除冗余 `sid_scale`，`FSMSizer` 纯粹由 `fsm_score`、`expected_return` 与从 `T1_rets` 自动推导的早盘分批权重 `exit_weights` 驱动；
+   - **零丢帧实时缓存 (`TopkQuoteCache`)**：修复 `bt_playgroud` 订阅提前发 `EOF` 与双 `ROUTER` 未绑定黑洞，新增 `array('d')` 预分配 `(N_sids * 240)` 零丢帧实时行情聚合器。
