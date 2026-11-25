@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import networkx as nx
 
 from bt_studio.constant import DEFAULT_WARMUP_MONTHS, FEATURE_DIR, TASK_DIR_KEYS, TUNE_BASE_DIR
-from bt_studio.default_config import common_params_of, resolve_feature_col, search_spec_of
+from bt_studio.utils.config import common_params_of, resolve_feature_col, search_spec_of
 from bt_studio.schema import EngineResult, PipelineDag
 from bt_studio.tune import (
     node_check_decay_monthly,

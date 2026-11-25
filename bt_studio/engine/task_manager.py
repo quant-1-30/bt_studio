@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from bt_studio.compiler.ast import ast_fingerprint, compile_ast, compile_recipe
 from bt_studio.constant import LLM_PENDING_DIR, TUNE_MODEL_DIR
-from bt_studio.default_config import build_exp_config, resolve_feature_col
+from bt_studio.utils.config import build_exp_config, resolve_feature_col
 from bt_studio.engine import parse_dag, run_dag
 from bt_studio.engine.ctx import ensure_ray
 from bt_studio.schema import TaskResult, TaskStatus
