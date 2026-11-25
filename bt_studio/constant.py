@@ -35,6 +35,9 @@ EVAL_CACHE_ROOT = os.path.join(CACHE_ROOT, "evals")
 MONITOR_DB = os.path.join(CACHE_ROOT, "monitor.sqlite")
 
 
+# --- vendor --------------------------------------------------------------- #
+DEFAULT_GOOGLE_MODEL = "gemini-3.8-flash"  # Google Gemini 3.8B (Flash) model for LLM generation
+
 # --------------------------------------------------------------------------- #
 # LLM RL
 # --------------------------------------------------------------------------- #
@@ -55,6 +58,19 @@ MORNING_FIRST_MINUTE = 9 * 60 + 31     # 09:31 (END-labeled bar 0)
 MORNING_LAST_MINUTE = 11 * 60 + 30     # 11:30 (END-labeled bar 119)
 AFTERNOON_FIRST_MINUTE = 13 * 60 + 1   # 13:01 (END-labeled bar 120)
 AFTERNOON_LAST_MINUTE = 15 * 60        # 15:00 (END-labeled bar 239)
+
+SESSION_OPEN_MINUTE = 9 * 60 + 30      # Asia/Shanghai 
+BEIJING_UTC_OFFSET_SEC = 28800         # Asia/Shanghai ---> UTC+8 
+
+# A-share price-limit bands by board (entry-side limit-up exclusion
+LIMIT_PCT_CHINEXT_STAR = 0.195   # 30x/68x 20% band
+LIMIT_PCT_MAIN = 0.098           # 10% band)
+LIMIT_PCT_BSE = 0.295            # 30% band
+BSE_PREFIXES = ("43", "83", "87", "88", "92")   
+LIMIT_PCT_BY_PREFIX = (
+    (("30", "68"), LIMIT_PCT_CHINEXT_STAR),
+    (BSE_PREFIXES, LIMIT_PCT_BSE),
+)
 
 # --------------------------------------------------------------------------- #
 # Pipeline Dag

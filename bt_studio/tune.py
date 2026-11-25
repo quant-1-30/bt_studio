@@ -22,8 +22,8 @@ from bt_studio.constant import (
     TUNE_MODEL_DIR,
     TUNE_SCORE_DIR,
 )
-from bt_studio.default_config import (
-    PRODUCTION_SEARCH_SPEC,
+from bt_studio.default_config import PRODUCTION_SEARCH_SPEC
+from bt_studio.utils.config import (
     build_ray_tune_search_space,
     common_params_of,
     create_mlflow_callback,
@@ -47,7 +47,7 @@ from bt_studio.pipeline.preprocess import (
     prepare_tick,
     universe_sample,
 )
-from bt_studio.utils.math_func import resolve_search_hyperparams
+from bt_studio.utils.math_func import entry_bar_idx, entry_close_expr, limit_pct, resolve_search_hyperparams
 from bt_studio.utils.diagnostics.hpo_check import run_collapse_check
 from bt_studio.utils.io import (
     atomic_file_write,
@@ -60,6 +60,7 @@ from bt_studio.utils.manifest import (
     write_model_manifest as _write_model_manifest,
 )
 from bt_studio.utils.months import (
+    align_date_col,
     day_month_id_expr,
     find_model_path,
     calc_warmup_start_date,
@@ -593,6 +594,7 @@ def node_update_fsm_matrix(
 # Node 6: OOS Inference
 # ==============================================================================
 
+
 def node_oos_inference_monthly(
     model_id: int,
     dret_path: str,
@@ -640,6 +642,41 @@ def node_oos_inference_monthly(
             .filter(pl.col("_month_id").is_in(oos_yms))
             .drop("_month_id")
         )
+
+        if scored_df.height > 0:
+            entry_idx = entry_bar_idx(common_config)
+            eps = float(common_config.get("eps", 1e-8))
+            preclose_lf = (
+                align_date_col(pl.scan_parquet(dret_path))
+                .unique(subset=["sid", "day"], keep="last")
+                .sort(["sid", "day"])
+                .select(["day", "sid", pl.col("close").shift(1).over("sid").alias("preclose")])
+            )
+            entry_bars_lf = (
+                align_date_col(pl.scan_parquet(valid_paths))
+                .filter(pl.col("bar_idx") <= entry_idx)
+                .group_by(["day", "sid"])
+                .agg([
+                    entry_close_expr(entry_idx).alias("entry_close"),
+                    pl.col("volume").sum().alias("cum_vol"),
+                ])
+                .join(preclose_lf, on=["day", "sid"], how="left")
+                .with_columns(
+                    pl.col("sid").cast(pl.String).map_elements(limit_pct, return_dtype=pl.Float64).alias("_limit_pct")
+                )
+                .filter(
+                    (pl.col("cum_vol") > 0)
+                    & (pl.col("entry_close") > eps)
+                    & (
+                        pl.col("preclose").is_null()
+                        | (pl.col("preclose") <= eps)
+                        | (((pl.col("entry_close") / pl.col("preclose")) - 1.0) < pl.col("_limit_pct"))
+                    )
+                )
+                .select(["day", "sid", "preclose", "entry_close"])
+                .collect(engine="streaming")
+            )
+            scored_df = align_date_col(scored_df.lazy()).collect().join(entry_bars_lf, on=["day", "sid"], how="inner")
 
         if scored_df.height > 0:
             feature_id = str(model_ckpt.get("feature_col") or common_config.get("feature_col") or "")

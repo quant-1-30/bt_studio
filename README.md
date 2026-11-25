@@ -43,10 +43,12 @@ bt_studio/
 │   ├── preprocess/        # 宏观数据准备、Tick 对齐、静态面板与宏观状态计算 (macro.py)
 │   ├── metrics/           # Pareto 前沿与 fANOVA 重要性评估
 │   └── inference/         # 样本外 (OOS) 预测与推断
-├── plugins/               # 独立插件与外部网关
-│   ├── api_server/        # FastAPI / WebSocket 服务端
-│   ├── backtest/          # bt_core 回测仓位分配器 (FSMSizer) 与风控组件
-│   └── xtp_client/        # ZMQ 交易客户端底层
+├── trade/                 # 实盘交易引擎 (打分/数据/仓位/执行/调度/漂移哨兵)
+├── monitor/               # 产物监控域 (MonitorIndex, server 与 visual 共享)
+├── plugins/               # 零核心依赖可插拔插件 (zmq_client + xtp)
+│   ├── xtp/               # XTP 行情缓存 (TopkQuoteCache)
+│   └── zmq_client/        # 通用 ZMQ 传输 (ZmqClient + codec)
+├── server/                # FastAPI / WebSocket 服务端
 ├── utils/                 # 工具类 (原子 IO、月份对齐、数学统计、塌陷检测 diagnostics/)
 ├── visual/                # 数据可视化 (Streamlit App 与 Bokeh 组件)
 ├── constant.py            # 全局路径、版本号及常量注册
