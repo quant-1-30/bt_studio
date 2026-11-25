@@ -12,7 +12,7 @@
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>source scripts/start_env.sh &amp;&amp; exec poetry run python -m uvicorn bt_studio.plugins.api_server.main:app --host "${BT_STUDIO_BIND_HOST:-127.0.0.1}" --port "${PORT:-8800}" --workers 1</string>
+        <string>source scripts/start_env.sh &amp;&amp; exec poetry run python -m uvicorn bt_studio.server.main:app --host "${BT_STUDIO_BIND_HOST:-127.0.0.1}" --port "${PORT:-8800}" --workers 1</string>
     </array>
 
     <key>EnvironmentVariables</key>

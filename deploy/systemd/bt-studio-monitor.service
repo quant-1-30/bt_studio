@@ -9,7 +9,7 @@ WorkingDirectory=%h/startup/bt_studio
 Environment="BT_STUDIO_ENV=prod"
 Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=-%h/startup/bt_studio/.env
-ExecStart=/bin/bash -lc 'source scripts/start_env.sh && exec poetry run python -m uvicorn bt_studio.plugins.api_server.main:app --host "${BT_STUDIO_BIND_HOST:-127.0.0.1}" --port "${PORT:-8800}" --workers 1'
+ExecStart=/bin/bash -lc 'source scripts/start_env.sh && exec poetry run python -m uvicorn bt_studio.server.main:app --host "${BT_STUDIO_BIND_HOST:-127.0.0.1}" --port "${PORT:-8800}" --workers 1'
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576
