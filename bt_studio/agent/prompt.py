@@ -42,8 +42,7 @@ EXAMPLE_RECIPE: Dict[str, Any] = {
 def _get_ts_window_ops_list() -> List[str]:
     """dynamic extract time-series window operator set (reusing compiler.ast._ts_window_ops single source of truth)."""
     ts_ops = set(_ts_window_ops())
-    if hasattr(talib_ops, "REGISTRY"):
-        ts_ops.update(talib_ops.REGISTRY.keys())
+    ts_ops.update(talib_ops.REGISTRY.keys())
     return sorted(ts_ops)
 
 

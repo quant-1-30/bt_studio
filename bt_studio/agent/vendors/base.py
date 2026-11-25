@@ -14,8 +14,6 @@ from typing import Any, Dict, Optional
 from bt_studio.constant import LLM_USAGE_DIR as _DEFAULT_LLM_USAGE_DIR
 from bt_studio.utils.io import exclusive_file_lock as _exclusive_file_lock
 
-DEFAULT_GOOGLE_MODEL = "gemini-3.8-flash"
-
 
 class BaseLLMProvider(ABC):
     """Abstract base interface for LLM generation providers."""
@@ -188,3 +186,52 @@ class MeteredProvider(BaseLLMProvider):
         else:
             self.meter.record(pname, self.model, self.last_usage, elapsed)
         return out
+
+
+class RetryProvider(BaseLLMProvider):
+
+    def __init__(
+        self,
+        inner: BaseLLMProvider,
+        retries: int = 3,
+        backoff: float = 2.0,
+        meter: Optional["LlmUsageMeter"] = None,
+    ):
+        self.inner = inner
+        self.retries = max(1, int(retries))
+        self.backoff = float(backoff)
+        self.meter = meter
+
+    @property
+    def last_usage(self) -> Optional[Dict[str, Any]]:
+        return getattr(self.inner, "last_usage", None)
+
+    @property
+    def model(self) -> str:
+        return getattr(self.inner, "model", type(self.inner).__name__)
+
+    def generate(
+        self,
+        user_prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.8,
+        json_mode: bool = True,
+    ) -> str:
+        last_err: Optional[Exception] = None
+        for attempt in range(self.retries):
+            t0 = time.perf_counter()
+            try:
+                return self.inner.generate(user_prompt, system_prompt, temperature, json_mode)
+            except Exception as e:
+                last_err = e
+                if attempt < self.retries - 1:  
+                    if self.meter is not None:
+                        self.meter.record(
+                            type(self.inner).__name__,
+                            self.model,
+                            None,
+                            (time.perf_counter() - t0) * 1000,
+                            type(e).__name__,
+                        )
+                    time.sleep(self.backoff * (attempt + 1))
+        raise last_err  # type: ignore[misc]

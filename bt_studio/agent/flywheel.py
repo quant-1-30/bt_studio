@@ -26,9 +26,24 @@ from bt_studio.utils.io import (
 
 from .harness import FeatureMiningResult, TwoStageAgentHarness
 from .prompt import build_rl_context_prompt, build_system_prompt
-from .vendors import get_llm_provider
+from .vendors import BudgetExceeded, get_llm_provider
 
 logger = logging.getLogger(__name__)
+
+
+def _wait_budget_reset(meter) -> None:
+    """
+        ``LLM_BUDGET_POLL_SECONDS`` 300s
+    """
+    poll_seconds = max(1, int(os.environ.get("LLM_BUDGET_POLL_SECONDS", "300")))
+    while True:
+        try:
+            meter.precheck() 
+            print("[Flywheel] has been reset, resuming mining")
+            return
+        except BudgetExceeded:
+            print(f"[Flywheel] exhausted, {poll_seconds}s check")
+            time.sleep(poll_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +318,9 @@ class RLFeatureFlywheel:
         cc = getattr(harness, "common_config", None) or {}
         self.max_depth = int(cc.get("max_depth", 4))
         self._min_exploration_steps = int(cc.get("min_exploration_steps", 4))
+       
+        # LLM_WAIT_BUDGET_RESET=1
+        self._wait_budget_reset = os.environ.get("LLM_WAIT_BUDGET_RESET", "0") == "1"
 
         self.buffer = ReplayBuffer()
         self._step_counter = 0
@@ -547,9 +565,20 @@ class RLFeatureFlywheel:
         for _ in range(remaining_steps):
             try:
                 results = self.step(target_description, hf_lf, dret_lf)
-            except Exception as e:
-                print(f"\n[Flywheel] Infra Error and Shutdown (already finished {self._step_counter - 1} step): {e}")
+            except BudgetExceeded as e:
+                self._save_state(target_description)
+                # BudgetExceeded 只由 MeteredProvider.precheck 抛出, 故 llm_vendor 必是 MeteredProvider (有 .meter)
+                if self._wait_budget_reset:
+                    print(f"[Flywheel] exhauted: {e} waiting for budget reset...")
+                    _wait_budget_reset(self.llm_vendor.meter)
+                    continue
+                print(f"[Flywheel] exhausted: {e}; saving state and exiting (supervisor can resume)")
                 break
+            except Exception as e:
+                print(f"[Flywheel] Step {self._step_counter} failed: {e}; recording and skipping")
+                self._save_state(target_description)
+                continue
+
             all_results.extend(results)
 
             if sum(1 for r in results if r.stage2_passed) >= required_new:

@@ -6,7 +6,9 @@ import os
 from typing import Optional
 from google import genai
 from google.genai import types
-from .base import BaseLLMProvider, DEFAULT_GOOGLE_MODEL
+from .base import BaseLLMProvider
+
+from bt_studio.constant import DEFAULT_GOOGLE_MODEL
 
 
 class GoogleProvider(BaseLLMProvider):

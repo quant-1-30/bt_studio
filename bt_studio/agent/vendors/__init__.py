@@ -9,12 +9,14 @@ from typing import Optional
 from .base import (
     BaseLLMProvider,
     BudgetExceeded,
-    DEFAULT_GOOGLE_MODEL,
     LlmUsageMeter,
     MeteredProvider,
+    RetryProvider,
 )
 from .dummy import DummyProvider
 from .openai_compatible import OpenAICompatibleProvider
+
+from bt_studio.constant import DEFAULT_GOOGLE_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +52,6 @@ def _build_single_provider(name: str, **kwargs) -> BaseLLMProvider:
 
 
 class FailoverLLMProvider(BaseLLMProvider):
-    """主备多供应商自动故障转移包装器 (带连续失败熔断冷却期 Circuit Breaker)。
-
-    - 主供应商连续失败达到 failure_threshold (默认 2 次) 后，打开断路器进入
-      cooldown_s (默认 300s, 可通过 LLM_FAILOVER_COOLDOWN_S 配置) 冷却期；
-    - 冷却期内直接路由至 fallback 备用供应商，避免每次都耗尽主供应商多轮退避重试；
-    - 冷却期结束后自动半开探测主供应商，成功则重置失败计数。
-    """
 
     def __init__(
         self,
@@ -149,5 +144,9 @@ def get_llm_provider(provider_name: str | None = None, **kwargs) -> BaseLLMProvi
                 f"降级为单供应商模式: {e}"
             )
 
-    # [metering] 统一包裹: 记账 + 预算熔断; 预算未配置时零行为变化
-    return MeteredProvider(inner, LlmUsageMeter())
+    retries = int(os.environ.get("LLM_RETRIES", "3"))
+    backoff = float(os.environ.get("LLM_RETRY_BACKOFF", "2.0"))
+    # 单一账本: RetryProvider 记瞬时失败、MeteredProvider 记最终调用, 共用同一个 meter
+    meter = LlmUsageMeter()
+    inner = RetryProvider(inner, retries=retries, backoff=backoff, meter=meter)
+    return MeteredProvider(inner, meter)
