@@ -34,7 +34,7 @@ st.set_page_config(page_title="bt_studio quant desk", layout="wide")
 
 @st.cache_resource
 def _get_monitor_index():
-    from bt_studio.plugins.api_server.indexer import MonitorIndex
+    from bt_studio.monitor import MonitorIndex
 
     return MonitorIndex()
 

@@ -161,7 +161,7 @@ class ParquetToPDFConverter:
         ts = pd.to_datetime(index)
         tmin, tmax = ts.min(), ts.max()
         ax.set_xlim(tmin, tmax)
-        span_days = (tmax - tmin).days if hasattr(tmax - tmin, "days") else 0
+        span_days = (tmax - tmin).days
         if span_days <= 1:
             loc, fmt = mdates.HourLocator(interval=1), mdates.DateFormatter("%Y-%m-%d %H:%M")
         elif span_days <= 31:
