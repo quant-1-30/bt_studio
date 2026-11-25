@@ -37,6 +37,17 @@ def _meter(tmp_path, budget=None):
     return LlmUsageMeter(budget_total=budget, ledger_dir=str(tmp_path))
 
 
+def test_get_llm_provider_wraps_and_shares_meter(monkeypatch):
+    """回归: 非 dummy provider 的工厂路径必须构造成功 (曾 meter 未定义 → NameError), 且 retry/metered 共用同一账本。"""
+    from bt_studio.agent.vendors import RetryProvider, get_llm_provider
+
+    monkeypatch.setattr("bt_studio.agent.vendors._build_single_provider", lambda name, **kw: FakeInner())
+    p = get_llm_provider("zhipu")
+    assert isinstance(p, MeteredProvider)
+    assert isinstance(p.inner, RetryProvider)
+    assert p.meter is p.inner.meter  # 同一账本 (瞬时失败与最终调用记入同一处)
+
+
 def test_meter_records_usage_and_ledger(tmp_path):
     inner = FakeInner()
     m = _meter(tmp_path)

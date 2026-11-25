@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""pipeline.preprocess 回归测试: 面板构建与股票池过滤。
 
-覆盖 2026-09 代码审计定位的逻辑 bug:
-    L   14:50 入场价缺 bar 时退化当日收盘价的路径未实现 (内过滤丢行)
-    L   active_ratio 分母不含 null-volume 行 → 停牌门控失效
-"""
 
 import datetime
 
@@ -17,7 +12,7 @@ from bt_studio.pipeline.preprocess.panel import build_static_panel
 
 
 # ---------------------------------------------------------------------------
-# L: 入场价缺 bar 时退化当日收盘价
+# L: forward fill
 # ---------------------------------------------------------------------------
 
 ENTRY_CC = {
@@ -27,7 +22,7 @@ ENTRY_CC = {
 }
 
 
-def test_entry_price_falls_back_to_daily_close():
+def test_entry_price_forward_fills_when_entry_bar_missing():
     days = [datetime.date(2024, 1, 2), datetime.date(2024, 1, 3),
             datetime.date(2024, 1, 4)]
     hf_parts, daily_rows = [], []
@@ -56,9 +51,9 @@ def test_entry_price_falls_back_to_daily_close():
                                 is_train=True).collect()
 
     row = static.filter((pl.col("sid") == "600000") & (pl.col("day") == days[0]))
-    assert row.height == 1, "缺 14:50 bar 的样本必须退化用日线收盘, 而不是整行消失"
-    # entry = 日线收盘 100.5; T+1 (day1) exit_5m close = bar4 close = 101
-    expected_raw = 101.0 / 100.5 - 1.0
+    assert row.height == 1, "缺 14:50 bar 的样本必须保留 (入场价向前取最近 bar 收盘)"
+    # entry = bar 229 收盘 100.0 (forward fill); 而非当日收盘 100.5 (那会前视)
+    expected_raw = 101.0 / 100.0 - 1.0
     assert row["raw_exit_5m"][0] == pytest.approx(expected_raw, abs=1e-9)
 
 
@@ -111,8 +106,8 @@ def test_align_skeleton_produces_full_240_bars():
         pl.DataFrame({
             "day": [days[0]] * 240, "sid": ["600000"] * 240,
             "bar_idx": np.arange(240, dtype=np.int32),
-            "open": np.full(240, 100.0), "high": np.full(240, 100.0),
-            "low": np.full(240, 100.0), "close": np.full(240, 100.0),
+            "open": np.full(240, 100.0), "high": np.full(240, 100.1),
+            "low": np.full(240, 99.9), "close": np.full(240, 100.0),
             "volume": np.zeros(240), "amount": np.zeros(240),
         }),
         pl.DataFrame({
@@ -202,8 +197,8 @@ def test_build_static_panel_causal_ex_dividend_adjustment():
     hf_d0 = pl.DataFrame({
         "day": [20240603] * 240, "sid": [b"600000"] * 240,
         "bar_idx": np.arange(240, dtype=np.int32),
-        "open": np.full(240, 20.0), "high": np.full(240, 20.0),
-        "low": np.full(240, 20.0), "close": np.full(240, 20.0),
+        "open": np.full(240, 20.0), "high": np.full(240, 20.1),
+        "low": np.full(240, 19.9), "close": np.full(240, 20.0),
         "volume": np.full(240, 10.0), "amount": np.full(240, 200.0),
     })
     hf_d1 = pl.DataFrame({

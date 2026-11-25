@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""bt_studio.monitor M0 索引行为锁定 (tmp result_root, 不碰真实 result)。"""
+
 import json
 import os
 from datetime import datetime
 
-from bt_studio.plugins.api_server.indexer import MonitorIndex
+from bt_studio.monitor.indexer import MonitorIndex
 
 
 def _write_json(path, data):
@@ -40,7 +40,6 @@ def test_monitor_index_m0(tmp_path, monkeypatch):
     os.makedirs(os.path.dirname(feat_parquet), exist_ok=True)
     open(feat_parquet, "wb").write(b"")
 
-    # v2 月包布局: cache/bars/ym=202401.parquet + 邻置 meta
     from bt_studio.constant import RAW_PIT_VERSION as _RPV
     RAW_PIT_DIR = os.path.join(root, "cache", "bars", _RPV)
     os.makedirs(RAW_PIT_DIR, exist_ok=True)
@@ -96,7 +95,7 @@ def _mk_run_step(path, run_id, fps, n_succ=0):
 
 
 def test_review_roundtrip_and_features_join(tmp_path, monkeypatch):
-    monkeypatch.setattr("bt_studio.plugins.api_server.indexer.RESULT_ROOT", str(tmp_path))
+    monkeypatch.setattr("bt_studio.monitor.indexer.RESULT_ROOT", str(tmp_path))
     (tmp_path / "artifacts" / "runs" / "r1").mkdir(parents=True)
     (tmp_path / "artifacts" / "runs" / "r2").mkdir(parents=True)
     _mk_run_step(tmp_path / "artifacts" / "runs" / "r1" / "step_a.json", "r1", ["fpA"], n_succ=1)
@@ -112,27 +111,22 @@ def test_review_roundtrip_and_features_join(tmp_path, monkeypatch):
                        db_path=str(tmp_path / "cache" / "m.sqlite"))
     idx.scan_once()
 
-    # repeat_fingerprint 告警 (fpA 出现在 2 个 run)
     codes = [a["code"] for a in idx.alerts()]
     assert "repeat_fingerprint" in codes
 
-    # review 写入 → sqlite + result/llm/review/*.json 双落
     out = idx.post_review("feed0001", "promote_candidate", "strong", "alice")
     assert out["decision"] == "promote_candidate"
     assert (tmp_path / "artifacts" / "review" / "feed0001.json").exists()
     assert idx.review_mark("feed0001")["operator"] == "alice"
 
-    # features 列表 join review
     feats = idx.list_features()["items"]
     assert feats and feats[0]["feature_id"] == "feed0001"
     assert feats[0]["review"]["decision"] == "promote_candidate"
 
-    # 非法 decision 拒绝
     import pytest as _pytest
     with _pytest.raises(ValueError):
         idx.post_review("feed0001", "auto_promote", "", "")
 
-    # 详情: parquet 只 stat 不读 (造空文件即可索引)
     feat_dir = agent / "feed0001"
     feat_dir.mkdir()
     (feat_dir / "hf_featX_202401.parquet").write_bytes(b"")
@@ -143,7 +137,7 @@ def test_review_roundtrip_and_features_join(tmp_path, monkeypatch):
 
 def test_step_counts_from_history_lists(tmp_path, monkeypatch):
     """flywheel artifact 的 replay_buffer 是 history 列表, 计数应取 len 而非不存在的 n_success 键。"""
-    monkeypatch.setattr("bt_studio.plugins.api_server.indexer.RESULT_ROOT", str(tmp_path))
+    monkeypatch.setattr("bt_studio.monitor.indexer.RESULT_ROOT", str(tmp_path))
     rd = tmp_path / "artifacts" / "runs" / "r3"
     rd.mkdir(parents=True)
     (rd / "step_c.json").write_text(json.dumps({
@@ -159,13 +153,11 @@ def test_step_counts_from_history_lists(tmp_path, monkeypatch):
 
 
 def test_webhook_retry_on_failure_and_lru_bars_eviction(tmp_path, monkeypatch):
-    """验证 A1 (webhook 发送失败不置去重签名, 下轮重试) 与 A3 (LRU 驱逐覆盖 evals + bars 月包)。"""
     import urllib.request
 
     root = str(tmp_path)
     idx = MonitorIndex(result_root=root, db_path=os.path.join(root, "cache", "m.sqlite"))
 
-    # 1. A1: Webhook 第 1 次失败抛异常 -> _last_webhook_sig 未被设置 -> 第 2 次成功发送并设置签名
     monkeypatch.setenv("BT_STUDIO_ALERT_WEBHOOK", "http://127.0.0.1:9999/hook")
     attempts = []
 
@@ -192,11 +184,9 @@ def test_webhook_retry_on_failure_and_lru_bars_eviction(tmp_path, monkeypatch):
     assert len(attempts) == 2
     assert getattr(idx, "_last_webhook_sig", None) is not None
 
-    # 第 3 次相同告警命中去重签名，不再重复发送
     idx._notify_webhook_if_needed(sample_alerts)
     assert len(attempts) == 2
 
-    # 2. A3: LRU 驱逐同时清理 cache/evals/ 与 cache/bars/ 月包
     eval_file = os.path.join(root, "cache", "evals", "v2", "a.json")
     os.makedirs(os.path.dirname(eval_file), exist_ok=True)
     open(eval_file, "w").write("{}")
@@ -214,14 +204,12 @@ def test_webhook_retry_on_failure_and_lru_bars_eviction(tmp_path, monkeypatch):
 
 
 def test_clean_stale_tmp_files_and_multi_kind_watcher_scan(tmp_path):
-    """验证孤儿 .tmp 清理与 watcher 同目录单次 walk 多类型分发。"""
     import time
     from bt_studio.utils.io import clean_stale_tmp_files
-    from bt_studio.plugins.api_server.watcher import (
+    from bt_studio.server.watcher import (
         ArtifactKind, _scan_root_multi_kinds_sync,
     )
 
-    # 1. 陈旧 .tmp 清理 (仅删超过 max_age_s 的孤儿 tmp, 不误删新鲜写入中的 tmp)
     stale_tmp = tmp_path / "a.parquet.123.tmp"
     fresh_tmp = tmp_path / "b.parquet.456.tmp"
     stale_tmp.write_bytes(b"stale")
@@ -233,7 +221,6 @@ def test_clean_stale_tmp_files_and_multi_kind_watcher_scan(tmp_path):
     assert removed == 1
     assert not stale_tmp.exists() and fresh_tmp.exists()
 
-    # 2. Watcher 单次 walk 同时分发 MODEL / SCORE / COLLAPSE
     tune_root = tmp_path / "tune" / "task1"
     (tune_root / "models").mkdir(parents=True)
     (tune_root / "scores").mkdir(parents=True)
@@ -247,3 +234,24 @@ def test_clean_stale_tmp_files_and_multi_kind_watcher_scan(tmp_path):
     assert len(res[ArtifactKind.MODEL][0]) == 1
     assert len(res[ArtifactKind.SCORE][0]) == 1
     assert len(res[ArtifactKind.COLLAPSE][0]) == 1
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_model_drift_alert_surfaced_only_for_today(tmp_path):
+    root = str(tmp_path)
+    today = datetime.now().strftime("%Y%m%d")
+    path = os.path.join(root, "artifacts", "tune", "t1", "collapse", "drift_202403_f_abc123.json")
+    record = {"model_id": 202403, "median": {"n_trigger": 10.0},
+              "history": [{"day": 20261101, "n_trigger": 50, "drifted": ["n_trigger"]}]}
+    _write_json(path, record)
+    idx = MonitorIndex(result_root=root, db_path=os.path.join(root, "cache", "idx.sqlite"))
+
+    assert not [a for a in idx.alerts() if a["code"].startswith("model_drift")]  # 旧记录不报
+
+    record["history"].append({"day": int(today), "n_trigger": 50, "drifted": ["n_trigger"]})
+    _write_json(path, record)
+    [a] = [a for a in idx.alerts() if a["code"].startswith("model_drift")]
+    assert a["code"] == "model_drift_n_trigger" and a["level"] == "warn"
+    assert a["meta"]["model_id"] == 202403 and a["meta"]["day"] == int(today)

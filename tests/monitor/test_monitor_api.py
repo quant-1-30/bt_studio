@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""monitor v2 API/WS 行为锁定: 只读边界 + review 写路径 + WS snapshot/背压语义。"""
 
 import json
 import os
@@ -13,12 +12,12 @@ fastapi_tc = pytest.importorskip("fastapi.testclient")
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bt_studio.plugins.api_server import monitor_api as MA
+from bt_studio.server import monitor_api as MA
 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr("bt_studio.plugins.api_server.indexer.RESULT_ROOT", str(tmp_path))
+    monkeypatch.setattr("bt_studio.monitor.indexer.RESULT_ROOT", str(tmp_path))
     (tmp_path / "artifacts" / "usage").mkdir(parents=True)
     today_jsonl = tmp_path / "artifacts" / "usage" / "usage_20260101.jsonl"
     today_jsonl.write_text(json.dumps({
@@ -56,7 +55,7 @@ def test_review_post_writes_both_stores(client):
     assert (tmp / "artifacts" / "review" / "fpXYZ.json").exists()
     r2 = tc.post("/api/v2/review", json={
         "fingerprint": "fpXYZ", "decision": "auto_promote", "note": "", "operator": ""})
-    assert r2.status_code == 422  # 非法 decision 拒绝 — 写边界白名单
+    assert r2.status_code == 422 
 
 
 def test_ws_snapshot_and_auth(client, monkeypatch):
@@ -64,7 +63,6 @@ def test_ws_snapshot_and_auth(client, monkeypatch):
     with tc.websocket_connect("/ws/v2") as ws:
         msg = ws.receive_json()
         assert msg["type"] == "snapshot" and "data" in msg
-    # token 保护: 配置后未授权连接被拒 (close code 4401 → TestClient 抛 WebSocketDisconnect)
     monkeypatch.setenv("BT_STUDIO_API_TOKEN", "secret")
     with pytest.raises(Exception):
         with tc.websocket_connect("/ws/v2"):

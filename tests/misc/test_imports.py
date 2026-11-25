@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""全模块 import 冒烟测试。
 
-背景: 2026-09 重构将 pipeline 内的工具函数迁移至 bt_studio.utils 后,
-导致 `import bt_studio.tune` 在收集阶段即 ModuleNotFoundError,
-所有 pipeline/tune 测试整体不可用。本文件守护此类回归。
-"""
 
 import importlib
 
@@ -48,12 +43,24 @@ CORE_MODULES = [
     "bt_studio.engine",
     "bt_studio.engine.parser",
     "bt_studio.engine.executor",
-    # visual & monitor
+    # visual & monitor & server & live
     "bt_studio.visual",
     "bt_studio.visual.collapse",
     "bt_studio.visual.bkh",
     "bt_studio.visual._streamlit",
-    "bt_studio.plugins.api_server.indexer",
+    "bt_studio.monitor",
+    "bt_studio.monitor.indexer",
+    "bt_studio.server",
+    "bt_studio.server.main",
+    "bt_studio.server.monitor_api",
+    "bt_studio.server.watcher",
+    "bt_studio.trade",
+    "bt_studio.trade.engine",
+    "bt_studio.trade.strategy",
+    "bt_studio.trade.execution",
+    "bt_studio.trade.sizers",
+    "bt_studio.trade.scorer",
+    "bt_studio.trade.data",
 ]
 
 
@@ -62,11 +69,7 @@ def test_module_imports(module):
     importlib.import_module(module)
 
 
-# (2026-10-13) pipeline/utils.py deprecated shim 已删除, 对应一致性测试随之退役
-
-
 def test_tune_uses_default_config_ssot():
-    """tune.PRODUCTION_SEARCH_SPEC 必须是 default_config 的同一对象 (SSOT)。"""
     import bt_studio.default_config as dc
     import bt_studio.tune as tune_mod
 
@@ -74,7 +77,6 @@ def test_tune_uses_default_config_ssot():
 
 
 def test_utils_do_not_depend_on_high_layers():
-    """utils/* 不得反向依赖 engine/agent/tune/pipeline (分层硬规则)。"""
     import ast
     from pathlib import Path
 
@@ -92,7 +94,6 @@ def test_utils_do_not_depend_on_high_layers():
                         offenders.append(f"{path}: import {alias.name}")
     assert not offenders, "\n".join(offenders)
 
-    # pipeline/* 同样不得反向依赖 engine/agent/tune
     pipe_forbidden = ("bt_studio.engine", "bt_studio.agent", "bt_studio.tune")
     pipe_dir = Path(__file__).resolve().parent.parent.parent / "bt_studio" / "pipeline"
     pipe_offenders = []
@@ -107,7 +108,6 @@ def test_utils_do_not_depend_on_high_layers():
                         pipe_offenders.append(f"{path}: import {alias.name}")
     assert not pipe_offenders, "\n".join(pipe_offenders)
 
-    # tune.py 同样不得反向依赖 engine/agent (engine 编排 tune，禁止反向循环依赖)
     tune_path = Path(__file__).resolve().parent.parent.parent / "bt_studio" / "tune.py"
     tune_tree = ast.parse(tune_path.read_text(encoding="utf-8"))
     tune_offenders = [

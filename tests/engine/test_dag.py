@@ -18,8 +18,6 @@ def test_parser():
     hpo = parse_dag("wfo_hpo")
     assert prod.name == "wfo_production" and hpo.name == "wfo_hpo"
 
-    # 2026-10 重构: oos 节点从 train_paths 尾部自行推导 warmup 月,
-    # 独立 extract_warmup 节点已删除
     assert set(prod.graph.nodes) == {
         "macro", "extract_train", "extract_oos",
         "decay", "train_data", "tune", "update", "oos"}
@@ -249,7 +247,7 @@ def test_executor_resume_and_fail_fast():
 
 
 def test_config_strict():
-    from bt_studio.default_config import build_exp_config
+    from bt_studio.utils.config import build_exp_config
     try:
         build_exp_config({"invalid_flat_key": "x"})
         raise SystemExit("FAIL: flat key accepted")

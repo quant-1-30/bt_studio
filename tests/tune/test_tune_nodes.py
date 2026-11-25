@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""tune.py 节点级回归测试 (TDD red→green)。
 
-覆盖 2026-09 代码审计定位的逻辑 bug:
-    M8  node_check_decay_monthly 未拼接 warmup 月 → OOS 头部 macro 态
-        退化中性 (同文件 oos 节点已修的 train/serve skew 只修了一半)
-    L   node_tune_monthly(train_data=None) 直接 TypeError 而非优雅失败
-以及 2026-09 import 重构后的 SSOT 透传契约:
-    - build_ray_tune_search_space 的 spec → Ray Tune 空间映射
-    - 用户 search_spec 覆盖项经 search_spec_of(exp_config) 完整透传
-"""
 
 import datetime
 import json
@@ -21,7 +12,8 @@ import pytest
 
 import bt_studio.tune as tune_mod
 from bt_studio.compiler.ast import ast_fingerprint
-from bt_studio.default_config import PRODUCTION_SEARCH_SPEC, build_exp_config, search_spec_of
+from bt_studio.default_config import PRODUCTION_SEARCH_SPEC
+from bt_studio.utils.config import build_exp_config, search_spec_of
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +362,7 @@ def test_node_extract_requires_feature_col():
         tune_mod.node_extract_feature_monthly(
             [202401], {}, {"eps": 1e-8},
             {"op": "abs", "args": [{"col": "close"}]})
+
 
 
 def test_write_model_manifest_handoff_schema(tmp_path):

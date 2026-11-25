@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-"""tune.py 全链路 HPO 集成测试(无外部 RPC / 无真实行情依赖)。
-
-覆盖链路:
-    node_prepare_macro (cache-hit)
-    -> node_extract_feature_monthly (ast_recipe 编译 + 按月 PIT 落盘)
-    -> node_prepare_train (ray.put)
-    -> node_tune_monthly (Ray Tune + Optuna TPE + collapse/fANOVA/Pareto 门控)
-    -> node_check_decay_monthly
-    -> node_update_fsm_matrix
-    -> node_oos_inference_monthly (FSMPredictor)
-
-数据为合成分钟 bar: 在约 40% 的 (sid, day) 上植入一个日内容积形态(motif))
-并令这些样本的 T+1 早盘收益显著为正 —— HPO 应能从随机超参中恢复出该形态。
-
-同时内置三条未来函数(lookahead)回归断言:
-    1. compiler 因果守卫拒绝 shift(-N) / backward-fill 类 AST;
-    2. prepare_curves 对尾部 exclude_bars 做 NaN 屏蔽(特征时点 <= 入场 bar);
-    3. FSMPredictor 对"未来数据扰动不变": 篡改 T 日之后的全部数据,
-       T-1 日及以前的打分必须逐行一致。
-"""
 
 import os
 import sys
@@ -40,7 +20,7 @@ import bt_studio.tune as tune_mod
 import bt_studio.utils.diagnostics.hpo_check as hpo_check_mod
 import bt_studio.engine.executor as tasking_mod
 from bt_studio.compiler.ast import compile_ast, ASTCompilationError
-from bt_studio.default_config import build_exp_config
+from bt_studio.utils.config import build_exp_config
 from bt_studio.engine import parse_dag, run_dag
 from bt_studio.pipeline.inference import FSMPredictor
 from bt_studio.pipeline.patterns.astc import prepare_curves

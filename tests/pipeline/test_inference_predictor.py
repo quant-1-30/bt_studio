@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""pipeline.inference (FSMPredictor) 回归测试。
-
-覆盖 2026-09 代码审计定位的逻辑 bug:
-    L   FSMPredictor 依赖运行时 T1_rets, 配置漂移即 KeyError
-"""
 
 import numpy as np
 
@@ -23,12 +18,12 @@ def test_fsm_predictor_pins_ckpt_t1_rets():
         "decay_minutes": 15,
     }
     common = {
-        "T1_rets": {"exit_30m": 30},  # 运行时配置与训练不一致
+        "T1_rets": {"exit_30m": 30}, 
         "decay_minutes": 30,
         "dtw_window_frac": 0.1,
         "ranking_window": 5,
     }
-    pred = FSMPredictor(ckpt, common)  # 旧实现按运行时 key 取矩阵 -> KeyError
+    pred = FSMPredictor(ckpt, common)  
     assert pred.target_names == ["exit_5m"]
 
 
@@ -41,7 +36,6 @@ def test_fsm_predictor_falls_back_to_runtime_cfg():
             "P(exit_5m|Macro)": [[0.2] * 5] * 3,
             "state_return_vectors": {"exit_5m": [0.1] * 5},
         },
-        # 旧版 ckpt 无 T1_rets -> 回落运行时配置
     }
     common = {"T1_rets": {"exit_5m": 5}, "decay_minutes": 15,
               "dtw_window_frac": 0.1, "ranking_window": 5}
@@ -69,7 +63,7 @@ def test_fsm_predictor_fails_fast_on_missing_state_return_vectors():
 def test_dtw_subseq_objective_match_and_fsm_sizer():
     """Verify objective position-invariant subsequence DTW matching and FSMSizer risk-parity allocation."""
     from bt_studio.pipeline.patterns.astc import calc_min_subseq_dtw
-    from bt_studio.plugins.backtest.sizers import FSMSizer
+    from bt_studio.trade import FSMSizer
 
     # 1. Objective subsequence DTW: identical waveform at early vs late window yields identical distance
     m = 10
@@ -87,16 +81,44 @@ def test_dtw_subseq_objective_match_and_fsm_sizer():
     d_late = calc_min_subseq_dtw(curve_late, z_motif, 3, 5.0)
     assert abs(d_late - d_early) < 1e-12
 
-    # 2. FSMSizer: 波动尺度 sid_scale=0.04 的高波标的与 sid_scale=0.02 的低波标的同分时, 低波标的获得 2 倍风险平价权重
-    sizer = FSMSizer(stake=0.90, target_expected_ret=0.003, max_single_weight=0.80, vol_parity=True)
+    # 2. FSMSizer: pure fsm_score conviction weighting + tranche exit weights (zero sid_scale coupling)
+    sizer = FSMSizer(stake=0.90, target_expected_ret=0.003, max_single_weight=0.80, exit_weights=[0.5, 0.3, 0.2])
     topk_info = {
-        b"600000": {"fsm_score": 1.0, "expected_return": 0.003, "sid_scale": 0.02},
-        b"688001": {"fsm_score": 1.0, "expected_return": 0.003, "sid_scale": 0.04},
+        b"600000": {"fsm_score": 2.0, "expected_return": 0.003},
+        b"688001": {"fsm_score": 1.0, "expected_return": 0.003},
     }
     alloc = sizer._getsizing(topk_info, snapshot=None, isbuy=True)
     assert alloc[b"600000"] > alloc[b"688001"]
     assert abs(alloc[b"600000"] / alloc[b"688001"] - 2.0) < 1e-4
 
-    # 宏观期望 <= 0 时自动空仓防守
+    # Tranche exit ratios: stage 0 sells 0.5/1.0=0.5, stage 1 sells 0.3/0.5=0.6 of remaining, stage 2 sells 1.0 of remaining
+    from types import SimpleNamespace as NS
+    dummy_snap = NS(positions=[NS(sid=b"600000", size=1000)])
+    sizer.set_exit_stage(0)
+    assert abs(sizer._getsizing({}, dummy_snap, isbuy=False)[b"600000"] - 0.5) < 1e-6
+    sizer.set_exit_stage(1)
+    assert abs(sizer._getsizing({}, dummy_snap, isbuy=False)[b"600000"] - 0.6) < 1e-6
+    sizer.set_exit_stage(2)
+    assert abs(sizer._getsizing({}, dummy_snap, isbuy=False)[b"600000"] - 1.0) < 1e-6
+
     neg_info = {b"600000": {"fsm_score": 1.0, "expected_return": -0.001}}
     assert sizer._getsizing(neg_info, snapshot=None, isbuy=True)[b"600000"] == 0.0
+
+
+def test_fsm_sizer_max_single_weight_is_a_sparse_topk_concentration_cap():
+    from bt_studio.trade import FSMSizer
+
+    def alloc(n: int) -> dict:
+        info = {f"{i:06d}".encode(): {"fsm_score": 1.0, "expected_return": 0.003} for i in range(n)}
+        return FSMSizer(stake=0.90, max_single_weight=0.5)._getsizing(info, snapshot=None, isbuy=True)
+
+    # topk=1
+    a1 = alloc(1)
+    assert a1[b"000000"] == 0.5
+    # topk=2
+    a2 = alloc(2)
+    assert all(abs(w - 0.45) < 1e-9 for w in a2.values())
+    # topk=5
+    a5 = alloc(5)
+    assert all(abs(w - 0.18) < 1e-9 for w in a5.values())
+    assert abs(sum(a5.values()) - 0.90) < 1e-9

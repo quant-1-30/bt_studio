@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""bt_studio.default_config 回归测试: 顶层配置白名单与契约函数。"""
 
 import pytest
 
-from bt_studio.default_config import (
+from bt_studio.utils.config import (
     build_exp_config,
     common_params_of,
     resolve_feature_col,
@@ -34,15 +33,11 @@ def test_common_params_of_dual_key_names():
 
 
 def test_search_spec_of_falls_back_to_ssot():
-    """无覆盖时回落 SSOT 基准对象; 传裸 dict 时原样返回 (归一化由
-    build_exp_config 完成)。"""
     from bt_studio.default_config import PRODUCTION_SEARCH_SPEC
 
     assert search_spec_of({}) is PRODUCTION_SEARCH_SPEC
-    # 裸 exp_config (未经 build_exp_config): 原样透传
     assert search_spec_of({"search_spec": {"downsample": {"type": "choice", "values": [3, 5]}}}) == {
         "downsample": {"type": "choice", "values": [3, 5]}}
-    # 标准入口: 旧列表写法被归一化, 未覆盖参数回落基准
     spec = search_spec_of(build_exp_config({"search_spec": {"downsample": {"type": "choice", "values": [3, 5]}}}))
     assert spec["downsample"] == {"type": "choice", "values": [3, 5]}
     assert spec["threshold_r"] == PRODUCTION_SEARCH_SPEC["threshold_r"]
@@ -57,11 +52,10 @@ def test_search_spec_rejects_execution_control_keys():
 
 
 def test_build_exp_config_replaces_dict_params_atomically():
-    """覆盖 T1_rets 等字典型参数时必须原子替换, 不得残留默认 exit_15m 等子键。"""
     cfg = build_exp_config({"common_params": {"T1_rets": {"exit_5m": 5}}})
     assert cfg["common_params"]["T1_rets"] == {"exit_5m": 5}
     assert cfg["common_params"]["min_excess_ret"] == {
-        "exit_5m": 5e-4,
-        "exit_15m": 1e-3,
-        "exit_30m": 1.5e-3,
+        "exit_5m": 2e-3,
+        "exit_15m": 2.5e-3,
+        "exit_30m": 3e-3,
     }
