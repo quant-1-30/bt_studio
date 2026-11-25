@@ -8,21 +8,24 @@ This directory contains server-side plugins that are part of the core `bt_studio
 bt_studio/
 ├── pipeline/ + tune.py     # core compute (agent, features, diagnostics)
 ├── orchestrator/           # core HPO serial queue (AsyncTaskManager) — NOT a plugin
-└── plugins/
-    ├── api_server/         # thin resident gateway: polls result dirs → WS/REST push
-    └── xtp_client/         # ZMQ trading client — zero bt_studio.* imports (true plugin)
+├── trade/                   # 实盘交易引擎 — imports core, NOT a plugin (见 bt_studio/trade/)
+├── server/ + monitor/      # 网关 + 产物监控 — imports core, NOT a plugin (见 bt_studio/server/)
+└── plugins/                # zero-core-dep transport/backend adapters (本目录)
+    ├── zmq_client/         # generic ZMQ transport (ZmqClient + codec) — zero bt_studio.* imports
+    └── xtp/                # XTP-specific quote cache (TopkQuoteCache) — zero bt_studio.* imports
 ```
 
 Dependency rules (enforced by `tests/test_architecture.py`):
 
 - `bt_studio.{pipeline,tune,orchestrator,visual,utils}` must NOT import `bt_studio.plugins.*`
-- `plugins.api_server` may import core, must NOT import `xtp_client`
-- `plugins.xtp_client` must have zero `bt_studio` imports
+- `plugins.zmq_client` and `plugins.xtp` must have zero `bt_studio` imports
 
 ## Available Plugins
 
-- **`api_server/`**: FastAPI HTTP + WebSocket gateway. **Resident results-watching service**: polls `result/tune/{models,scores,collapse}`, `result/llm/runs` and `result/features` every N seconds (`BT_STUDIO_WATCH_INTERVAL`, default 5s), analyzes new artifacts and pushes them to iOS/Qt clients. It no longer hosts HPO execution — task submission lives in-process in `bt_studio.orchestrator` (scripts call `get_task_manager()` directly).
-- **`xtp_client/`**: ZMQ-based trading client for live order execution. Fully self-contained (asyncio + zmq + codec only) — deliberately kept as the reference shape of a "real plugin".
+- **`zmq_client/`**: Generic ZeroMQ transport (`ZmqClient` + `codec`) — a transport-agnostic DEALER client speaking the request/response protocol. Fully self-contained (asyncio + zmq + codec only). Backend-specific logic (XTP today) is NOT here.
+- **`xtp/`**: XTP-specific market-data plumbing (`TopkQuoteCache`, `data_time_to_bar_idx`, `XTP_EXCHANGE_*`). Coupled only to the XTP quote schema; consumes any `ZmqClient`-like transport.
+
+> 说明: 原 `plugins/api_server/` 已迁出至 `bt_studio/server/`(网关)+ `bt_studio/monitor/`(MonitorIndex),原 `plugins/live/` 已迁出至 `bt_studio/trade/`。下述 API 契约描述 `bt_studio/server/` 网关。
 
 ## Client Applications (Separated)
 
