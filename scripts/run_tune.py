@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 import mlflow
 
 from bt_studio.agent.flywheel import load_viable_features
-from bt_studio.default_config import build_exp_config
+from bt_studio.utils.config import build_exp_config
 from bt_studio.engine import parse_dag, run_dag
 
 
